@@ -70,7 +70,7 @@ teardown() {
     # experiment before sample (alphabetical tiebreak on equal counts).
     run_cgi "/" ""
     [ "$status" -eq 0 ]
-    [[ "$output" =~ 'data-count="3"><a href="fossci/browse?type=person"' ]]
+    [[ "$output" =~ 'data-count="3"><a href="browse?type=person"' ]]
     before_experiment="${output%%'type=experiment"'*}"
     [[ "$before_experiment" == *'type=person"'* ]]
     before_sample="${output%%'type=sample"'*}"
@@ -88,6 +88,24 @@ teardown() {
     run_cgi "/browse" "type=sample"
     [ "$status" -eq 0 ]
     [[ "$output" =~ "LOT-42" ]]
+}
+
+@test "/browse and /detail links are plain relative paths, not tied to any particular mount point" {
+    # Regression: several links here used to carry a leftover
+    # "fossci/" path segment from an old mount-point convention this
+    # app no longer uses -- broken under any real deployment, since
+    # there's no route at "fossci/browse" etc. Every link/action/src
+    # this app renders for its own pages must be a plain relative
+    # reference (or none at all), so it resolves correctly no matter
+    # what path prefix a web server mounts this app under.
+    run_cgi "/browse" "type=sample"
+    [[ "$output" =~ 'href="detail?type=sample' ]]
+    [[ ! "$output" =~ "fossci/detail" ]]
+    [[ ! "$output" =~ "fossci/browse" ]]
+
+    run_cgi "/detail" "type=sample&entity_id=3"
+    [[ "$output" =~ 'href="browse?type=sample"' ]]
+    [[ ! "$output" =~ "fossci/browse" ]]
 }
 
 @test "/browse rejects a 'type' shaped like a stacked-SQL-statement injection" {
@@ -192,7 +210,7 @@ EOF
     run_cgi "/view" "view_name=samples_with_type"
     [ "$status" -eq 0 ]
     [[ "$output" =~ "Register new" ]]
-    [[ "$output" =~ "register?type=sample" ]]
+    [[ "$output" =~ 'href="register?type=sample"' ]]
 }
 
 @test "/view refuses to run an unapproved view" {

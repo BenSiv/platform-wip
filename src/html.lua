@@ -381,7 +381,7 @@ function html.render(entity_type, layout_json, nonce)
         <div class="fossci-header">
             <h2>Register %s</h2>
             <p>Fill out the sheet. Fields marked with <span class="req-dot">*</span> are required.</p>
-            <p><a href="fossci/browse?type=%s">Browse existing %s entities &rarr;</a></p>
+            <p><a href="browse?type=%s">Browse existing %s entities &rarr;</a></p>
         </div>
 
         <div class="fossci-table-wrapper">
@@ -683,9 +683,10 @@ end
 -- human-readable name -- it renders the id as a real, styled link to
 -- the referenced entity's own detail page instead of a disconnected
 -- bare number, matching how the row's own id already links out in
--- render_browse below. "fossci/detail..." (no leading slash) is
--- intentional -- see render_browse's own identical link for why
--- (relative to this page's own <base>, which lacks a trailing slash).
+-- render_browse below. The link is relative ("detail...", no leading
+-- slash) so it resolves correctly regardless of where this app is
+-- mounted -- every route lives at the same top-level directory, so a
+-- plain relative reference from any of them reaches any other.
 -- Two sources for a human-readable label, tried in priority order:
 --   1. The builtin "name" column (schema.lua's BUILTIN_COLUMNS) -- a
 --      real name assigned by an external source like Benchling (e.g. a
@@ -786,8 +787,8 @@ function render_reference_value(db_path, ref_entity_type, value)
     -- same popover mechanism (html.popover_css()/popover_js()) used for
     -- Data-index row counts, here in its lazy-fetch form since
     -- precomputing every row's preview server-side would be wasteful.
-    preview_src = "fossci/api/preview?type=" .. escaped_type .. "&entity_id=" .. escaped_id
-    return "<a href=\"fossci/detail?type=" .. escaped_type .. "&entity_id=" .. escaped_id ..
+    preview_src = "api/preview?type=" .. escaped_type .. "&entity_id=" .. escaped_id
+    return "<a href=\"detail?type=" .. escaped_type .. "&entity_id=" .. escaped_id ..
         "\" class=\"fossci-entity-ref fossci-popover-trigger\" data-fossci-popover-src=\"" .. preview_src ..
         "\" tabindex=\"0\">" .. link_text .. "<span class=\"fossci-popover\"></span></a>"
 end
@@ -823,7 +824,7 @@ function html.render_browse(db_path, entity_type, layout, rows, page, page_size,
         if own_label != nil then
             id_link_text = html_escape(own_label)
         end
-        cells = "<td><a href=\"fossci/detail?type=" .. escaped_type .. "&entity_id=" .. tostring(row.id) ..
+        cells = "<td><a href=\"detail?type=" .. escaped_type .. "&entity_id=" .. tostring(row.id) ..
             "\">" .. id_link_text .. "</a></td>"
         for _, field in ipairs(layout.fields) do
             cells = cells .. "<td>" .. display_field_value(db_path, field, row[field.name]) .. "</td>"
@@ -847,11 +848,11 @@ function html.render_browse(db_path, entity_type, layout, rows, page, page_size,
             " of " .. tostring(total) .. "</span>"
         pager = pager .. "<span class=\"fossci-pager-links\">"
         if page > 1 then
-            pager = pager .. "<a href=\"fossci/browse?type=" .. escaped_type .. "&page=" .. tostring(page - 1) .. "\">&laquo; Prev</a>"
+            pager = pager .. "<a href=\"browse?type=" .. escaped_type .. "&page=" .. tostring(page - 1) .. "\">&laquo; Prev</a>"
         end
         pager = pager .. "<span>Page " .. tostring(page) .. " of " .. tostring(last_page) .. "</span>"
         if page < last_page then
-            pager = pager .. "<a href=\"fossci/browse?type=" .. escaped_type .. "&page=" .. tostring(page + 1) .. "\">Next &raquo;</a>"
+            pager = pager .. "<a href=\"browse?type=" .. escaped_type .. "&page=" .. tostring(page + 1) .. "\">Next &raquo;</a>"
         end
         pager = pager .. "</span></div>"
     end
@@ -927,7 +928,7 @@ function html.render_browse(db_path, entity_type, layout, rows, page, page_size,
                 <h2>Browse %s</h2>
                 <p>%d registered</p>
             </div>
-            <a class="btn btn-primary" href="fossci/register?type=%s">+ Register new</a>
+            <a class="btn btn-primary" href="register?type=%s">+ Register new</a>
         </div>
         %s
         %s
@@ -1031,7 +1032,7 @@ function html.render_detail(db_path, entity_type, layout, row, history, nonce)
     <div class="fossci-container">
         <div class="fossci-header">
             <h2>%s %s</h2>
-            <a href="fossci/browse?type=%s">&larr; Back to browse</a>
+            <a href="browse?type=%s">&larr; Back to browse</a>
         </div>
 
         <div class="fossci-detail-fields">
@@ -1102,7 +1103,7 @@ function html.render_view(view_def, rows, param_value)
     register_link = ""
     if view_def.entity_type != nil then
         register_link = string.format(
-            "<a class=\"btn btn-primary\" href=\"fossci/register?type=%s\">+ Register new</a>",
+            "<a class=\"btn btn-primary\" href=\"register?type=%s\">+ Register new</a>",
             html_escape(view_def.entity_type)
         )
     end
@@ -1315,12 +1316,12 @@ function html.diagram_js(nonce)
         node.addEventListener('mouseleave', clear);
         node.addEventListener('blur', clear);
         node.addEventListener('click', function(){
-            window.location.href = 'fossci/browse?type=' + encodeURIComponent(type);
+            window.location.href = 'browse?type=' + encodeURIComponent(type);
         });
         node.addEventListener('keydown', function(e){
             if(e.key === 'Enter' || e.key === ' '){
                 e.preventDefault();
-                window.location.href = 'fossci/browse?type=' + encodeURIComponent(type);
+                window.location.href = 'browse?type=' + encodeURIComponent(type);
             }
         });
     });
@@ -1395,7 +1396,7 @@ function html.render_index(entity_types, edges, show_sql_widget, nonce)
         if row.count != nil then
             row_count = row.count
         end
-        items = items .. "<li data-count=\"" .. tostring(row_count) .. "\"><a href=\"fossci/browse?type=" .. escaped_name .. "\" class=\"" .. trigger_class .. "\" tabindex=\"0\">" .. escaped_name ..
+        items = items .. "<li data-count=\"" .. tostring(row_count) .. "\"><a href=\"browse?type=" .. escaped_name .. "\" class=\"" .. trigger_class .. "\" tabindex=\"0\">" .. escaped_name ..
             count_popover .. "</a></li>"
     end
 
@@ -1417,7 +1418,7 @@ function html.render_index(entity_types, edges, show_sql_widget, nonce)
     if show_sql_widget == true then
         sql_widget = """
     <div class="fossci-container">
-        <iframe src="fossci/sql" style="width:100%;height:520px;border:0;border-radius:var(--fossci-radius-md, 12px);"></iframe>
+        <iframe src="sql" style="width:100%;height:520px;border:0;border-radius:var(--fossci-radius-md, 12px);"></iframe>
     </div>
 """
     end
@@ -1425,7 +1426,7 @@ function html.render_index(entity_types, edges, show_sql_widget, nonce)
     diagram_html = html.render_relation_diagram(entity_types, edges)
 
     return string.format("""
-<div class="fossil-doc" data-title="fossci">
+<div class="fossil-doc" data-title="Overview">
     <style>
 %s
         .fossci-header { margin-bottom: 20px; border-bottom: 1px solid var(--fossci-bg-2, #f1f5f9); padding-bottom: 16px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
@@ -1495,7 +1496,7 @@ function html.render_templates_list(entries)
             end
             escaped_label = html_escape(label)
             escaped_desc = html_escape(description)
-            items = items .. "<li><a href=\"/ext/fossci/template?template_name=" .. escaped_name .. "\">" ..
+            items = items .. "<li><a href=\"template?template_name=" .. escaped_name .. "\">" ..
                 escaped_label .. "</a><p>" .. escaped_desc .. "</p></li>"
         end
     end
@@ -1531,7 +1532,7 @@ function html.render_templates_list(entries)
     <div class="fossci-container">
         <div class="fossci-header">
             <h2>Entry templates</h2>
-            <p>Pick a template to create a new wiki page from it, or <a href="/ext/fossci/wiki-new">start a blank page</a>.</p>
+            <p>Pick a template to see its rendered Markdown.</p>
         </div>
         %s
     </div>
@@ -1558,22 +1559,6 @@ function html.render_template(def, rendered_markdown, nonce)
     escaped_desc = html_escape(description)
     escaped_body = html_escape(rendered_markdown)
 
-    -- Real bug found in production: this input had no default value at
-    -- all (a placeholder is greyed-out hint text, not an actual value --
-    -- it contributes nothing once submitted), so creating a page from a
-    -- template gave zero guidance on this deployment's own naming
-    -- convention (e.g. Celleste-Bio's "<top folder>/<entry name>" path
-    -- style, see software's convert_entries_to_wiki.py -- fossci itself
-    -- has no concept of that convention, so it can't be hardcoded here).
-    -- default_path is an optional field a template definition can
-    -- declare for exactly this; falls back to the template's own label
-    -- if absent, which is still strictly better than an empty field.
-    default_path = def.default_path
-    if default_path == nil then
-        default_path = label
-    end
-    escaped_default_path = html_escape(default_path)
-
     return string.format("""
 <div class="fossil-doc" data-title="Template: %s">
     <style>
@@ -1595,221 +1580,18 @@ function html.render_template(def, rendered_markdown, nonce)
             background: var(--fossci-bg, #f8fafc);
             color: var(--fossci-input-text, #1e293b);
         }
-        .fossci-create-block {
-            margin-top: 16px;
-            padding: 16px;
-            border: 1px solid var(--fossci-border, #e2e8f0);
-            border-radius: var(--fossci-radius-md, 12px);
-            background: var(--fossci-bg, #f8fafc);
-            display: flex;
-            flex-wrap: wrap;
-            align-items: center;
-            gap: 10px;
-        }
-        .fossci-create-block label { font-weight: 600; font-size: 0.9rem; }
-        .fossci-create-block input[type="text"] {
-            flex: 1 1 260px;
-            padding: 8px 10px;
-            border: 1px solid var(--fossci-border, #e2e8f0);
-            border-radius: var(--fossci-radius-sm, 8px);
-            font-size: 0.9rem;
-            color: var(--fossci-input-text, #1e293b);
-        }
-        .fossci-create-block button {
-            padding: 8px 14px;
-            border: none;
-            border-radius: var(--fossci-radius-sm, 8px);
-            background: var(--fossci-accent, #4f46e5);
-            color: #fff;
-            font-weight: 600;
-            cursor: pointer;
-            transition: var(--fossci-transition, all 0.2s cubic-bezier(0.4, 0, 0.2, 1));
-        }
-        .fossci-create-block button:hover { opacity: 0.9; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
-        .fossci-create-block button:active { transform: scale(0.96); }
-        .fossci-create-status { flex-basis: 100%%; font-size: 0.85rem; color: var(--fossci-muted, #64748b); }
-        .fossci-create-status.error { color: #991b1b; }
     </style>
     <div class="fossci-container">
         <div class="fossci-header">
             <h2>%s</h2>
             <p>%s</p>
-            <p><a href="/ext/fossci/templates">&larr; All templates</a></p>
+            <p><a href="templates">&larr; All templates</a></p>
         </div>
-        <p>Edit the snippet below if needed, then create a new wiki page from it directly.</p>
-        <textarea class="fossci-snippet" id="fossci-template-content">%s</textarea>
-        <div class="fossci-create-block">
-            <label for="fossci-new-page-name">New page name</label>
-            <input type="text" id="fossci-new-page-name" value="%s" placeholder="e.g. Experiment 512 - Fermentation Run">
-            <button type="button" id="fossci-create-from-template">Create wiki page</button>
-            <div class="fossci-create-status" id="fossci-create-status"></div>
-        </div>
+        <p>Select-all and copy the rendered snippet below.</p>
+        <textarea class="fossci-snippet" id="fossci-template-content" readonly>%s</textarea>
     </div>
-    <script nonce="%s">
-    (function(){
-        var btn = document.getElementById('fossci-create-from-template');
-        var nameInput = document.getElementById('fossci-new-page-name');
-        var content = document.getElementById('fossci-template-content');
-        var status = document.getElementById('fossci-create-status');
-        btn.addEventListener('click', function(){
-            var name = nameInput.value.trim();
-            status.className = 'fossci-create-status';
-            if(!name){
-                status.className = 'fossci-create-status error';
-                status.textContent = 'Enter a page name first.';
-                return;
-            }
-            status.textContent = 'Creating...';
-            btn.disabled = true;
-            fetch('/ext/fossci/wiki-create', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({name: name, content: content.value, mimetype: 'text/x-markdown'})
-            }).then(function(resp){ return resp.json(); }).then(function(data){
-                if(data && data.success){
-                    window.location.href = '/wiki?name=' + encodeURIComponent(name);
-                }else{
-                    btn.disabled = false;
-                    status.className = 'fossci-create-status error';
-                    status.textContent = (data && data.error) || 'Failed to create page.';
-                }
-            }).catch(function(err){
-                btn.disabled = false;
-                status.className = 'fossci-create-status error';
-                status.textContent = 'Request failed: ' + (err && err.message ? err.message : err);
-            });
-        });
-    })();
-    </script>
 </div>
-""", escaped_label, fossci_container_css(900), escaped_label, escaped_desc, escaped_body, escaped_default_path, nonce)
-end
-
--- Blank "create a new wiki page" form -- fills the "Notebook has no new
--- page entry point" gap without reimplementing Fossil's own wiki editor;
--- this just collects a name + optional starting content and hands off
--- to the same /wiki-create route the template page uses, then lands on
--- Fossil's native page view (which links to its own /wikiedit for
--- further editing).
-function html.render_wiki_new(err, prefill_name, prefill_content, nonce)
-    if nonce == nil then
-        nonce = ""
-    end
-    escaped_name = ""
-    if prefill_name != nil then
-        escaped_name = html_escape(prefill_name)
-    end
-    escaped_content = ""
-    if prefill_content != nil then
-        escaped_content = html_escape(prefill_content)
-    end
-    error_html = ""
-    if err != nil and err != "" then
-        error_html = "<p class=\"fossci-create-status error\">" .. html_escape(err) .. "</p>"
-    end
-
-    return string.format("""
-<div class="fossil-doc" data-title="New wiki page">
-    <style>
-%s
-        .fossci-header { margin-bottom: 20px; border-bottom: 1px solid var(--fossci-bg-2, #f1f5f9); padding-bottom: 16px; }
-        .fossci-header h2 { margin: 0 0 6px 0; font-size: 1.6rem; font-weight: 700; color: var(--fossci-heading, #0f172a); letter-spacing: -0.02em; }
-        .fossci-header p { color: var(--fossci-muted, #64748b); margin: 0; font-size: 0.95rem; }
-        .fossci-header a { color: var(--fossci-accent, #4f46e5); text-decoration: none; font-weight: 600; }
-        .fossci-header a:hover { text-decoration: underline; }
-        .fossci-field { margin-bottom: 14px; }
-        .fossci-field label { display: block; font-weight: 600; font-size: 0.9rem; margin-bottom: 6px; }
-        .fossci-field input[type="text"] {
-            width: 100%%;
-            box-sizing: border-box;
-            padding: 10px 12px;
-            border: 1px solid var(--fossci-border, #e2e8f0);
-            border-radius: var(--fossci-radius-sm, 8px);
-            font-size: 0.95rem;
-            color: var(--fossci-input-text, #1e293b);
-        }
-        .fossci-field textarea {
-            width: 100%%;
-            min-height: 320px;
-            box-sizing: border-box;
-            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-            font-size: 0.88rem;
-            padding: 16px;
-            border: 1px solid var(--fossci-border, #e2e8f0);
-            border-radius: var(--fossci-radius-md, 12px);
-            background: var(--fossci-bg, #f8fafc);
-            color: var(--fossci-input-text, #1e293b);
-        }
-        .fossci-create-status { font-size: 0.9rem; margin: 10px 0; color: var(--fossci-muted, #64748b); }
-        .fossci-create-status.error { color: #991b1b; }
-        #fossci-wiki-new-submit {
-            padding: 10px 18px;
-            border: none;
-            border-radius: var(--fossci-radius-sm, 8px);
-            background: var(--fossci-accent, #4f46e5);
-            color: #fff;
-            font-weight: 600;
-            cursor: pointer;
-            transition: var(--fossci-transition, all 0.2s cubic-bezier(0.4, 0, 0.2, 1));
-        }
-        #fossci-wiki-new-submit:hover { opacity: 0.9; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
-        #fossci-wiki-new-submit:active { transform: scale(0.96); }
-    </style>
-    <div class="fossci-container">
-        <div class="fossci-header">
-            <h2>New wiki page</h2>
-            <p>Or start from an <a href="/ext/fossci/templates">entry template</a> instead.</p>
-        </div>
-        %s
-        <div class="fossci-field">
-            <label for="fossci-wiki-new-name">Page name</label>
-            <input type="text" id="fossci-wiki-new-name" value="%s" placeholder="e.g. Notebook/2026-07-15 Fermentation Notes">
-        </div>
-        <div class="fossci-field">
-            <label for="fossci-wiki-new-content">Content (Markdown, optional)</label>
-            <textarea id="fossci-wiki-new-content">%s</textarea>
-        </div>
-        <div id="fossci-wiki-new-status" class="fossci-create-status"></div>
-        <button type="button" id="fossci-wiki-new-submit">Create page</button>
-    </div>
-    <script nonce="%s">
-    (function(){
-        var btn = document.getElementById('fossci-wiki-new-submit');
-        var nameInput = document.getElementById('fossci-wiki-new-name');
-        var content = document.getElementById('fossci-wiki-new-content');
-        var status = document.getElementById('fossci-wiki-new-status');
-        btn.addEventListener('click', function(){
-            var name = nameInput.value.trim();
-            status.className = 'fossci-create-status';
-            if(!name){
-                status.className = 'fossci-create-status error';
-                status.textContent = 'Enter a page name first.';
-                return;
-            }
-            status.textContent = 'Creating...';
-            btn.disabled = true;
-            fetch('/ext/fossci/wiki-create', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({name: name, content: content.value, mimetype: 'text/x-markdown'})
-            }).then(function(resp){ return resp.json(); }).then(function(data){
-                if(data && data.success){
-                    window.location.href = '/wiki?name=' + encodeURIComponent(name);
-                }else{
-                    btn.disabled = false;
-                    status.className = 'fossci-create-status error';
-                    status.textContent = (data && data.error) || 'Failed to create page.';
-                }
-            }).catch(function(err){
-                btn.disabled = false;
-                status.className = 'fossci-create-status error';
-                status.textContent = 'Request failed: ' + (err && err.message ? err.message : err);
-            });
-        });
-    })();
-    </script>
-</div>
-""", fossci_container_css(900), error_html, escaped_name, escaped_content, nonce)
+""", escaped_label, fossci_container_css(900), escaped_label, escaped_desc, escaped_body)
 end
 
 -- Ad-hoc SQL console (Setup/Admin only -- see cgi.lua's /sql route):
@@ -1935,7 +1717,7 @@ function html.render_sql(db_path, sql_text, column_names, rows, err, ref_columns
             <button type="button" class="btn btn-secondary" id="fossci-nlsql-btn">Generate query</button>
             <span class="fossci-nlsql-status" id="fossci-nlsql-status"></span>
         </div>
-        <form method="get" action="fossci/sql">
+        <form method="get" action="sql">
             <textarea class="fossci-sql-input" id="fossci-sql-query" name="q" placeholder="SELECT * FROM sample LIMIT 20;">%s</textarea>
             <button class="btn btn-primary" type="submit">Run</button>
         </form>
@@ -1944,134 +1726,6 @@ function html.render_sql(db_path, sql_text, column_names, rows, err, ref_columns
 </div>
 %s
 """, fossci_container_css(1100), fossci_button_css(), html.popover_css(), escaped_sql, result_html, html.popover_js(nonce))
-end
-
--- Percent-encodes everything except unreserved characters and "/" --
--- wiki page names following the "<folder>/<entry>" convention (see
--- html.render_notebook_tree) keep their literal slashes in the URL for
--- readability; Fossil's own `name` query-param parsing decodes
--- percent-encoding either way, so keeping "/" literal vs. encoding it as
--- %2F makes no functional difference, just a more readable URL.
-function url_encode_keep_slash(s)
-    return (string.gsub(s, "[^%w%-%.%_%~/]", function(c)
-        return string.format("%%%02X", string.byte(c))
-    end))
-end
-
--- Builds a nested {children = {name -> node}, entries = {{leaf, full_name}}}
--- tree from a flat list of wiki page names, splitting each on "/" --
--- e.g. "Celleste R&D/Experiments/test_experiment" becomes a "Celleste
--- R&D" folder containing an "Experiments" folder containing one entry.
--- A page name with no "/" at all becomes a root-level entry, not a
--- folder. `prefix`, if given, keeps only names equal to it or starting
--- with "prefix/" -- e.g. a deployment might scope this to just the
--- migrated-content subtree, filtering out unrelated top-level pages
--- (Home, System, ...) that don't use this convention at all.
-function build_notebook_tree(page_names, prefix)
-    root = {children = {}, entries = {}}
-    for _, name in ipairs(page_names) do
-        included = false
-        if prefix == nil or prefix == "" then
-            included = true
-        elseif name == prefix then
-            included = true
-        elseif string.sub(name, 1, string.len(prefix) + 1) == (prefix .. "/") then
-            included = true
-        end
-        if included then
-            segments = {}
-            for seg in string.gmatch(name, "[^/]+") do
-                table.insert(segments, seg)
-            end
-            n = #segments
-            if n > 0 then
-                leaf = segments[n]
-                node = root
-                for i = 1, n - 1 do
-                    seg = segments[i]
-                    if node.children[seg] == nil then
-                        node.children[seg] = {children = {}, entries = {}}
-                    end
-                    node = node.children[seg]
-                end
-                table.insert(node.entries, {leaf = leaf, full_name = name})
-            end
-        end
-    end
-    return root
-end
-
-function render_notebook_tree_node(node, depth)
-    folder_names = {}
-    for name, _ in pairs(node.children) do
-        table.insert(folder_names, name)
-    end
-    table.sort(folder_names)
-
-    parts = {}
-    for _, name in ipairs(folder_names) do
-        child = node.children[name]
-        open_attr = ""
-        if depth == 0 then
-            open_attr = " open"
-        end
-        table.insert(parts, "<details" .. open_attr .. "><summary>" .. html_escape(name) .. "</summary>")
-        table.insert(parts, render_notebook_tree_node(child, depth + 1))
-
-        entries = child.entries
-        table.sort(entries, function(a, b) return string.lower(a.leaf) < string.lower(b.leaf) end)
-        for _, entry in ipairs(entries) do
-            table.insert(parts, "<div class=\"entry-link\"><a href=\"/wiki?name=" ..
-                url_encode_keep_slash(entry.full_name) .. "\">" .. html_escape(entry.leaf) .. "</a></div>")
-        end
-        table.insert(parts, "</details>")
-    end
-    return table.concat(parts, "\n")
-end
-
--- Generic, deployment-agnostic "folder tree" view over Fossil's live
--- wiki page list -- see doc/task-management.md-style reasoning: this
--- replaces what used to be a one-time static snapshot (a real bug found
--- in production -- new pages never appeared on it, no matter their
--- name, since it was generated once by a batch migration script and
--- never regenerated). Rendered fresh on every request instead, directly
--- against `wiki.list_pages`, so it can never go stale. `title` and
--- `prefix` are both deployment choices -- fossci itself has no opinion
--- on what a repository's top-level folder convention should be named.
-function html.render_notebook_tree(page_names, prefix, title, nonce)
-    if title == nil then
-        title = "Notebook"
-    end
-    if nonce == nil then
-        nonce = ""
-    end
-    tree = build_notebook_tree(page_names, prefix)
-    tree_html = render_notebook_tree_node(tree, 0)
-    if tree_html == "" then
-        tree_html = "<p class=\"fossci-empty\">No entries yet.</p>"
-    end
-
-    return string.format("""
-<div class="fossil-doc" data-title="%s">
-    <style>
-%s
-        .fossci-empty {
-            padding: 32px;
-            text-align: center;
-            color: var(--fossci-muted, #64748b);
-            background: var(--fossci-bg, #f8fafc);
-            border: 1px dashed var(--fossci-border, #e2e8f0);
-            border-radius: var(--fossci-radius-md, 12px);
-        }
-    </style>
-    <div class="fossci-container">
-        <h1>%s</h1>
-        <div class="fossci-notebook-tree">
-        %s
-        </div>
-    </div>
-</div>
-""", html_escape(title), fossci_container_css(900), html_escape(title), tree_html)
 end
 
 return html

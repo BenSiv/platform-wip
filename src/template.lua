@@ -113,17 +113,18 @@ function template.all(templates_dir)
     return result
 end
 
--- Builds the registration-table link exactly the way
--- convert_entries_to_wiki.py does for real entries -- minus `entry=`,
--- since a template is rendered before the wiki page (and so the entry
--- identity) exists. The user can add their own `&entry=...` once the
--- page is created, if they want that provenance link.
+-- Builds the registration-table link for a rendered template snippet.
+-- Root-relative (assumes the app is mounted at "/") since this
+-- Markdown is meant to be copied out and pasted somewhere else
+-- entirely (a document, a message) -- unlike every other link this
+-- app renders for its own pages, there's no "current page" to resolve
+-- a relative reference against here.
 function render_registration_table(section)
     label = section.label
     if label == nil then
         label = section.entity_type
     end
-    href = "/ext/fossci/register?type=" .. section.entity_type
+    href = "/register?type=" .. section.entity_type
     if section.columns != nil and #section.columns > 0 then
         href = href .. "&columns=" .. table.concat(section.columns, ",")
     end

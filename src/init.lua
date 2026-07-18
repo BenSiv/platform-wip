@@ -1,8 +1,6 @@
--- `fossci init`: creates the local store (.fossci/ with the ledger
--- database) in the current directory. Standalone for v0 -- the
--- Fossil-backed sync for schemas/ and extensions/ (doc/architecture.md,
--- "Fossil integration") lands in M1; until then, this just needs
--- somewhere on disk to keep the ledger.
+-- `platform init`: creates the local store (.store/, holding the
+-- database) plus the schemas/extensions/views/templates directories in
+-- the current directory.
 
 paths = require("paths")
 config = require("config")
