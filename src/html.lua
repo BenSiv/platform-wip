@@ -1375,6 +1375,114 @@ function html.render_login(error_message, nonce)
 """, fossci_container_css(800), fossci_button_css(), error_html)
 end
 
+-- Minimal admin-only user management page -- Admin ("a") capability
+-- only, gated in cgi.lua, not exposed via the normal nav. Each row
+-- gets its own small forms (capabilities, password, archive/unarchive)
+-- rather than one big multi-field form, so a mistake in one row's
+-- inputs can't clobber another's. `csrf_token` is echoed as a hidden
+-- field in every form here -- a plain HTML <form> POST (unlike the
+-- JS fetch() calls elsewhere in this app) has no way to attach a
+-- custom request header, so the double-submit token has to travel as
+-- form data instead (see cgi.lua's require_csrf).
+function html.render_admin_users(users, csrf_token, message, is_error)
+    escaped_csrf = html_escape(csrf_token)
+
+    message_html = ""
+    if message != nil and message != "" then
+        css_class = "fossci-admin-message"
+        if is_error == true then
+            css_class = "fossci-admin-message fossci-admin-message-error"
+        end
+        message_html = "<div class=\"" .. css_class .. "\">" .. html_escape(message) .. "</div>"
+    end
+
+    rows_html = ""
+    for _, u in ipairs(users) do
+        escaped_login = html_escape(u.login)
+        status = "active"
+        if u.archived_at != nil and u.archived_at != "" then
+            status = "archived"
+        end
+        archive_action = "archive"
+        archive_label = "Archive"
+        if status == "archived" then
+            archive_action = "unarchive"
+            archive_label = "Unarchive"
+        end
+
+        rows_html = rows_html .. string.format("""
+        <tr>
+            <td>%s</td>
+            <td>
+                <form method="POST" action="admin-users-capabilities" class="fossci-admin-inline-form">
+                    <input type="hidden" name="csrf_token" value="%s">
+                    <input type="hidden" name="login" value="%s">
+                    <input type="text" name="cap" value="%s" size="6">
+                    <button type="submit" class="btn btn-secondary">Set</button>
+                </form>
+            </td>
+            <td>%s</td>
+            <td>
+                <form method="POST" action="admin-users-password" class="fossci-admin-inline-form">
+                    <input type="hidden" name="csrf_token" value="%s">
+                    <input type="hidden" name="login" value="%s">
+                    <input type="password" name="password" placeholder="new password" required>
+                    <button type="submit" class="btn btn-secondary">Set</button>
+                </form>
+                <form method="POST" action="admin-users-%s" class="fossci-admin-inline-form">
+                    <input type="hidden" name="csrf_token" value="%s">
+                    <input type="hidden" name="login" value="%s">
+                    <button type="submit" class="btn btn-secondary">%s</button>
+                </form>
+            </td>
+        </tr>
+""", escaped_login, escaped_csrf, escaped_login, html_escape(u.cap), status,
+     escaped_csrf, escaped_login, archive_action, escaped_csrf, escaped_login, archive_label)
+    end
+
+    return string.format("""
+<div class="fossil-doc" data-title="Manage users">
+    <style>
+%s
+%s
+        .fossci-header { margin-bottom: 20px; border-bottom: 1px solid var(--fossci-bg-2, #f1f5f9); padding-bottom: 16px; }
+        .fossci-header h2 { margin: 0 0 6px 0; font-size: 1.6rem; font-weight: 700; color: var(--fossci-heading, #0f172a); letter-spacing: -0.02em; }
+        .fossci-admin-message { padding: 10px 12px; margin-bottom: 16px; border-radius: var(--fossci-radius-item, 10px); background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; font-size: 0.9rem; }
+        .fossci-admin-message-error { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+        .fossci-admin-create-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 24px; padding: 16px; background: var(--fossci-bg, #f8fafc); border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-md, 12px); }
+        .fossci-admin-create-form input[type=text], .fossci-admin-create-form input[type=password] {
+            padding: 8px 10px; border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-sm, 8px); font-size: 0.9rem;
+        }
+        table.fossci-admin-users { width: 100%%; border-collapse: collapse; }
+        table.fossci-admin-users th, table.fossci-admin-users td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--fossci-border, #e2e8f0); font-size: 0.9rem; vertical-align: middle; }
+        .fossci-admin-inline-form { display: inline-flex; gap: 6px; align-items: center; margin-right: 8px; }
+        .fossci-admin-inline-form input[type=text], .fossci-admin-inline-form input[type=password] {
+            padding: 6px 8px; border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-sm, 8px); font-size: 0.85rem;
+        }
+    </style>
+    <div class="fossci-container">
+        <div class="fossci-header">
+            <h2>Manage users</h2>
+        </div>
+        %s
+        <form method="POST" action="admin-users-create" class="fossci-admin-create-form">
+            <input type="hidden" name="csrf_token" value="%s">
+            <input type="text" name="login" placeholder="login" required>
+            <input type="password" name="password" placeholder="password" required>
+            <input type="text" name="cap" placeholder="capabilities (e.g. i)" size="10">
+            <button type="submit" class="btn btn-primary">Create user</button>
+        </form>
+        <table class="fossci-admin-users">
+            <thead><tr><th>Login</th><th>Capabilities</th><th>Status</th><th>Actions</th></tr></thead>
+            <tbody>
+%s
+            </tbody>
+        </table>
+    </div>
+</div>
+""", fossci_container_css(1000), fossci_button_css(), message_html, escaped_csrf, rows_html)
+end
+
 function html.render_index(entity_types, edges, show_sql_widget, nonce)
     items = ""
     for _, row in ipairs(entity_types) do

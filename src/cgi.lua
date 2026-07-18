@@ -154,8 +154,16 @@ end
 -- HTTP_X_CSRF_TOKEN via the standard CGI header<->env-var mapping),
 -- set client-side by JS reading its own non-HttpOnly csrf cookie --
 -- see html.lua's getCsrfToken() helper.
-function require_csrf(cookies)
+-- Checks the double-submit CSRF token, from either a request header
+-- (JS fetch() callers, e.g. /api/submit -- see html.lua's
+-- getCsrfToken()) or a hidden form field (a plain HTML <form> POST,
+-- e.g. the /admin/users pages below, has no way to attach a custom
+-- header at all). `form_token` is only read if the header is absent.
+function require_csrf(cookies, form_token)
     submitted = os.getenv("HTTP_X_CSRF_TOKEN")
+    if submitted == nil or submitted == "" then
+        submitted = form_token
+    end
     return auth.verify_csrf(cookies.csrf, submitted)
 end
 
@@ -526,6 +534,64 @@ function cgi.handle_request()
         end
         body = html.render_sql(db_path, sql_text, column_names, rows, sql_err, ref_columns, nonce)
         return print_response("200 OK", "text/html", body)
+    end
+
+    if path_info == "/admin-users" then
+        if not cgi.has_capability(capabilities, "a") then
+            return print_response("403 Forbidden", "text/html", "<h3>Forbidden: requires Admin capability</h3>")
+        end
+        users = auth.list_users(db_path, true)
+        body = html.render_admin_users(users, default_value(cookies.csrf, ""), nil, false)
+        return print_response("200 OK", "text/html", body)
+    end
+
+    -- Flat, single-segment names (not "/admin/users/create" etc) --
+    -- deliberately, not just for consistency with every other route
+    -- here: every relative link/form-action this app renders resolves
+    -- against the CURRENT page's own directory, and this whole family
+    -- of routes needs to link to each other and back to /admin-users.
+    -- A flat namespace makes that trivial (every route is a sibling of
+    -- every other); a nested one requires "../"-style relative math
+    -- that's easy to get wrong -- exactly the bug class just fixed
+    -- elsewhere in this file's own links.
+    is_admin_user_action = path_info == "/admin-users-create" or
+        path_info == "/admin-users-capabilities" or
+        path_info == "/admin-users-password" or
+        path_info == "/admin-users-archive" or
+        path_info == "/admin-users-unarchive"
+    if is_admin_user_action and method == "POST" then
+        if not cgi.has_capability(capabilities, "a") then
+            return print_response("403 Forbidden", "text/html", "<h3>Forbidden: requires Admin capability</h3>")
+        end
+
+        form = parse_query(io.read("*all"))
+        if not require_csrf(cookies, form.csrf_token) then
+            users = auth.list_users(db_path, true)
+            body = html.render_admin_users(users, default_value(cookies.csrf, ""), "CSRF check failed.", true)
+            return print_response("403 Forbidden", "text/html", body)
+        end
+
+        ok = nil
+        err = nil
+
+        if path_info == "/admin-users-create" then
+            ok, err = auth.create_user(db_path, form.login, form.password, form.cap)
+        elseif path_info == "/admin-users-capabilities" then
+            ok, err = auth.set_capabilities(db_path, form.login, form.cap)
+        elseif path_info == "/admin-users-password" then
+            ok, err = auth.set_password(db_path, form.login, form.password)
+        elseif path_info == "/admin-users-archive" then
+            ok, err = auth.archive_user(db_path, form.login)
+        elseif path_info == "/admin-users-unarchive" then
+            ok, err = auth.unarchive_user(db_path, form.login)
+        end
+
+        if ok == nil then
+            users = auth.list_users(db_path, true)
+            body = html.render_admin_users(users, default_value(cookies.csrf, ""), tostring(err), true)
+            return print_response("200 OK", "text/html", body)
+        end
+        return print_response("302 Found", "text/plain", "", {"Location: admin-users"})
     end
 
     if path_info == "/templates" then

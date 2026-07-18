@@ -18,6 +18,19 @@ raw_login() {
         GATEWAY_INTERFACE="CGI/1.1" REQUEST_METHOD="POST" PATH_INFO="/login" QUERY_STRING="" "$BIN"
 }
 
+# A POST to one of the /admin-users-* routes with a real request body --
+# piping straight into `run "$BIN"` doesn't carry stdin through bats'
+# `run` correctly, so (matching raw_login above) this runs the binary
+# directly and lets the caller wrap the *function call* in `run` instead.
+raw_admin_action() {
+    local path_info="$1"
+    local cookie="$2"
+    local body="$3"
+    printf '%s' "$body" | \
+        GATEWAY_INTERFACE="CGI/1.1" REQUEST_METHOD="POST" PATH_INFO="$path_info" QUERY_STRING="" \
+        HTTP_COOKIE="$cookie" "$BIN"
+}
+
 @test "user add creates a login that can authenticate" {
     "$BIN" user add alice secret123 i
     run "$BIN" user list
@@ -135,4 +148,88 @@ EOF
     GATEWAY_INTERFACE="CGI/1.1" REQUEST_METHOD="POST" PATH_INFO="/api/archive" QUERY_STRING="type=widget&entity_id=1" \
         HTTP_COOKIE="session=${session}; csrf=${csrf}" HTTP_X_CSRF_TOKEN="${csrf}" run "$BIN"
     [[ "$output" =~ '"success":true' ]]
+}
+
+@test "/admin-users requires Admin capability, not just baseline" {
+    "$BIN" user add alice secret123 i
+    raw=$(raw_login alice secret123)
+    session=$(printf '%s' "$raw" | grep -o 'Set-Cookie: session=[^;]*' | sed 's/Set-Cookie: session=//')
+
+    GATEWAY_INTERFACE="CGI/1.1" REQUEST_METHOD="GET" PATH_INFO="/admin-users" QUERY_STRING="" \
+        HTTP_COOKIE="session=${session}" run "$BIN"
+    [[ "$output" =~ "403 Forbidden" ]]
+
+    "$BIN" user capabilities alice ia
+
+    GATEWAY_INTERFACE="CGI/1.1" REQUEST_METHOD="GET" PATH_INFO="/admin-users" QUERY_STRING="" \
+        HTTP_COOKIE="session=${session}" run "$BIN"
+    [[ "$output" =~ "200 OK" ]]
+    [[ "$output" =~ "Manage users" ]]
+    [[ "$output" =~ "alice" ]]
+}
+
+@test "admin-users-create adds a user that shows up on the page, via the plain form-field CSRF token" {
+    "$BIN" user add alice secret123 ia
+    raw=$(raw_login alice secret123)
+    session=$(printf '%s' "$raw" | grep -o 'Set-Cookie: session=[^;]*' | sed 's/Set-Cookie: session=//')
+    csrf=$(printf '%s' "$raw" | grep -o 'Set-Cookie: csrf=[^;]*' | sed 's/Set-Cookie: csrf=//')
+
+    # Note: no HTTP_X_CSRF_TOKEN header here -- a plain HTML <form> POST
+    # (unlike a JS fetch() call) can't attach a custom header at all, so
+    # this exercises the form-field fallback in cgi.lua's require_csrf.
+    cookie="session=${session}; csrf=${csrf}"
+    body="csrf_token=${csrf}&login=bob&password=bobpass123&cap=i"
+    run raw_admin_action "/admin-users-create" "$cookie" "$body"
+    [[ "$output" =~ "302 Found" ]]
+    [[ "$output" =~ "Location: admin-users" ]]
+
+    run "$BIN" user list
+    [[ "$output" =~ "bob" ]]
+}
+
+@test "admin-users-create without the matching CSRF token is rejected" {
+    "$BIN" user add alice secret123 ia
+    raw=$(raw_login alice secret123)
+    session=$(printf '%s' "$raw" | grep -o 'Set-Cookie: session=[^;]*' | sed 's/Set-Cookie: session=//')
+    csrf=$(printf '%s' "$raw" | grep -o 'Set-Cookie: csrf=[^;]*' | sed 's/Set-Cookie: csrf=//')
+
+    cookie="session=${session}; csrf=${csrf}"
+    body="csrf_token=wrong&login=bob&password=bobpass123&cap=i"
+    run raw_admin_action "/admin-users-create" "$cookie" "$body"
+    [[ "$output" =~ "403 Forbidden" ]]
+    [[ "$output" =~ "CSRF check failed" ]]
+
+    run "$BIN" user list
+    [[ ! "$output" =~ "bob" ]]
+}
+
+@test "admin-users-capabilities, admin-users-password, and admin-users-archive/unarchive all work via the admin page" {
+    "$BIN" user add alice secret123 ia
+    "$BIN" user add bob bobpass123 i
+    raw=$(raw_login alice secret123)
+    session=$(printf '%s' "$raw" | grep -o 'Set-Cookie: session=[^;]*' | sed 's/Set-Cookie: session=//')
+    csrf=$(printf '%s' "$raw" | grep -o 'Set-Cookie: csrf=[^;]*' | sed 's/Set-Cookie: csrf=//')
+    cookie="session=${session}; csrf=${csrf}"
+
+    run raw_admin_action "/admin-users-capabilities" "$cookie" "csrf_token=${csrf}&login=bob&cap=is"
+    [[ "$output" =~ "302 Found" ]]
+    run "$BIN" user list
+    [[ "$output" =~ "bob" ]]
+    [[ "$output" =~ "cap=is" ]]
+
+    run raw_admin_action "/admin-users-password" "$cookie" "csrf_token=${csrf}&login=bob&password=newpass456"
+    [[ "$output" =~ "302 Found" ]]
+    run raw_login bob newpass456
+    [[ "$output" =~ "302 Found" ]]
+    [[ "$output" =~ "Set-Cookie: session=bob." ]]
+
+    run raw_admin_action "/admin-users-archive" "$cookie" "csrf_token=${csrf}&login=bob"
+    [[ "$output" =~ "302 Found" ]]
+    run raw_login bob newpass456
+    [[ "$output" =~ "401 Unauthorized" ]]
+
+    run raw_admin_action "/admin-users-unarchive" "$cookie" "csrf_token=${csrf}&login=bob"
+    [[ "$output" =~ "302 Found" ]]
+    run raw_login bob newpass456
+    [[ "$output" =~ "302 Found" ]]
 }
