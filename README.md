@@ -18,9 +18,14 @@ directory's name are both placeholders pending a real project name.
 - **Nothing is ever deleted, only archived** -- done. See
   "Traceability" below.
 - **Accounts, sessions, and permissions** -- done. See "Auth" below.
-- Hosting under a real web server, storage consolidation, a
-  document/notebook record type, and an assistant/chat layer are not
-  built yet.
+- **Hosting under a real web server** -- verified working as-is (no
+  application changes needed); a minimal Admin user-management page
+  (`/admin-users`) ships alongside the CLI for admins who'd rather not
+  shell in.
+- **Storage** -- already a single file; nothing to consolidate.
+- **Pages** (a built-in document/notebook record type: a real tree, not
+  a name-is-identity wiki page) -- done. See "Pages" below.
+- An assistant/chat layer is not built yet.
 
 ## Building
 
@@ -28,6 +33,11 @@ Written in [Luam](https://github.com/BenSiv/luam); requires a sibling
 `luam` checkout, already built (`obj/liblua.a` present). By default
 `bld/build.sh` looks for it at `../luam`; override with the `LUAM_DIR`
 env var if yours lives elsewhere.
+
+Also requires `cmark` on `PATH` **at runtime** (`apt install cmark` /
+`brew install cmark`) -- unlike everything else here, it isn't compiled
+into the binary; Pages rendering shells out to it. Nothing else in this
+project needs it.
 
 ```sh
 ./bld/build.sh          # -> bin/platform
@@ -100,6 +110,19 @@ removal. Listing/counting records excludes archived ones by default
 (an opt-in flag brings them back); looking up a record directly, or its
 full history, always works regardless of archive state. The same
 convention applies to accounts.
+
+## Pages
+
+A built-in document/notebook record type (`src/document.lua`) -- a
+real parent-child tree (a page's identity is its id, not its title, so
+renaming or moving a page is a plain field edit, never a collision
+risk), Markdown content rendered via `cmark`, and `[[title]]` /
+`[[folder/title]]` inline links between pages that show up as
+backlinks on the page they point to. `/documents` lists the tree,
+`/document?entity_id=<id>` views one page, `/document-edit` creates or
+edits one (a plain textarea with a live preview). A link to a page
+that doesn't exist yet renders as a plain, clearly-marked placeholder
+rather than a broken link.
 
 ## Docs
 

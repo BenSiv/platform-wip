@@ -1836,4 +1836,277 @@ function html.render_sql(db_path, sql_text, column_names, rows, err, ref_columns
 """, fossci_container_css(1100), fossci_button_css(), html.popover_css(), escaped_sql, result_html, html.popover_js(nonce))
 end
 
+--------------------------------------------------------------------------
+-- Documents (the notebook/wiki-style entity type, src/document.lua)
+--------------------------------------------------------------------------
+
+-- Groups a flat {id, title, parent_id} list by parent, keyed "root" for
+-- top-level rows -- one query from document.all_active(), built into a
+-- nested tree here rather than one query per level.
+function build_document_tree_index(rows)
+    by_parent = {}
+    for _, row in ipairs(rows) do
+        key = "root"
+        if row.parent_id != nil and row.parent_id != "" then
+            key = tostring(tonumber(row.parent_id))
+        end
+        if by_parent[key] == nil then
+            by_parent[key] = {}
+        end
+        table.insert(by_parent[key], row)
+    end
+    return by_parent
+end
+
+function render_document_tree_level(by_parent, key)
+    children = by_parent[key]
+    if children == nil then
+        return ""
+    end
+    items = ""
+    for _, row in ipairs(children) do
+        nested = render_document_tree_level(by_parent, tostring(tonumber(row.id)))
+        nested_html = ""
+        if nested != "" then
+            nested_html = "<ul>" .. nested .. "</ul>"
+        end
+        items = items .. "<li><a href=\"document?entity_id=" .. tostring(row.id) .. "\">" ..
+            html_escape(row.title) .. "</a>" .. nested_html .. "</li>"
+    end
+    return items
+end
+
+-- <option> tags for the parent-page <select> in render_document_edit.
+-- Excludes `exclude_id` (a document can't be its own parent) -- doesn't
+-- also exclude its descendants (which would need a full descendant
+-- walk to build); choosing one of those is instead caught at save time
+-- by document.would_create_cycle, with a real error message rather than
+-- the option silently not being offered.
+function html.document_parent_options(rows, selected_id, exclude_id)
+    options = ""
+    for _, row in ipairs(rows) do
+        if exclude_id == nil or tonumber(row.id) != tonumber(exclude_id) then
+            selected_attr = ""
+            if selected_id != nil and tonumber(row.id) == tonumber(selected_id) then
+                selected_attr = " selected"
+            end
+            options = options .. "<option value=\"" .. tostring(row.id) .. "\"" .. selected_attr .. ">" ..
+                html_escape(row.title) .. "</option>"
+        end
+    end
+    return options
+end
+
+-- `can_create` is a plain boolean (the "+ New page" link's own gate) --
+-- html.lua never checks capabilities itself, same convention
+-- render_index's show_sql_widget already uses; cgi.lua decides and
+-- passes the answer in.
+function html.render_document_tree(rows, can_create, nonce)
+    by_parent = build_document_tree_index(rows)
+    tree_items = render_document_tree_level(by_parent, "root")
+    tree_html = "<ul class=\"fossci-document-tree\">" .. tree_items .. "</ul>"
+    if tree_items == "" then
+        tree_html = "<p class=\"fossci-empty\">No pages yet.</p>"
+    end
+
+    new_page_link = ""
+    if can_create == true then
+        new_page_link = "<a class=\"btn btn-primary\" href=\"document-edit\">+ New page</a>"
+    end
+
+    return string.format("""
+<div class="fossil-doc" data-title="Pages">
+    <style>
+%s
+%s
+        .fossci-header { margin-bottom: 20px; border-bottom: 1px solid var(--fossci-bg-2, #f1f5f9); padding-bottom: 16px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+        .fossci-header h2 { margin: 0 0 6px 0; font-size: 1.6rem; font-weight: 700; color: var(--fossci-heading, #0f172a); letter-spacing: -0.02em; }
+        .fossci-document-tree, .fossci-document-tree ul { list-style: none !important; margin: 0; padding-left: 20px; }
+        .fossci-document-tree { padding-left: 0; }
+        .fossci-document-tree li { margin: 6px 0; }
+        .fossci-document-tree a { color: var(--fossci-accent, #4f46e5); text-decoration: none; font-weight: 600; }
+        .fossci-document-tree a:hover { text-decoration: underline; }
+    </style>
+    <div class="fossci-container">
+        <div class="fossci-header">
+            <h2>Pages</h2>
+            %s
+        </div>
+        %s
+    </div>
+</div>
+""", fossci_container_css(900), fossci_button_css(), new_page_link, tree_html)
+end
+
+-- `can_edit` is likewise a plain boolean, decided by cgi.lua.
+-- `rendered_html` (document.render_html's own output) is embedded
+-- unescaped -- deliberately: it's already-rendered HTML from cmark's
+-- default (non---unsafe) mode, which strips raw HTML/script tags out of
+-- the *source* Markdown before this ever runs, so what comes back here
+-- is already safe to place directly in the page, not user input that
+-- still needs escaping.
+function html.render_document(doc, rendered_html, breadcrumbs, children, backlinks, can_edit, nonce)
+    breadcrumb_html = ""
+    for i, crumb in ipairs(breadcrumbs) do
+        if i > 1 then
+            breadcrumb_html = breadcrumb_html .. " / "
+        end
+        if i == #breadcrumbs then
+            breadcrumb_html = breadcrumb_html .. html_escape(crumb.title)
+        else
+            breadcrumb_html = breadcrumb_html .. "<a href=\"document?entity_id=" .. tostring(crumb.id) .. "\">" ..
+                html_escape(crumb.title) .. "</a>"
+        end
+    end
+
+    children_html = ""
+    for _, child in ipairs(children) do
+        children_html = children_html .. "<li><a href=\"document?entity_id=" .. tostring(child.id) .. "\">" ..
+            html_escape(child.title) .. "</a></li>"
+    end
+    children_block = ""
+    if children_html != "" then
+        children_block = "<div class=\"fossci-document-children\"><h4>Sub-pages</h4><ul>" .. children_html .. "</ul></div>"
+    end
+
+    backlinks_html = ""
+    for _, link in ipairs(backlinks) do
+        backlinks_html = backlinks_html .. "<li><a href=\"document?entity_id=" .. tostring(link.id) .. "\">" ..
+            html_escape(link.title) .. "</a></li>"
+    end
+    backlinks_block = ""
+    if backlinks_html != "" then
+        backlinks_block = "<div class=\"fossci-document-backlinks\"><h4>Linked from</h4><ul>" .. backlinks_html .. "</ul></div>"
+    end
+
+    edit_link = ""
+    if can_edit == true then
+        edit_link = "<a class=\"btn btn-secondary\" href=\"document-edit?entity_id=" .. tostring(doc.id) .. "\">Edit</a>"
+    end
+
+    return string.format("""
+<div class="fossil-doc" data-title="%s">
+    <style>
+%s
+%s
+        .fossci-document-breadcrumbs { margin-bottom: 12px; font-size: 0.88rem; color: var(--fossci-muted, #64748b); }
+        .fossci-document-breadcrumbs a { color: var(--fossci-accent, #4f46e5); text-decoration: none; }
+        .fossci-document-breadcrumbs a:hover { text-decoration: underline; }
+        .fossci-document-content { line-height: 1.6; }
+        .fossci-document-content h1, .fossci-document-content h2, .fossci-document-content h3 { margin-top: 1.2em; }
+        .fossci-document-children, .fossci-document-backlinks { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--fossci-border, #e2e8f0); }
+        .fossci-document-children h4, .fossci-document-backlinks h4 { margin: 0 0 8px 0; font-size: 0.95rem; color: var(--fossci-muted, #64748b); }
+    </style>
+    <div class="fossci-container">
+        <div class="fossci-document-breadcrumbs">%s <a href="documents">(all pages)</a></div>
+        <div class="fossci-header">
+            <h2>%s</h2>
+            %s
+        </div>
+        <div class="fossci-document-content">
+%s
+        </div>
+        %s
+        %s
+    </div>
+</div>
+""", html_escape(doc.title), fossci_container_css(900), fossci_button_css(),
+     breadcrumb_html, html_escape(doc.title), edit_link, rendered_html, children_block, backlinks_block)
+end
+
+-- `doc` is nil for "create a new page", or the current row for editing
+-- an existing one. `parent_options_html` is pre-rendered <option> tags
+-- (cgi.lua builds these from document.all_active, since it needs
+-- entity.get to know which one -- if any -- is currently selected).
+function html.render_document_edit(doc, parent_options_html, csrf_token, error_message, nonce)
+    is_edit = doc != nil
+    heading = "New page"
+    entity_id_value = ""
+    title_value = ""
+    content_value = ""
+    if is_edit then
+        heading = "Edit: " .. html_escape(doc.title)
+        entity_id_value = tostring(doc.id)
+        title_value = html_escape(doc.title)
+        if doc.content != nil then
+            content_value = html_escape(doc.content)
+        end
+    end
+
+    error_html = ""
+    if error_message != nil and error_message != "" then
+        error_html = "<div class=\"fossci-login-error\">" .. html_escape(error_message) .. "</div>"
+    end
+
+    return string.format("""
+<div class="fossil-doc" data-title="%s">
+    <style>
+%s
+%s
+        .fossci-login-error { color: #991b1b; background: #fef2f2; border: 1px solid #fecaca; border-radius: var(--fossci-radius-item, 10px); padding: 10px 12px; margin-bottom: 14px; font-size: 0.88rem; }
+        .fossci-document-edit-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .fossci-document-edit-grid textarea {
+            width: 100%%; min-height: 420px; box-sizing: border-box;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.88rem;
+            padding: 12px; border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-md, 12px);
+        }
+        .fossci-document-preview {
+            border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-md, 12px);
+            padding: 16px; min-height: 420px; overflow-y: auto;
+        }
+        .fossci-document-edit-fields { display: flex; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+        .fossci-document-edit-fields input[type=text], .fossci-document-edit-fields select {
+            padding: 8px 10px; border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-sm, 8px); font-size: 0.9rem;
+        }
+    </style>
+    <div class="fossci-container">
+        <div class="fossci-header"><h2>%s</h2></div>
+        %s
+        <form method="POST" action="document-save">
+            <input type="hidden" name="csrf_token" value="%s">
+            <input type="hidden" name="entity_id" value="%s">
+            <div class="fossci-document-edit-fields">
+                <input type="text" name="title" value="%s" placeholder="Title" required>
+                <select name="parent_id">
+                    <option value="">(top level)</option>
+                    %s
+                </select>
+                <button type="submit" class="btn btn-primary">Save</button>
+            </div>
+            <div class="fossci-document-edit-grid">
+                <textarea name="content" id="fossci-document-content" placeholder="Write in Markdown. Link to other pages with [[title]] or [[folder/title]].">%s</textarea>
+                <div class="fossci-document-preview" id="fossci-document-preview">Preview will appear here.</div>
+            </div>
+        </form>
+    </div>
+    <script nonce="%s">
+    (function(){
+        var textarea = document.getElementById('fossci-document-content');
+        var preview = document.getElementById('fossci-document-preview');
+        var timer = null;
+        function getCsrfToken() {
+            var match = document.cookie.match(/(?:^|;\\s*)csrf=([^;]*)/);
+            return match ? match[1] : "";
+        }
+        function refreshPreview() {
+            fetch('api/document-preview', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
+                body: JSON.stringify({content: textarea.value})
+            }).then(function(res){ return res.json(); }).then(function(data){
+                preview.innerHTML = data.html || '';
+            }).catch(function(){ });
+        }
+        textarea.addEventListener('input', function(){
+            clearTimeout(timer);
+            timer = setTimeout(refreshPreview, 400);
+        });
+        refreshPreview();
+    })();
+    </script>
+</div>
+""", heading, fossci_container_css(1200), fossci_button_css(), heading, error_html,
+     html_escape(csrf_token), entity_id_value, title_value, parent_options_html, content_value, nonce)
+end
+
 return html

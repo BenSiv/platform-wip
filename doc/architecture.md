@@ -123,11 +123,49 @@ Implemented today:
   archiving does) -- not a deliberate design stance, just not wired up
   yet.
 
-Not yet implemented: a hook for saving a document/notebook-style
-record (there is no such record type yet), and a batch-level
-before/after pair distinct from the per-row hooks (batch validation
-and creation exist and run the per-row hooks already, but there's no
-separate whole-batch hook).
+Not yet implemented: a batch-level before/after pair distinct from the
+per-row hooks (batch validation and creation exist and run the per-row
+hooks already, but there's no separate whole-batch hook).
+
+## Pages
+
+A built-in document/notebook record type (not a deployment-authored
+one) -- a page's own id is its identity, not its title, so renaming or
+moving it is a plain field edit on `title`/`parent_id`, never a
+collision risk the way a name-is-identity wiki page has to worry about.
+
+- **A real tree, not a naming convention.** `parent_id` is a nullable
+  self-reference (unset = top-level); breadcrumbs are computed by
+  walking that chain on read, not cached -- so they can never go stale,
+  and moving a page under a different parent is exactly one field
+  write. Moving a page underneath its own descendant is rejected
+  outright at save time (a real error, not silent data corruption or
+  an infinite loop waiting to happen at render time).
+- **Cross-page links** use an inline `[[title]]` / `[[folder/title]]`
+  syntax, parsed out of the raw content and resolved by title (and, if
+  a folder prefix is given, by requiring the resolved page's immediate
+  parent to carry that title -- a one-level disambiguator, not a full
+  path walk). A link to a page that doesn't exist yet renders as a
+  plain, visibly-marked placeholder instead of a broken link. Links are
+  a derived index over content (recomputed wholesale on every save, not
+  hand-maintained data with their own history) -- the content that
+  generates them already has full audit history in its own right.
+- **Rendering** shells out to `cmark` (CommonMark) rather than a
+  vendored/hand-rolled Markdown parser -- the same "bind to an existing,
+  battle-tested implementation" stance as bcrypt/HMAC, except this one
+  is an external runtime dependency (must be on `PATH`), not something
+  compiled into the binary. `cmark`'s default (non-`--unsafe`) mode
+  strips raw HTML out of the source Markdown before rendering, which
+  matters here specifically: page content is user-authored and shown
+  to other users, so it must never be able to smuggle in a raw
+  `<script>` tag.
+- Creating/editing a page through the generic `entity create`/`entity
+  update` CLI (rather than the dedicated web routes) still works, but
+  bypasses link re-indexing -- that's layered on top of the generic
+  entity path deliberately (see "Sandboxed extensibility" above: this
+  behavior is specific to one record type, not something the generic
+  layer should know about), not something every write path gets for
+  free.
 
 ## Auth
 

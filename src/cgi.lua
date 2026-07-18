@@ -9,6 +9,7 @@ html = require("html")
 json = require("dkjson")
 paths = require("paths")
 auth = require("auth")
+document = require("document")
 
 cgi = {}
 
@@ -40,6 +41,25 @@ function default_value(value, fallback)
         return fallback
     end
     return value
+end
+
+-- Collapses entity.create/update's issues list into one human-readable
+-- string, for a plain-form page (document-edit) that has nowhere to
+-- show per-field errors the way the JS-driven registration table does.
+function issues_to_message(issues)
+    if issues == nil or #issues == 0 then
+        return "Could not save."
+    end
+    parts = {}
+    for _, issue in ipairs(issues) do
+        if issue.severity == "error" then
+            table.insert(parts, tostring(issue.message))
+        end
+    end
+    if #parts == 0 then
+        return "Could not save."
+    end
+    return table.concat(parts, "; ")
 end
 
 function parse_query(query_str)
@@ -338,19 +358,28 @@ function cgi.handle_request()
     root = config.find_root()
     db_path = config.db_path(root)
 
-    -- Auto-initialize or sync database schemas on request
+    -- Auto-initialize or sync database schemas on request. Directory
+    -- creation is naturally tied to "does this deployment look
+    -- bootstrapped yet" (only needed once), but every schema/table init
+    -- call below is idempotent (CREATE TABLE IF NOT EXISTS, INSERT OR
+    -- IGNORE) and runs unconditionally every request instead, matching
+    -- schema.sync_all's own already-established pattern just below --
+    -- otherwise a store initialized before some built-in schema existed
+    -- would never pick it up (a real, if latent, gap this closes for
+    -- auth/document both, not just newly-added ones going forward).
     if not config.is_initialized(root) then
         paths.create_dir_if_not_exists(config.store_dir(root))
         paths.create_dir_if_not_exists(config.schemas_dir(root))
         paths.create_dir_if_not_exists(config.extensions_dir(root))
         paths.create_dir_if_not_exists(config.views_dir(root))
         paths.create_dir_if_not_exists(config.templates_dir(root))
-        ledger.init_schema(db_path)
-        auth.init_schema(db_path)
-        secret_ok, secret_err = auth.ensure_session_secret(root)
-        if secret_ok == nil then
-            return print_response("500 Internal Server Error", "text/html", "<h3>Error: " .. tostring(secret_err) .. "</h3>")
-        end
+    end
+    ledger.init_schema(db_path)
+    auth.init_schema(db_path)
+    document.init_schema(db_path)
+    secret_ok, secret_err = auth.ensure_session_secret(root)
+    if secret_ok == nil then
+        return print_response("500 Internal Server Error", "text/html", "<h3>Error: " .. tostring(secret_err) .. "</h3>")
     end
     schema.sync_all(db_path, root)
 
@@ -508,6 +537,100 @@ function cgi.handle_request()
         return print_response("200 OK", "text/html", body)
     end
 
+    -- Documents (src/document.lua): a real parent_id tree, not a
+    -- name-is-identity wiki page. `can_create`/`can_edit` are always
+    -- true here -- the baseline "i" capability check above already
+    -- gates every route in this file, and (matching /api/submit and
+    -- /api/update, which also only require "i") creating/editing a
+    -- document doesn't need anything beyond that today. Threaded
+    -- through as an explicit parameter, not hardcoded in html.lua,
+    -- so a future capability tier (e.g. a read-only viewer role) has
+    -- somewhere to plug in without changing html.lua at all.
+    if path_info == "/documents" then
+        rows = document.all_active(db_path)
+        body = html.render_document_tree(rows, true, nonce)
+        return print_response("200 OK", "text/html", body)
+    end
+
+    if path_info == "/document" then
+        entity_id = tonumber(params.entity_id)
+        if entity_id == nil then
+            return print_response("400 Bad Request", "text/html", "<h3>Error: Missing 'entity_id' parameter</h3>")
+        end
+        doc = entity.get(db_path, "document", entity_id)
+        if doc == nil then
+            return print_response("404 Not Found", "text/html", "<h3>Error: no such page #" .. tostring(entity_id) .. "</h3>")
+        end
+        rendered_html = document.render_html(db_path, doc.content)
+        breadcrumbs = document.breadcrumbs(db_path, entity_id)
+        children = document.children(db_path, entity_id)
+        backlinks = document.backlinks(db_path, entity_id)
+        body = html.render_document(doc, rendered_html, breadcrumbs, children, backlinks, true, nonce)
+        return print_response("200 OK", "text/html", body)
+    end
+
+    if path_info == "/document-edit" then
+        doc = nil
+        entity_id = tonumber(params.entity_id)
+        if entity_id != nil then
+            doc = entity.get(db_path, "document", entity_id)
+            if doc == nil then
+                return print_response("404 Not Found", "text/html", "<h3>Error: no such page #" .. tostring(entity_id) .. "</h3>")
+            end
+        end
+        parent_id = nil
+        if doc != nil then
+            parent_id = doc.parent_id
+        end
+        parent_options_html = html.document_parent_options(document.all_active(db_path), parent_id, entity_id)
+        body = html.render_document_edit(doc, parent_options_html, default_value(cookies.csrf, ""), nil, nonce)
+        return print_response("200 OK", "text/html", body)
+    end
+
+    if path_info == "/document-save" and method == "POST" then
+        form = parse_query(io.read("*all"))
+        if not require_csrf(cookies, form.csrf_token) then
+            return print_response("403 Forbidden", "text/html", "<h3>Forbidden: CSRF check failed</h3>")
+        end
+
+        entity_id = tonumber(form.entity_id)
+        parent_id = nil
+        if form.parent_id != nil and form.parent_id != "" then
+            parent_id = tonumber(form.parent_id)
+        end
+        values = {title = form.title, content = form.content, parent_id = parent_id}
+
+        if entity_id != nil and document.would_create_cycle(db_path, entity_id, parent_id) then
+            doc = entity.get(db_path, "document", entity_id)
+            parent_options_html = html.document_parent_options(document.all_active(db_path), parent_id, entity_id)
+            body = html.render_document_edit(doc, parent_options_html, default_value(cookies.csrf, ""),
+                "Can't move a page underneath its own sub-page.", nonce)
+            return print_response("200 OK", "text/html", body)
+        end
+
+        saved_id = nil
+        issues = nil
+        if entity_id != nil then
+            saved_id, issues = entity.update(db_path, "document", entity_id, values, author, source_from_params(params))
+        else
+            saved_id, issues = entity.create(db_path, "document", values, author, source_from_params(params))
+        end
+
+        if saved_id == nil then
+            doc = nil
+            if entity_id != nil then
+                doc = entity.get(db_path, "document", entity_id)
+            end
+            parent_options_html = html.document_parent_options(document.all_active(db_path), parent_id, entity_id)
+            body = html.render_document_edit(doc, parent_options_html, default_value(cookies.csrf, ""),
+                issues_to_message(issues), nonce)
+            return print_response("200 OK", "text/html", body)
+        end
+
+        document.sync_links(db_path, saved_id, form.content)
+        return print_response("302 Found", "text/plain", "", {"Location: document?entity_id=" .. tostring(saved_id)})
+    end
+
     if path_info == "/sql" then
         -- Setup or Admin only -- this runs arbitrary (SELECT-only)
         -- SQL an authenticated user typed themselves, so gating it
@@ -623,6 +746,19 @@ function cgi.handle_request()
 
     if path_info == "/api/preview" then
         return handle_preview(db_path, params)
+    end
+
+    if path_info == "/api/document-preview" and method == "POST" then
+        if not require_csrf(cookies) then
+            return print_response("403 Forbidden", "application/json", json.encode({error = "CSRF check failed"}))
+        end
+        input = io.read("*all")
+        body_data, _, err = json.decode(input)
+        if body_data == nil then
+            return print_response("400 Bad Request", "application/json", json.encode({error = "Invalid JSON: " .. tostring(err)}))
+        end
+        rendered = document.render_html(db_path, body_data.content)
+        return print_response("200 OK", "application/json", json.encode({html = rendered}))
     end
 
     if path_info == "/api/validate" and method == "POST" then

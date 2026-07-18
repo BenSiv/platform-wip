@@ -7,6 +7,7 @@ config = require("config")
 ledger = require("ledger")
 extension = require("extension")
 auth = require("auth")
+document = require("document")
 
 init = {}
 
@@ -29,6 +30,7 @@ function init.do_init(cmd_args, root)
     ledger.init_schema(db_path)
     extension.init_schema(db_path)
     auth.init_schema(db_path)
+    document.init_schema(db_path)
 
     ok, err = auth.ensure_session_secret(root)
     if ok == nil then
