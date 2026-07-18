@@ -1,0 +1,795 @@
+-- Entity CRUD on top of the ledger: this is where "all-or-nothing per
+-- submit" validation happens (doc/project_plan.md M1, and the earlier
+-- validation-rules design) -- nothing is written to the ledger or the
+-- projected table unless every value passes.
+--
+-- v0 validates structurally (required/type/enum/reference-exists) only.
+-- Scriptable before-hooks (extension-authored validation rules) are M1;
+-- this is the contract they'll plug into, not a separate mechanism.
+
+db = require("db")
+ledger = require("ledger")
+schema = require("schema")
+config = require("config")
+extension = require("extension")
+json = require("dkjson")
+
+entity = {}
+
+function is_number(v)
+    return tonumber(v) != nil
+end
+
+function has_capability_item(list, item)
+    if list == nil then
+        return false
+    end
+    for _, v in ipairs(list) do
+        if v == item then
+            return true
+        end
+    end
+    return false
+end
+
+-- ctx.query/create_entity/update_entity, capability-gated per manifest --
+-- shared between before-hooks (synchronous, entity.validate) and
+-- after-hooks (entity.run_pending_jobs). Lives here, not in
+-- extension.lua, because it needs entity.create/entity.update -- see
+-- extension.lua's header comment for why that module can't require this
+-- one back.
+function build_ctx(db_path, manifest)
+    capabilities = manifest.capabilities
+    ctx = {}
+
+    function ctx.query(target_type, filter)
+        can_read = false
+        if capabilities != nil then
+            can_read = has_capability_item(capabilities.read, "entity")
+        end
+        if can_read == false then
+            error("Extension '" .. tostring(manifest.name) .. "' does not have read.entity capability")
+        end
+        if db.table_exists(db_path, target_type) == false then
+            return {}
+        end
+        where = {}
+        for k, v in pairs(filter) do
+            table.insert(where, k .. " = " .. db.quote(tostring(v)))
+        end
+        q = "SELECT * FROM " .. target_type
+        if #where > 0 then
+            q = q .. " WHERE " .. table.concat(where, " AND ")
+        end
+        q = q .. ";"
+        rows = db.query(db_path, q)
+        if rows == nil then
+            return {}
+        end
+        return rows
+    end
+
+    function ctx.create_entity(target_type, values)
+        can_write = false
+        if capabilities != nil then
+            can_write = has_capability_item(capabilities.write, "entity")
+        end
+        if can_write == false then
+            error("Extension '" .. tostring(manifest.name) .. "' does not have write.entity capability")
+        end
+        return entity.create(db_path, target_type, values, "extension:" .. manifest.name)
+    end
+
+    function ctx.update_entity(target_type, target_id, values)
+        can_write = false
+        if capabilities != nil then
+            can_write = has_capability_item(capabilities.write, "entity")
+        end
+        if can_write == false then
+            error("Extension '" .. tostring(manifest.name) .. "' does not have write.entity capability")
+        end
+        return entity.update(db_path, target_type, target_id, values, "extension:" .. manifest.name)
+    end
+
+    return ctx
+end
+
+function run_before_hooks(db_path, entity_type, new_values, old_values, is_update)
+    ext_dir = config.extensions_dir()
+    issues = {}
+
+    event_name = "entity.before_create"
+    if is_update then
+        event_name = "entity.before_update"
+    end
+
+    for _, entry in ipairs(extension.matching(ext_dir, event_name, entity_type)) do
+        if extension.is_approved(db_path, entry.manifest) then
+            ctx = build_ctx(db_path, entry.manifest)
+            invoke_ok, result = extension.invoke(ext_dir, entry.name, entry.manifest, "on_before",
+                new_values, old_values, ctx)
+            if invoke_ok then
+                if type(result) == "table" then
+                    for _, issue in ipairs(result) do
+                        table.insert(issues, issue)
+                    end
+                end
+            else
+                table.insert(issues, {field = nil, severity = "error",
+                    message = "Extension '" .. entry.name .. "' error: " .. tostring(result)})
+            end
+        end
+    end
+    return issues
+end
+
+-- Structural validation against a registered schema. Returns a list of
+-- {field, severity, message} issues -- empty if the row is clean.
+function entity.validate(db_path, entity_type, values, old)
+    is_update = (old != nil)
+    issues = {}
+    if schema.is_registered(db_path, entity_type) == false then
+        table.insert(issues, {field = nil, severity = "error",
+            message = "unknown entity type: " .. tostring(entity_type)})
+        return issues
+    end
+    fields = schema.fields(db_path, entity_type)
+
+    for _, field in ipairs(fields) do
+        value = values[field.name]
+
+        if (value == nil or value == "") then
+            if tonumber(field.required) == 1 then
+                table.insert(issues, {field = field.name, severity = "error",
+                    message = "required field is missing"})
+            end
+        else
+            if field.type == "number" and is_number(value) == false then
+                table.insert(issues, {field = field.name, severity = "error",
+                    message = "must be a number"})
+            end
+
+            if field.type == "select" then
+                allowed = json.decode(field.enum_values)
+                if allowed == nil then
+                    allowed = {}
+                end
+                ok = false
+                for _, v in ipairs(allowed) do
+                    if tostring(v) == tostring(value) then
+                        ok = true
+                    end
+                end
+                if ok == false then
+                    table.insert(issues, {field = field.name, severity = "error",
+                        message = "must be one of the declared values"})
+                end
+            end
+
+            if field.type == "reference" then
+                ref_type = entity_type
+                if field.ref_entity_type != nil then
+                    ref_type = field.ref_entity_type
+                end
+                found = entity.get(db_path, ref_type, tonumber(value))
+                if found == nil then
+                    table.insert(issues, {field = field.name, severity = "error",
+                        message = "references a nonexistent " .. ref_type .. " entity"})
+                end
+            end
+        end
+    end
+
+    -- Run before-hooks if there are no severe structural errors
+    if not has_error(issues) then
+        hooks_issues = run_before_hooks(db_path, entity_type, values, old, is_update)
+        for _, issue in ipairs(hooks_issues) do
+            table.insert(issues, issue)
+        end
+    end
+
+    return issues
+end
+
+function has_error(issues)
+    for _, issue in ipairs(issues) do
+        if issue.severity == "error" then
+            return true
+        end
+    end
+    return false
+end
+
+-- Creates an entity. Returns (entity_id, issues) on success, or
+-- (nil, issues) if validation failed.
+function entity.create(db_path, entity_type, values, author, source)
+    issues = entity.validate(db_path, entity_type, values)
+    if has_error(issues) then
+        return nil, issues
+    end
+
+    entity_id = ledger.append_create(db_path, entity_type, values, author, source)
+
+    columns = {"id"}
+    literals = {tostring(entity_id)}
+    for name, value in pairs(values) do
+        table.insert(columns, name)
+        table.insert(literals, db.literal(value))
+    end
+    table.insert(columns, "created_by")
+    table.insert(literals, db.literal(author))
+    table.insert(columns, "last_event_id")
+    table.insert(literals, tostring(entity_id))
+
+    db.exec(db_path, string.format(
+        "INSERT INTO %s (%s) VALUES (%s);",
+        entity_type, table.concat(columns, ", "), table.concat(literals, ", ")
+    ))
+
+    extension.enqueue_after_hooks(db_path, config.extensions_dir(),
+        "entity.after_create", entity_type, entity_id, values, nil)
+
+    return entity_id, issues
+end
+
+-- Updates an entity. Computes the old/new diff itself (from the current
+-- projected row).
+function entity.update(db_path, entity_type, entity_id, values, author, source)
+    current = entity.get(db_path, entity_type, entity_id)
+    if current == nil then
+        return nil, {{field = nil, severity = "error", message = "no such entity"}}
+    end
+
+    merged = {}
+    for k, v in pairs(current) do
+        merged[k] = v
+    end
+    for k, v in pairs(values) do
+        merged[k] = v
+    end
+
+    issues = entity.validate(db_path, entity_type, merged, current)
+    if has_error(issues) then
+        return nil, issues
+    end
+
+    field_changes = {}
+    assignments = {}
+    for name, new_value in pairs(values) do
+        old_value = current[name]
+        if tostring(old_value) != tostring(new_value) then
+            field_changes[name] = {old = old_value, new = new_value}
+            table.insert(assignments, name .. " = " .. db.literal(new_value))
+        end
+    end
+
+    if #assignments == 0 then
+        return entity_id, issues
+    end
+
+    event_id = ledger.append_update(db_path, entity_type, entity_id, field_changes, author, source)
+
+    table.insert(assignments, "updated_by = " .. db.literal(author))
+    table.insert(assignments, "last_event_id = " .. tostring(event_id))
+    db.exec(db_path, string.format(
+        "UPDATE %s SET %s WHERE id = %d;", entity_type, table.concat(assignments, ", "), entity_id
+    ))
+
+    extension.enqueue_after_hooks(db_path, config.extensions_dir(),
+        "entity.after_update", entity_type, entity_id, merged, current)
+
+    return entity_id, issues
+end
+
+-- Archives an entity -- never deletes it. The row stays in the
+-- projected table (still reachable via entity.get, still queryable in
+-- /sql) with archived_at set; entity.list/entity.count exclude it by
+-- default (pass include_archived=true to see it). Full ledger history
+-- (ledger.history) is untouched either way -- this only ever adds an
+-- 'archive' event, on top of whatever create/update events already
+-- exist for this entity.
+function entity.archive(db_path, entity_type, entity_id, author, source)
+    current = entity.get(db_path, entity_type, entity_id)
+    if current == nil then
+        return nil, {{field = nil, severity = "error", message = "no such entity"}}
+    end
+    if current.archived_at != nil and current.archived_at != "" then
+        return entity_id, {}
+    end
+
+    event_id = ledger.append_archive(db_path, entity_type, entity_id, author, source)
+
+    db.exec(db_path, string.format(
+        "UPDATE %s SET archived_at = datetime('now', 'localtime'), updated_by = %s, last_event_id = %d WHERE id = %d;",
+        entity_type, db.literal(author), event_id, entity_id
+    ))
+
+    extension.enqueue_after_hooks(db_path, config.extensions_dir(),
+        "entity.after_archive", entity_type, entity_id, current, current)
+
+    return entity_id, {}
+end
+
+-- Reverses entity.archive -- also never deletes anything, just another
+-- additive ledger event (an 'update' clearing archived_at, the same
+-- shape any other field-level edit takes).
+function entity.unarchive(db_path, entity_type, entity_id, author, source)
+    current = entity.get(db_path, entity_type, entity_id)
+    if current == nil then
+        return nil, {{field = nil, severity = "error", message = "no such entity"}}
+    end
+    if current.archived_at == nil or current.archived_at == "" then
+        return entity_id, {}
+    end
+
+    field_changes = {archived_at = {old = current.archived_at, new = nil}}
+    event_id = ledger.append_update(db_path, entity_type, entity_id, field_changes, author, source)
+
+    db.exec(db_path, string.format(
+        "UPDATE %s SET archived_at = NULL, updated_by = %s, last_event_id = %d WHERE id = %d;",
+        entity_type, db.literal(author), event_id, entity_id
+    ))
+
+    return entity_id, {}
+end
+
+-- Runs validation on a batch of row values.
+function entity.validate_batch(db_path, entity_type, rows_values)
+    batch_issues = {}
+    for i, values in ipairs(rows_values) do
+        issues = entity.validate(db_path, entity_type, values)
+        for _, issue in ipairs(issues) do
+            table.insert(batch_issues, {
+                row_index = i,
+                field = issue.field,
+                severity = issue.severity,
+                message = issue.message
+            })
+        end
+    end
+    return batch_issues
+end
+
+-- Creates a batch of entities atomically. `source.notebook_entry_id`
+-- (if given) is shared by every row in the batch -- one embedded
+-- registration table submission is one notebook-entry context -- but
+-- each row gets its own source_row_id (its position in the batch), so
+-- the ledger can tell which specific row of a multi-row submission
+-- produced which entity.
+function entity.create_batch(db_path, entity_type, rows_values, author, source)
+    batch_issues = entity.validate_batch(db_path, entity_type, rows_values)
+    if has_error(batch_issues) then
+        return nil, batch_issues
+    end
+    if source == nil then
+        source = {}
+    end
+
+    created_ids = {}
+    for i, values in ipairs(rows_values) do
+        row_source = {notebook_entry_id = source.notebook_entry_id, row_id = tostring(i)}
+        id, issues = entity.create(db_path, entity_type, values, author, row_source)
+        if id != nil then
+            table.insert(created_ids, id)
+        else
+            return nil, issues
+        end
+    end
+    return created_ids, batch_issues
+end
+
+function entity.get(db_path, entity_type, entity_id)
+    if db.table_exists(db_path, entity_type) == false then
+        return nil
+    end
+    rows = db.query(db_path, string.format(
+        "SELECT * FROM %s WHERE id = %d;", entity_type, entity_id
+    ))
+    if rows == nil then
+        return nil
+    end
+    return rows[1]
+end
+
+-- `limit`/`offset` are both optional; omit either (or both) for the
+-- full unpaginated result, kept for callers that already assume that
+-- (e.g. views/extensions built before pagination existed).
+--
+-- Archived entities (archived_at IS NOT NULL) are excluded by default --
+-- `/browse` and friends shouldn't fill up with retired rows -- pass
+-- `include_archived=true` for the rare caller that wants them too (an
+-- "include archived" toggle, an admin audit view, etc.). Archiving
+-- never removes a row, so it's always still reachable via entity.get
+-- or raw /sql regardless of this default.
+function entity.list(db_path, entity_type, limit, offset, include_archived)
+    if db.table_exists(db_path, entity_type) == false then
+        return {}
+    end
+    query = "SELECT * FROM " .. entity_type
+    if include_archived != true then
+        query = query .. " WHERE archived_at IS NULL"
+    end
+    if limit != nil then
+        query = query .. " LIMIT " .. tostring(tonumber(limit))
+        if offset != nil then
+            query = query .. " OFFSET " .. tostring(tonumber(offset))
+        end
+    end
+    rows = db.query(db_path, query .. ";")
+    if rows == nil then
+        return {}
+    end
+    return rows
+end
+
+function entity.count(db_path, entity_type, include_archived)
+    if db.table_exists(db_path, entity_type) == false then
+        return 0
+    end
+    query = "SELECT COUNT(*) AS n FROM " .. entity_type
+    if include_archived != true then
+        query = query .. " WHERE archived_at IS NULL"
+    end
+    rows = db.query(db_path, query .. ";")
+    if rows == nil or rows[1] == nil then
+        return 0
+    end
+    return tonumber(rows[1].n)
+end
+
+-- Drains the after-hook job queue: runs each pending job (oldest first,
+-- up to `limit`), marking it done or failed. A job that errors stays
+-- 'pending' (and gets retried on the next run) until it has failed
+-- extension.MAX_JOB_ATTEMPTS times; one job's failure never affects any
+-- other job. Intended to be invoked periodically by whatever the
+-- deployer already uses for scheduled tasks (cron, etc.) -- fossci is a
+-- one-shot CGI/CLI process, so there's no long-lived place inside it to
+-- run this on a timer itself.
+function entity.run_pending_jobs(db_path, limit)
+    ext_dir = config.extensions_dir()
+    ran = 0
+    failed = 0
+    for _, job in ipairs(extension.pending_jobs(db_path, limit)) do
+        manifest, err = extension.load_manifest(ext_dir, job.extension_name)
+        if manifest == nil then
+            extension.mark_job_failed(db_path, job, "manifest error: " .. tostring(err))
+            failed = failed + 1
+        elseif extension.is_approved(db_path, manifest) == false then
+            extension.mark_job_failed(db_path, job,
+                "extension not approved (or capabilities changed since approval)")
+            failed = failed + 1
+        else
+            new_values = nil
+            if job.new_values_json != nil then
+                new_values = json.decode(job.new_values_json)
+            end
+            old_values = nil
+            if job.old_values_json != nil then
+                old_values = json.decode(job.old_values_json)
+            end
+            ctx = build_ctx(db_path, manifest)
+            invoke_ok, result = extension.invoke(ext_dir, job.extension_name, manifest, "on_after",
+                new_values, old_values, ctx)
+            if invoke_ok then
+                extension.mark_job_done(db_path, job)
+                ran = ran + 1
+            else
+                extension.mark_job_failed(db_path, job, tostring(result))
+                failed = failed + 1
+            end
+        end
+    end
+    return {ran = ran, failed = failed}
+end
+
+function print_issues(issues)
+    for _, issue in ipairs(issues) do
+        label = "(row)"
+        if issue.field != nil then
+            label = issue.field
+        end
+        print(string.format("  [%s] %s: %s", issue.severity, label, issue.message))
+    end
+end
+
+function parse_kv_args(args, start)
+    values = {}
+    for i = start, #args do
+        key, value = string.match(args[i], "^([%w_]+)=(.*)$")
+        if key != nil then
+            values[key] = value
+        end
+    end
+    return values
+end
+
+-- CLI entry point: `fossci entity <create|list|show|validate-json|create-json> [args]`
+function entity.do_entity(cmd_args, db_path)
+    action = cmd_args[1]
+
+    if action == "create" then
+        entity_type = cmd_args[2]
+        if entity_type == nil then
+            print("Usage: fossci entity create <type> field=value [field=value ...]")
+            return
+        end
+        values = parse_kv_args(cmd_args, 3)
+        id, issues = entity.create(db_path, entity_type, values, os.getenv("USER"))
+        if id == nil then
+            print("Registration failed:")
+            print_issues(issues)
+            return
+        end
+        print(string.format("Created %s #%d", entity_type, id))
+        if #issues > 0 then
+            print_issues(issues)
+        end
+        return
+    end
+
+    if action == "update" then
+        entity_type = cmd_args[2]
+        id = tonumber(cmd_args[3])
+        if entity_type == nil or id == nil then
+            print("Usage: fossci entity update <type> <id> field=value [field=value ...]")
+            return
+        end
+        values = parse_kv_args(cmd_args, 4)
+        updated_id, issues = entity.update(db_path, entity_type, id, values, os.getenv("USER"))
+        if updated_id == nil then
+            print("Update failed:")
+            print_issues(issues)
+            return
+        end
+        print(string.format("Updated %s #%d", entity_type, updated_id))
+        if #issues > 0 then
+            print_issues(issues)
+        end
+        return
+    end
+
+    if action == "archive" then
+        entity_type = cmd_args[2]
+        id = tonumber(cmd_args[3])
+        if entity_type == nil or id == nil then
+            print("Usage: fossci entity archive <type> <id>")
+            return
+        end
+        archived_id, issues = entity.archive(db_path, entity_type, id, os.getenv("USER"))
+        if archived_id == nil then
+            print("Archive failed:")
+            print_issues(issues)
+            return
+        end
+        print(string.format("Archived %s #%d", entity_type, archived_id))
+        return
+    end
+
+    if action == "unarchive" then
+        entity_type = cmd_args[2]
+        id = tonumber(cmd_args[3])
+        if entity_type == nil or id == nil then
+            print("Usage: fossci entity unarchive <type> <id>")
+            return
+        end
+        unarchived_id, issues = entity.unarchive(db_path, entity_type, id, os.getenv("USER"))
+        if unarchived_id == nil then
+            print("Unarchive failed:")
+            print_issues(issues)
+            return
+        end
+        print(string.format("Unarchived %s #%d", entity_type, unarchived_id))
+        return
+    end
+
+    if action == "list" then
+        entity_type = cmd_args[2]
+        include_archived = false
+        for i = 3, #cmd_args do
+            if cmd_args[i] == "--include-archived" then
+                include_archived = true
+            end
+        end
+        if entity_type == nil then
+            print("Usage: fossci entity list <type> [--include-archived]")
+            return
+        end
+        for _, row in ipairs(entity.list(db_path, entity_type, nil, nil, include_archived)) do
+            print(string.format("#%s", tostring(row.id)))
+        end
+        return
+    end
+
+    if action == "show" then
+        entity_type = cmd_args[2]
+        id = tonumber(cmd_args[3])
+        if entity_type == nil or id == nil then
+            print("Usage: fossci entity show <type> <id>")
+            return
+        end
+        row = entity.get(db_path, entity_type, id)
+        if row == nil then
+            print("Not found")
+            return
+        end
+        for k, v in pairs(row) do
+            print(string.format("%-20s %s", k, tostring(v)))
+        end
+        return
+    end
+
+    if action == "validate-json" then
+        entity_type = cmd_args[2]
+        if entity_type == nil then
+            print("Usage: fossci entity validate-json <type>")
+            return
+        end
+        input = io.read("*all")
+        rows_values, _, err = json.decode(input)
+        if rows_values == nil then
+            print(json.encode({error = "Invalid JSON input: " .. tostring(err)}))
+            return
+        end
+        batch_issues = entity.validate_batch(db_path, entity_type, rows_values)
+        print(json.encode(batch_issues))
+        return
+    end
+
+    if action == "create-json" then
+        entity_type = cmd_args[2]
+        if entity_type == nil then
+            print("Usage: fossci entity create-json <type>")
+            return
+        end
+        input = io.read("*all")
+        rows_values, _, err = json.decode(input)
+        if rows_values == nil then
+            print(json.encode({error = "Invalid JSON input: " .. tostring(err)}))
+            return
+        end
+        author = os.getenv("USER")
+        created_ids, batch_issues = entity.create_batch(db_path, entity_type, rows_values, author)
+        response = {
+            issues = batch_issues
+        }
+        if created_ids != nil then
+            response.created_ids = created_ids
+            response.success = true
+        else
+            response.success = false
+        end
+        print(json.encode(response))
+        return
+    end
+
+    if action == "update-json" then
+        entity_type = cmd_args[2]
+        id = tonumber(cmd_args[3])
+        if entity_type == nil or id == nil then
+            print("Usage: fossci entity update-json <type> <id>")
+            return
+        end
+        input = io.read("*all")
+        values, _, err = json.decode(input)
+        if values == nil then
+            print(json.encode({error = "Invalid JSON input: " .. tostring(err)}))
+            return
+        end
+        author = os.getenv("USER")
+        updated_id, issues = entity.update(db_path, entity_type, id, values, author)
+        response = {
+            issues = issues
+        }
+        if updated_id != nil then
+            response.updated_id = updated_id
+            response.success = true
+        else
+            response.success = false
+        end
+        print(json.encode(response))
+        return
+    end
+
+    print("Usage: fossci entity <create|list|show|update|validate-json|create-json|update-json> [args]")
+end
+
+-- CLI entry point: `fossci extension <list|show|approve|revoke|run-pending> [args]`
+-- Lives here rather than in extension.lua for the same reason build_ctx
+-- does: run-pending needs entity.create/entity.update, and extension.lua
+-- can't require this module back without a require cycle.
+function entity.do_extension(cmd_args, db_path)
+    action = cmd_args[1]
+    ext_dir = config.extensions_dir()
+
+    if action == "list" then
+        for _, entry in ipairs(extension.all(ext_dir)) do
+            if entry.manifest == nil then
+                print(string.format("%-20s ERROR: %s", entry.name, entry.err))
+            else
+                status = "not approved"
+                if extension.is_approved(db_path, entry.manifest) then
+                    status = "approved"
+                end
+                print(string.format("%-20s %-14s events=%-30s entity_types=%s",
+                    entry.name, status,
+                    table.concat(entry.manifest.events, ","),
+                    table.concat(entry.manifest.entity_types, ",")))
+            end
+        end
+        return
+    end
+
+    if action == "show" then
+        name = cmd_args[2]
+        if name == nil then
+            print("Usage: fossci extension show <name>")
+            return
+        end
+        manifest, err = extension.load_manifest(ext_dir, name)
+        if manifest == nil then
+            print("Error: " .. tostring(err))
+            return
+        end
+        caps = manifest.capabilities
+        if caps == nil then caps = {} end
+        read_list = caps.read
+        if read_list == nil then read_list = {} end
+        write_list = caps.write
+        if write_list == nil then write_list = {} end
+        net = caps.net
+        if net == nil then net = "none" end
+
+        print("name:         " .. manifest.name)
+        print("events:       " .. table.concat(manifest.events, ", "))
+        print("entity_types: " .. table.concat(manifest.entity_types, ", "))
+        print("capabilities: read=" .. table.concat(read_list, ",") ..
+              " write=" .. table.concat(write_list, ",") .. " net=" .. net)
+        if extension.is_approved(db_path, manifest) then
+            print("status:       approved")
+        elseif extension.approved_capabilities(db_path, name) == nil then
+            print("status:       not approved")
+        else
+            print("status:       NOT APPROVED -- capabilities changed since last approval, re-approval required")
+        end
+        return
+    end
+
+    if action == "approve" then
+        name = cmd_args[2]
+        if name == nil then
+            print("Usage: fossci extension approve <name>")
+            return
+        end
+        manifest, err = extension.load_manifest(ext_dir, name)
+        if manifest == nil then
+            print("Error: " .. tostring(err))
+            return
+        end
+        extension.approve(db_path, manifest, os.getenv("USER"))
+        caps = manifest.capabilities
+        if caps == nil then caps = {} end
+        print("Approved '" .. name .. "' with capabilities: " .. json.encode(caps))
+        return
+    end
+
+    if action == "revoke" then
+        name = cmd_args[2]
+        if name == nil then
+            print("Usage: fossci extension revoke <name>")
+            return
+        end
+        extension.revoke(db_path, name)
+        print("Revoked '" .. name .. "'")
+        return
+    end
+
+    if action == "run-pending" then
+        result = entity.run_pending_jobs(db_path)
+        print(string.format("Ran %d, failed %d", result.ran, result.failed))
+        return
+    end
+
+    print("Usage: fossci extension <list|show|approve|revoke|run-pending> [args]")
+end
+
+return entity

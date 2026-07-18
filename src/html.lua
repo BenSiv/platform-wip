@@ -1,0 +1,2077 @@
+db = require("db")
+schema = require("schema")
+
+html = {}
+
+-- Entity field values and (in principle) entity_type ultimately come
+-- from user-submitted data -- escape before ever interpolating into
+-- HTML text/attributes.
+function html_escape(s)
+    s = tostring(s)
+    s = string.gsub(s, "&", "&amp;")
+    s = string.gsub(s, "<", "&lt;")
+    s = string.gsub(s, ">", "&gt;")
+    s = string.gsub(s, "\"", "&quot;")
+    s = string.gsub(s, "'", "&#39;")
+    return s
+end
+
+-- Two more escaping functions, deliberately distinct from html_escape
+-- above: HTML tag content/attributes and inline-<script> content are
+-- different injection contexts and need different escaping, the same
+-- way Go's html/template picks an escaper per context rather than
+-- applying one generic function everywhere. html_escape is correct for
+-- values landing in HTML body text or an attribute; neither of the two
+-- below is that context.
+--
+-- json_for_script: for an *already JSON-encoded* string (json.encode's
+-- own output) that will be embedded inside an inline <script> body, e.g.
+-- `const layout = ` .. json_for_script(json.encode(layout)) .. `;`. A
+-- JSON encoder has no reason to escape "<" (not required by the JSON
+-- spec), but a literal "</script>" sequence inside a JSON string value
+-- terminates the surrounding <script> tag at the HTML-parser level --
+-- before any JS engine even looks at the content -- letting whatever
+-- follows execute as newly-opened markup. Confirmed as a real, working
+-- injection, not theoretical: a schema field's own `label` containing
+-- "</script><script>alert(1)</script>" did exactly this, unescaped,
+-- reaching the live page. < parses back to a literal "<" in
+-- JSON/JS, so this changes nothing about the decoded value.
+function json_for_script(json_string)
+    return (string.gsub(json_string, "<", "\\u003c"))
+end
+
+-- js_string_literal: for a plain (not-yet-JSON-encoded) Lua string
+-- being embedded directly inside a JS string literal, e.g.
+-- `const entityType = "` .. js_string_literal(entity_type) .. `";`.
+-- Escapes backslash and double-quote (so the value can't break out of
+-- the surrounding "..." literal) and "<" for the same script-tag-breakout
+-- reason json_for_script exists.
+function js_string_literal(s)
+    s = tostring(s)
+    s = string.gsub(s, "\\", "\\\\")
+    s = string.gsub(s, "\"", "\\\"")
+    s = string.gsub(s, "\n", "\\n")
+    s = string.gsub(s, "<", "\\u003c")
+    return s
+end
+
+-- The ".fossci-container" shell (card look: padding/shadow/border/
+-- rounded corners) was copy-pasted, identically byte-for-byte except
+-- max_width, into every render_* function's own inline <style> block --
+-- ten separate copies, confirmed by grepping the file directly. One
+-- shared definition instead; each caller supplies just the max-width
+-- its own page already used (1200/1100/900/800), so this is a pure
+-- de-duplication, not a visual change anywhere.
+function fossci_container_css(max_width)
+    if max_width == nil then
+        max_width = 1200
+    end
+    return string.format("""
+        .fossci-container {
+            font-family: 'Outfit', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            color: var(--fossci-text, #334155);
+            background: #ffffff;
+            padding: 28px;
+            border-radius: var(--fossci-radius-lg, 16px);
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.05), 0 8px 10px -6px rgba(0, 0, 0, 0.05);
+            margin: 20px auto;
+            max-width: %dpx;
+            border: 1px solid var(--fossci-bg-2, #f1f5f9);
+        }
+""", max_width)
+end
+
+-- Shared .btn/.btn-primary/.btn-secondary/.btn-delete rules -- previously
+-- three separate, hand-copied inline copies (render(), render_browse(),
+-- render_sql()) that had quietly drifted apart: render_sql()'s never
+-- picked up the shared .btn base at all (no flex-centering, no shared
+-- transition/padding token), and its .btn-secondary was a whole
+-- font-size step smaller (0.85rem vs the others' inherited 0.9rem) --
+-- confirmed via a real rendered-page diff, not just reading the CSS.
+-- One copy now, used everywhere a button appears.
+function fossci_button_css()
+    return """
+        .btn {
+            padding: 10px 20px;
+            border-radius: var(--fossci-radius-sm, 8px);
+            font-weight: 600;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            border: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            text-decoration: none;
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, var(--fossci-accent, #4f46e5), var(--fossci-accent-2, #6366f1));
+            color: #ffffff;
+            box-shadow: 0 4px 12px rgba(99, 102, 241, 0.2);
+        }
+        .btn-primary:hover { box-shadow: 0 6px 16px rgba(99, 102, 241, 0.3); filter: brightness(1.05); }
+        .btn-primary:active { transform: scale(0.98); }
+        .btn-secondary {
+            background: var(--fossci-bg, #f8fafc);
+            color: var(--fossci-th-text, #475569);
+            border: 1px solid var(--fossci-border, #e2e8f0);
+        }
+        .btn-secondary:hover { background: var(--fossci-bg-2, #f1f5f9); color: var(--fossci-heading, #0f172a); }
+        .btn-secondary:active { transform: scale(0.98); }
+        .btn-secondary:disabled { opacity: 0.6; cursor: default; transform: none; }
+        .btn-delete {
+            background: transparent;
+            color: var(--fossci-muted-2, #94a3b8);
+            font-size: 1.25rem;
+            cursor: pointer;
+            transition: color 0.15s ease;
+            border: none;
+            padding: 4px;
+        }
+        .btn-delete:hover { color: #ef4444; }
+"""
+end
+
+-- Generic hover-popover component, for "reveal detail on hover instead
+-- of cramming it into the default view" -- the design principle behind
+-- moving Data-index row counts and SQL-result entity previews off the
+-- page by default (see render_index/render_sql). Reused as shared
+-- blocks rather than duplicated per render_* function, matching how a
+-- few other repeated style rules (.fossci-container, .btn-primary,
+-- etc.) already work in this file -- each render_* function embeds its
+-- own self-contained <style>/<script>, there is no separate
+-- shared-asset loading mechanism in fossci today.
+--
+-- Two trigger shapes, same visual popover, split into CSS-only vs
+-- CSS+JS so a page with only the cheap precomputed case (no JS/nonce
+-- needed at all) doesn't have to carry the fetch machinery:
+--   - A trigger with a `.fossci-popover` child already containing real
+--     markup (no `data-fossci-popover-src`) just reveals it on hover --
+--     pure CSS, for callers that can cheaply precompute the content
+--     server-side. Only needs popover_css().
+--   - `data-fossci-popover-src="URL"` -- lazy-fetched (debounced,
+--     cached per URL for the page's lifetime) JSON `{html: "..."}`
+--     response, shown on hover. For cases where precomputing/embedding
+--     every possible preview server-side would be wasteful (e.g. one
+--     row per SQL result). Needs both popover_css() and popover_js().
+function html.popover_css()
+    return """
+<style>
+.fossci-popover-trigger { position: relative; cursor: help; }
+.fossci-popover-trigger[data-fossci-popover-src] { cursor: pointer; }
+.fossci-popover {
+    position: absolute; z-index: 100; left: 0; top: 100%; margin-top: 6px;
+    min-width: 180px; max-width: 320px; padding: 10px 12px;
+    background: var(--fossci-bg, #ffffff); border: 1px solid var(--fossci-border, #e2e8f0);
+    border-radius: var(--fossci-radius-sm, 8px); box-shadow: 0 6px 20px rgba(0,0,0,0.12);
+    font-size: 0.85rem; font-weight: 400; color: var(--fossci-text, #334155);
+    text-align: left; white-space: normal;
+    opacity: 0; visibility: hidden; transform: translateY(-4px);
+    transition: var(--fossci-transition, all 0.2s cubic-bezier(0.4, 0, 0.2, 1));
+    pointer-events: none;
+}
+.fossci-popover-trigger:hover .fossci-popover,
+.fossci-popover-trigger:focus .fossci-popover { opacity: 1; visibility: visible; transform: translateY(0); pointer-events: auto; }
+.fossci-popover-loading, .fossci-popover-error { color: var(--fossci-muted, #94a3b8); font-style: italic; }
+</style>
+"""
+end
+
+-- `nonce` must be Fossil's own per-request CSP nonce (see html.render's
+-- own comment below) since this emits an inline <script>.
+function html.popover_js(nonce)
+    if nonce == nil then
+        nonce = ""
+    end
+    return string.format("""
+<script nonce="%s">
+(function(){
+    var cache = {};
+    function loadInto(trigger, pop){
+        var src = trigger.getAttribute('data-fossci-popover-src');
+        if(cache[src] != null){ pop.innerHTML = cache[src]; return; }
+        pop.innerHTML = '<span class="fossci-popover-loading">Loading...</span>';
+        fetch(src).then(function(resp){ return resp.json(); }).then(function(data){
+            var html = (data && data.html) ? data.html : 'No preview available.';
+            cache[src] = html;
+            pop.innerHTML = html;
+        }).catch(function(){
+            pop.innerHTML = '<span class="fossci-popover-error">Preview failed to load.</span>';
+        });
+    }
+    document.querySelectorAll('.fossci-popover-trigger[data-fossci-popover-src]').forEach(function(trigger){
+        var pop = trigger.querySelector('.fossci-popover');
+        if(!pop) return;
+        var timer = null;
+        var loaded = false;
+        trigger.addEventListener('mouseenter', function(){
+            timer = setTimeout(function(){
+                if(!loaded){ loaded = true; loadInto(trigger, pop); }
+            }, 200);
+        });
+        trigger.addEventListener('mouseleave', function(){
+            if(timer) clearTimeout(timer);
+        });
+    });
+})();
+</script>
+""", nonce)
+end
+
+-- `nonce` must be Fossil's own per-request CSP nonce (the FOSSIL_NONCE
+-- CGI env var Fossil already injects, see doc/architecture.md) --
+-- Fossil's page wrapper sets a strict `script-src 'self' 'nonce-...'`
+-- CSP, so an inline <script> without the matching nonce is silently
+-- blocked by the browser: the page loads, but no JS in it ever runs.
+function html.render(entity_type, layout_json, nonce)
+    escaped_type = html_escape(entity_type)
+    return string.format("""
+<div class="fossil-doc" data-title="Register %s">
+    <style>
+%s
+        .fossci-header {
+            margin-bottom: 24px;
+            border-bottom: 1px solid var(--fossci-bg-2, #f1f5f9);
+            padding-bottom: 16px;
+        }
+        .fossci-header h2 {
+            margin: 0 0 6px 0;
+            font-size: 1.6rem;
+            font-weight: 700;
+            color: var(--fossci-heading, #0f172a);
+            letter-spacing: -0.02em;
+        }
+        .fossci-header p {
+            color: var(--fossci-muted, #64748b);
+            margin: 0;
+            font-size: 0.95rem;
+        }
+        .fossci-header span.req-dot {
+            color: #ef4444;
+            font-weight: bold;
+        }
+        .fossci-table-wrapper {
+            overflow-x: auto;
+            margin-bottom: 24px;
+            border: 1px solid var(--fossci-border, #e2e8f0);
+            border-radius: var(--fossci-radius-md, 12px);
+            box-shadow: inset 0 2px 4px 0 rgba(0,0,0,0.02);
+            background: var(--fossci-bg, #f8fafc);
+        }
+        #registration-table {
+            width: 100%%;
+            border-collapse: separate;
+            border-spacing: 0;
+            min-width: 700px;
+        }
+        #registration-table th, #registration-table td {
+            padding: 14px 16px;
+            text-align: left;
+            border-bottom: 1px solid var(--fossci-border, #e2e8f0);
+        }
+        #registration-table th {
+            background: var(--fossci-bg-2, #f1f5f9);
+            font-weight: 600;
+            font-size: 0.8rem;
+            color: var(--fossci-th-text, #475569);
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            border-top: 1px solid var(--fossci-border, #e2e8f0);
+        }
+        #registration-table th:first-child { border-top-left-radius: 10px; }
+        #registration-table th:last-child  { border-top-right-radius: 10px; }
+        #registration-table td { background: #ffffff; }
+        #registration-table tr:last-child td { border-bottom: none; }
+        #registration-table tr:last-child td:first-child { border-bottom-left-radius: 10px; }
+        #registration-table tr:last-child td:last-child  { border-bottom-right-radius: 10px; }
+        #registration-table th.required::after {
+            content: " *";
+            color: #ef4444;
+        }
+        .cell-input-wrapper { position: relative; }
+        .cell-input {
+            width: 100%%;
+            padding: 9px 12px;
+            border: 1px solid var(--fossci-border-2, #cbd5e1);
+            border-radius: var(--fossci-radius-sm, 8px);
+            font-size: 0.9rem;
+            background: #ffffff;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            box-sizing: border-box;
+            color: var(--fossci-input-text, #1e293b);
+        }
+        .cell-input:focus {
+            border-color: var(--fossci-accent-2, #6366f1);
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
+            background: #fff;
+        }
+        .cell-input.error {
+            border-color: #f87171;
+            background-color: #fef2f2;
+            box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.08);
+        }
+        .error-badge {
+            color: #ef4444;
+            font-size: 0.75rem;
+            margin-top: 4px;
+            display: block;
+            font-weight: 500;
+        }
+        .autocomplete-results {
+            position: absolute;
+            top: 100%%;
+            left: 0;
+            right: 0;
+            background: #ffffff;
+            border: 1px solid var(--fossci-border, #e2e8f0);
+            border-radius: var(--fossci-radius-sm, 8px);
+            max-height: 220px;
+            overflow-y: auto;
+            z-index: 1000;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+            margin-top: 6px;
+            padding: 4px 0;
+        }
+        .autocomplete-item {
+            padding: 9px 14px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            transition: all 0.15s ease;
+            color: var(--fossci-text, #334155);
+        }
+        .autocomplete-item:hover { background: var(--fossci-bg-2, #f1f5f9); color: var(--fossci-heading, #0f172a); }
+        .fossci-actions {
+            display: flex;
+            gap: 14px;
+            justify-content: flex-start;
+            align-items: center;
+        }
+        %s
+        .status-msg {
+            margin-top: 24px;
+            padding: 14px 20px;
+            border-radius: var(--fossci-radius-sm, 8px);
+            font-size: 0.95rem;
+            display: none;
+            font-weight: 500;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.02);
+        }
+        .status-msg.success {
+            display: block;
+            background: #f0fdf4;
+            color: #166534;
+            border: 1px solid #bbf7d0;
+            animation: fadeIn 0.25s ease;
+        }
+        .status-msg.error {
+            display: block;
+            background: #fef2f2;
+            color: #991b1b;
+            border: 1px solid #fecaca;
+            animation: fadeIn 0.25s ease;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(4px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+
+    <div class="fossci-container">
+        <div class="fossci-header">
+            <h2>Register %s</h2>
+            <p>Fill out the sheet. Fields marked with <span class="req-dot">*</span> are required.</p>
+            <p><a href="fossci/browse?type=%s">Browse existing %s entities &rarr;</a></p>
+        </div>
+
+        <div class="fossci-table-wrapper">
+            <table id="registration-table">
+                <thead>
+                    <tr id="table-headers">
+                        <!-- headers dynamically injected -->
+                    </tr>
+                </thead>
+                <tbody id="table-body">
+                    <!-- rows dynamically injected -->
+                </tbody>
+            </table>
+        </div>
+
+        <div class="fossci-actions">
+            <button type="button" class="btn btn-secondary" id="btn-add-row">+ Add Row</button>
+            <button type="button" class="btn btn-primary"   id="btn-submit-batch">Submit Batch</button>
+        </div>
+
+        <div id="status-message" class="status-msg"></div>
+    </div>
+
+    <script nonce="%s">
+        const layout = %s;
+        const entityType = "%s";
+        const baseUrl = window.location.pathname.replace(/\/register\/?$/, "");
+        let rowCounter = 0;
+
+        // Reads the non-HttpOnly csrf cookie (set at /login) for the
+        // double-submit CSRF check -- see cgi.lua's require_csrf.
+        function getCsrfToken() {
+            const match = document.cookie.match(/(?:^|;\s*)csrf=([^;]*)/);
+            return match ? match[1] : "";
+        }
+
+        // Which notebook entry (wiki page) this registration table is
+        // embedded in, for ledger provenance (source_notebook_entry_id).
+        // An explicit ?entry= on this iframe's own src overrides
+        // auto-detection via document.referrer (the parent page's URL,
+        // set by the browser for a same-origin iframe navigation) --
+        // useful when referrer policies strip it, or to label it by
+        // something other than a raw URL.
+        const urlParams = new URLSearchParams(window.location.search);
+        let notebookEntry = urlParams.get("entry");
+        if (!notebookEntry && document.referrer) {
+            notebookEntry = document.referrer;
+        }
+
+        function initTable() {
+            const headerRow = document.getElementById("table-headers");
+            headerRow.innerHTML = "";
+
+            layout.fields.forEach(field => {
+                const th = document.createElement("th");
+                th.innerText = field.label;
+                if (field.required) { th.classList.add("required"); }
+                headerRow.appendChild(th);
+            });
+
+            const deleteTh = document.createElement("th");
+            deleteTh.style.width = "40px";
+            headerRow.appendChild(deleteTh);
+
+            addRow();
+        }
+
+        function addRow() {
+            rowCounter++;
+            const tbody = document.getElementById("table-body");
+            const tr = document.createElement("tr");
+            tr.id = `row-${rowCounter}`;
+
+            layout.fields.forEach(field => {
+                const td = document.createElement("td");
+                const wrapper = document.createElement("div");
+                wrapper.classList.add("cell-input-wrapper");
+
+                let input;
+                if (field.type === "select") {
+                    input = document.createElement("select");
+                    input.classList.add("cell-input");
+                    const optEmpty = document.createElement("option");
+                    optEmpty.value = "";
+                    optEmpty.innerText = "";
+                    input.appendChild(optEmpty);
+                    field.values.forEach(val => {
+                        const opt = document.createElement("option");
+                        opt.value = val;
+                        opt.innerText = val;
+                        input.appendChild(opt);
+                    });
+                } else {
+                    input = document.createElement("input");
+                    input.classList.add("cell-input");
+                    if (field.type === "number") {
+                        input.type = "number";
+                        input.step = "any";
+                        // Real bug found in production: with no min/max
+                        // set, the native spinner arrows let a value
+                        // cycle past any sensible bound (e.g. past 5 on
+                        // a 1-5 field) with zero feedback. Both optional
+                        // -- a schema author declares them per-field
+                        // (see schema.md), fossci itself has no opinion
+                        // on what range makes sense for a given field.
+                        if (field.min !== undefined && field.min !== null) { input.min = field.min; }
+                        if (field.max !== undefined && field.max !== null) { input.max = field.max; }
+                    } else if (field.type === "date") {
+                        input.type = "date";
+                    } else {
+                        input.type = "text";
+                    }
+                    if (field.type === "reference") {
+                        input.setAttribute("autocomplete", "off");
+                        input.placeholder = "Search ID or name...";
+                        setupAutocomplete(input, field.ref_entity_type);
+                    }
+                }
+
+                input.name = field.name;
+                input.addEventListener("input",  () => clearCellError(input));
+                input.addEventListener("change", () => clearCellError(input));
+                wrapper.appendChild(input);
+                td.appendChild(wrapper);
+                tr.appendChild(td);
+            });
+
+            const deleteTd = document.createElement("td");
+            const deleteBtn = document.createElement("button");
+            deleteBtn.type = "button";
+            deleteBtn.classList.add("btn-delete");
+            deleteBtn.innerHTML = "&times;";
+            deleteBtn.onclick = () => {
+                const rows = tbody.getElementsByTagName("tr");
+                if (rows.length > 1) {
+                    tr.remove();
+                } else {
+                    alert("Cannot delete the only row.");
+                }
+            };
+            deleteTd.appendChild(deleteBtn);
+            tr.appendChild(deleteTd);
+            tbody.appendChild(tr);
+        }
+
+        function clearCellError(input) {
+            input.classList.remove("error");
+            const parent = input.parentElement;
+            const existingBadge = parent.querySelector(".error-badge");
+            if (existingBadge) { existingBadge.remove(); }
+        }
+
+        function highlightError(rowIndex, fieldName, message) {
+            const tbody = document.getElementById("table-body");
+            const tr = tbody.getElementsByTagName("tr")[rowIndex];
+            if (!tr) return;
+            const input = tr.querySelector(`[name="${fieldName}"]`);
+            if (!input) return;
+            input.classList.add("error");
+            const parent = input.parentElement;
+            let badge = parent.querySelector(".error-badge");
+            if (!badge) {
+                badge = document.createElement("span");
+                badge.classList.add("error-badge");
+                parent.appendChild(badge);
+            }
+            badge.innerText = message;
+        }
+
+        function clearAllErrors() {
+            document.querySelectorAll(".cell-input").forEach(input => clearCellError(input));
+            const msg = document.getElementById("status-message");
+            msg.className = "status-msg";
+            msg.innerText = "";
+            msg.style.display = "none";
+        }
+
+        function setupAutocomplete(input, refType) {
+            const wrapper = input.parentElement;
+            let resultsContainer = null;
+            let debounceTimer;
+
+            input.addEventListener("input", () => {
+                clearTimeout(debounceTimer);
+                const query = input.value.trim();
+                if (resultsContainer) { resultsContainer.remove(); resultsContainer = null; }
+                if (query.length === 0) return;
+
+                debounceTimer = setTimeout(() => {
+                    fetch(`${baseUrl}/api/autocomplete?type=${refType}&query=${encodeURIComponent(query)}`)
+                        .then(res => res.json())
+                        .then(data => {
+                            if (resultsContainer) resultsContainer.remove();
+                            if (data.length === 0) return;
+                            resultsContainer = document.createElement("div");
+                            resultsContainer.classList.add("autocomplete-results");
+                            data.forEach(item => {
+                                const div = document.createElement("div");
+                                div.classList.add("autocomplete-item");
+                                div.innerText = `[#${item.id}] ${item.name}`;
+                                div.onclick = () => {
+                                    input.value = item.id;
+                                    clearCellError(input);
+                                    resultsContainer.remove();
+                                    resultsContainer = null;
+                                };
+                                resultsContainer.appendChild(div);
+                            });
+                            wrapper.appendChild(resultsContainer);
+                        })
+                        .catch(err => console.error("Autocomplete fetch error", err));
+                }, 200);
+            });
+
+            document.addEventListener("click", (e) => {
+                if (e.target !== input && resultsContainer && !resultsContainer.contains(e.target)) {
+                    resultsContainer.remove();
+                    resultsContainer = null;
+                }
+            });
+        }
+
+        function submitBatch() {
+            clearAllErrors();
+            const tbody = document.getElementById("table-body");
+            const trs = tbody.getElementsByTagName("tr");
+            const payload = [];
+
+            for (let i = 0; i < trs.length; i++) {
+                const tr = trs[i];
+                const rowData = {};
+                layout.fields.forEach(field => {
+                    const el = tr.querySelector(`[name="${field.name}"]`);
+                    if (el) {
+                        let val = el.value;
+                        if (field.type === "number" && val !== "") { val = parseFloat(val); }
+                        rowData[field.name] = val;
+                    }
+                });
+                payload.push(rowData);
+            }
+
+            const msg = document.getElementById("status-message");
+            msg.className = "status-msg";
+            msg.innerText = "Validating and submitting...";
+            msg.style.display = "block";
+
+            const entryParam = notebookEntry ? `&entry=${encodeURIComponent(notebookEntry)}` : "";
+            fetch(`${baseUrl}/api/submit?type=${entityType}${entryParam}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "X-CSRF-Token": getCsrfToken() },
+                body: JSON.stringify(payload)
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    msg.className = "status-msg success";
+                    msg.innerText = `Successfully registered ${data.created_ids.length} entities (IDs: ${data.created_ids.join(", ")}).`;
+                    tbody.innerHTML = "";
+                    rowCounter = 0;
+                    addRow();
+                } else {
+                    msg.className = "status-msg error";
+                    msg.innerText = "Submission failed. Please check highlighted errors in the form.";
+                    if (data.issues && data.issues.length > 0) {
+                        data.issues.forEach(issue => {
+                            highlightError(issue.row_index - 1, issue.field, issue.message);
+                        });
+                    }
+                }
+            })
+            .catch(err => {
+                console.error("Submit error", err);
+                msg.className = "status-msg error";
+                msg.innerText = "An unexpected error occurred during submission.";
+            });
+        }
+
+        window.onload = initTable;
+        document.getElementById("btn-add-row").addEventListener("click", addRow);
+        document.getElementById("btn-submit-batch").addEventListener("click", submitBatch);
+    </script>
+</div>
+""", escaped_type, fossci_container_css(1200), fossci_button_css(), escaped_type, escaped_type, escaped_type, nonce, json_for_script(layout_json), js_string_literal(entity_type))
+end
+
+function display_value(value)
+    if value == nil or tostring(value) == "" then
+        return "&mdash;"
+    end
+    return html_escape(value)
+end
+
+-- Reference-type field values are a raw entity id -- fossci has no
+-- general "display name" concept for entities (confirmed directly:
+-- entity tables carry no "name" column at all, only whatever fields
+-- each schema declares; /browse and /detail already only ever show
+-- "#<id>" for the row's own identity too), so this can't resolve to a
+-- human-readable name -- it renders the id as a real, styled link to
+-- the referenced entity's own detail page instead of a disconnected
+-- bare number, matching how the row's own id already links out in
+-- render_browse below. "fossci/detail..." (no leading slash) is
+-- intentional -- see render_browse's own identical link for why
+-- (relative to this page's own <base>, which lacks a trailing slash).
+-- Two sources for a human-readable label, tried in priority order:
+--   1. The builtin "name" column (schema.lua's BUILTIN_COLUMNS) -- a
+--      real name assigned by an external source like Benchling (e.g. a
+--      container literally named "50L stainless steel bioreactor").
+--      Confirmed live: an importer already fetched this value but only
+--      used it transiently for dedup matching, never persisting it --
+--      fixed separately, but this is the whole reason the column exists.
+--   2. A schema author's own {display = true} field (entity_field.display),
+--      for entity types with no such external source at all. A
+--      heuristic like "first text field" was considered and rejected: a
+--      real schema's first text-type field is often not the one a human
+--      would pick (e.g. plant's is "genetic_group", not species/variety).
+-- Returns nil (caller falls back to "#id") when neither source has a
+-- non-empty value for this row.
+--
+-- A bare number from source 2 (e.g. "343" for an experiment) reads as
+-- ambiguous -- could be mistaken for the id itself -- while a text value
+-- is already self-explanatory. Only number-typed display fields get the
+-- entity type name prefixed ("experiment 343"); text/select fields, and
+-- anything from the builtin name column, are used exactly as they are.
+function format_display_label(entity_type, field, raw_value)
+    if field.type == "number" then
+        return entity_type .. " " .. tostring(raw_value)
+    end
+    return tostring(raw_value)
+end
+
+function entity_display_label(db_path, entity_type, entity_id)
+    rows = db.query(db_path, string.format(
+        "SELECT name FROM %s WHERE id = %s;", entity_type, db.quote(entity_id)
+    ))
+    if rows != nil and rows[1] != nil and rows[1].name != nil and tostring(rows[1].name) != "" then
+        return tostring(rows[1].name)
+    end
+
+    fields = schema.fields(db_path, entity_type)
+    if fields == nil then
+        return nil
+    end
+    display_field = nil
+    for _, f in ipairs(fields) do
+        if tonumber(f.display) == 1 then
+            display_field = f
+            break
+        end
+    end
+    if display_field == nil then
+        return nil
+    end
+    rows = db.query(db_path, string.format(
+        "SELECT %s AS label FROM %s WHERE id = %s;",
+        display_field.name, entity_type, db.quote(entity_id)
+    ))
+    if rows == nil or rows[1] == nil or rows[1].label == nil or tostring(rows[1].label) == "" then
+        return nil
+    end
+    return format_display_label(entity_type, display_field, rows[1].label)
+end
+
+-- Same two-source priority as entity_display_label, but for a row this
+-- page already has fully loaded -- no second query needed for either
+-- source, just reading row.name and (if empty) a schema.fields() lookup.
+function own_row_label(db_path, entity_type, row)
+    if row.name != nil and tostring(row.name) != "" then
+        return tostring(row.name)
+    end
+
+    fields = schema.fields(db_path, entity_type)
+    if fields == nil then
+        return nil
+    end
+    for _, f in ipairs(fields) do
+        if tonumber(f.display) == 1 then
+            value = row[f.name]
+            if value != nil and tostring(value) != "" then
+                return format_display_label(entity_type, f, value)
+            end
+            return nil
+        end
+    end
+    return nil
+end
+
+function render_reference_value(db_path, ref_entity_type, value)
+    if value == nil or tostring(value) == "" then
+        return "&mdash;"
+    end
+    escaped_type = html_escape(ref_entity_type)
+    escaped_id = html_escape(tostring(value))
+    link_text = "#" .. escaped_id
+    label = entity_display_label(db_path, ref_entity_type, value)
+    if label != nil then
+        link_text = html_escape(label)
+    end
+    -- Hover reveals a preview of the referenced row (fetched lazily via
+    -- /api/preview, see cgi.lua) rather than making every reference
+    -- column a guessing game of "click through and come back" -- the
+    -- same popover mechanism (html.popover_css()/popover_js()) used for
+    -- Data-index row counts, here in its lazy-fetch form since
+    -- precomputing every row's preview server-side would be wasteful.
+    preview_src = "fossci/api/preview?type=" .. escaped_type .. "&entity_id=" .. escaped_id
+    return "<a href=\"fossci/detail?type=" .. escaped_type .. "&entity_id=" .. escaped_id ..
+        "\" class=\"fossci-entity-ref fossci-popover-trigger\" data-fossci-popover-src=\"" .. preview_src ..
+        "\" tabindex=\"0\">" .. link_text .. "<span class=\"fossci-popover\"></span></a>"
+end
+
+-- Picks the right renderer for a field's value, given its schema.layout()
+-- metadata (type + ref_entity_type, when type=="reference").
+function display_field_value(db_path, field, value)
+    if field.type == "reference" and field.ref_entity_type != nil then
+        return render_reference_value(db_path, field.ref_entity_type, value)
+    end
+    return display_value(value)
+end
+
+-- Browse view: a read-only table of every entity of a type, linking to
+-- each one's detail page. Pure server-rendered HTML -- no JS, so none
+-- of the CSP/nonce concerns the registration table's client-side JS
+-- has (see html.render's header comment for why that one needs one).
+function html.render_browse(db_path, entity_type, layout, rows, page, page_size, total, nonce)
+    if nonce == nil then
+        nonce = ""
+    end
+    escaped_type = html_escape(entity_type)
+
+    header_cells = "<th>ID</th>"
+    for _, field in ipairs(layout.fields) do
+        header_cells = header_cells .. "<th>" .. html_escape(field.label) .. "</th>"
+    end
+
+    body_rows = ""
+    for _, row in ipairs(rows) do
+        own_label = own_row_label(db_path, entity_type, row)
+        id_link_text = "#" .. tostring(row.id)
+        if own_label != nil then
+            id_link_text = html_escape(own_label)
+        end
+        cells = "<td><a href=\"fossci/detail?type=" .. escaped_type .. "&entity_id=" .. tostring(row.id) ..
+            "\">" .. id_link_text .. "</a></td>"
+        for _, field in ipairs(layout.fields) do
+            cells = cells .. "<td>" .. display_field_value(db_path, field, row[field.name]) .. "</td>"
+        end
+        body_rows = body_rows .. "<tr>" .. cells .. "</tr>"
+    end
+
+    table_or_empty = "<div class=\"fossci-table-wrapper\"><table id=\"browse-table\"><thead><tr>" ..
+        header_cells .. "</tr></thead><tbody>" .. body_rows .. "</tbody></table></div>"
+    if #rows == 0 then
+        table_or_empty = "<p class=\"fossci-empty\">No " .. escaped_type .. " entities registered yet.</p>"
+    end
+
+    pager = ""
+    if total > page_size then
+        last_page = math.ceil(total / page_size)
+        range_start = ((page - 1) * page_size) + 1
+        range_end = range_start + #rows - 1
+        pager = "<div class=\"fossci-pager\">"
+        pager = pager .. "<span>Showing " .. tostring(range_start) .. "-" .. tostring(range_end) ..
+            " of " .. tostring(total) .. "</span>"
+        pager = pager .. "<span class=\"fossci-pager-links\">"
+        if page > 1 then
+            pager = pager .. "<a href=\"fossci/browse?type=" .. escaped_type .. "&page=" .. tostring(page - 1) .. "\">&laquo; Prev</a>"
+        end
+        pager = pager .. "<span>Page " .. tostring(page) .. " of " .. tostring(last_page) .. "</span>"
+        if page < last_page then
+            pager = pager .. "<a href=\"fossci/browse?type=" .. escaped_type .. "&page=" .. tostring(page + 1) .. "\">Next &raquo;</a>"
+        end
+        pager = pager .. "</span></div>"
+    end
+
+    return string.format("""
+<div class="fossil-doc" data-title="Browse %s">
+    <style>
+%s
+        .fossci-header {
+            margin-bottom: 24px;
+            border-bottom: 1px solid var(--fossci-bg-2, #f1f5f9);
+            padding-bottom: 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .fossci-header h2 { margin: 0 0 6px 0; font-size: 1.6rem; font-weight: 700; color: var(--fossci-heading, #0f172a); letter-spacing: -0.02em; }
+        .fossci-header p { color: var(--fossci-muted, #64748b); margin: 0; font-size: 0.95rem; }
+        .fossci-header a { color: var(--fossci-accent, #4f46e5); text-decoration: none; font-weight: 600; }
+        .fossci-header a:hover { text-decoration: underline; }
+        %s
+        .fossci-table-wrapper {
+            overflow-x: auto;
+            border: 1px solid var(--fossci-border, #e2e8f0);
+            border-radius: var(--fossci-radius-md, 12px);
+            background: var(--fossci-bg, #f8fafc);
+        }
+        #browse-table { width: 100%%; border-collapse: separate; border-spacing: 0; min-width: 600px; }
+        #browse-table th, #browse-table td {
+            padding: 12px 16px;
+            text-align: left;
+            border-bottom: 1px solid var(--fossci-border, #e2e8f0);
+            font-size: 0.9rem;
+        }
+        #browse-table th {
+            background: var(--fossci-bg-2, #f1f5f9);
+            font-weight: 600;
+            font-size: 0.78rem;
+            color: var(--fossci-th-text, #475569);
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }
+        #browse-table td { background: #ffffff; }
+        #browse-table a { color: var(--fossci-accent, #4f46e5); text-decoration: none; font-weight: 600; }
+        #browse-table a:hover { text-decoration: underline; }
+        .fossci-empty {
+            padding: 32px;
+            text-align: center;
+            color: var(--fossci-muted, #64748b);
+            background: var(--fossci-bg, #f8fafc);
+            border: 1px dashed var(--fossci-border, #e2e8f0);
+            border-radius: var(--fossci-radius-md, 12px);
+        }
+        .fossci-pager {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 16px;
+            font-size: 0.85rem;
+            color: var(--fossci-muted, #64748b);
+        }
+        .fossci-pager-links { display: flex; gap: 14px; align-items: center; }
+        .fossci-pager-links a { color: var(--fossci-accent, #4f46e5); text-decoration: none; font-weight: 600; }
+        .fossci-pager-links a:hover { text-decoration: underline; }
+        .fossci-entity-ref { color: var(--fossci-accent, #4f46e5); text-decoration: none; font-weight: 600; }
+        .fossci-entity-ref::after { content: " \2197"; font-size: 0.85em; }
+        .fossci-entity-ref:hover { text-decoration: underline; }
+    </style>
+    %s
+    <div class="fossci-container">
+        <div class="fossci-header">
+            <div>
+                <h2>Browse %s</h2>
+                <p>%d registered</p>
+            </div>
+            <a class="btn btn-primary" href="fossci/register?type=%s">+ Register new</a>
+        </div>
+        %s
+        %s
+    </div>
+</div>
+%s
+""", escaped_type, fossci_container_css(1200), fossci_button_css(), html.popover_css(), escaped_type, total, escaped_type, table_or_empty, pager, html.popover_js(nonce))
+end
+
+-- Real bug found while extracting fossci_container_css above, unrelated
+-- to that refactor: the args list here previously started with
+-- `html.popover_css()` where the FIRST %s in the template
+-- (`data-title="Browse %s"`) actually is -- meaning every /browse page's
+-- data-title (which Fossil's own doc.c reads to set the real page
+-- title, confirmed directly in fossil-scm's source) rendered as raw CSS
+-- text instead of "Browse <type>". The visible <h2> heading used a
+-- *different*, correctly-positioned escaped_type and was always fine --
+-- an easy thing to miss since the page looked completely normal, only
+-- the browser tab title was ever wrong. Fixed above by reordering the
+-- args to match where each %s actually is.
+
+-- Detail view: current field values plus the full ledger history for
+-- one entity. Also pure server-rendered HTML, no JS.
+function html.render_detail(db_path, entity_type, layout, row, history, nonce)
+    if nonce == nil then
+        nonce = ""
+    end
+    escaped_type = html_escape(entity_type)
+    id_str = tostring(row.id)
+    own_label = own_row_label(db_path, entity_type, row)
+    title_id_part = "#" .. id_str
+    if own_label != nil then
+        title_id_part = html_escape(own_label) .. " (#" .. id_str .. ")"
+    end
+
+    fields_html = ""
+    for _, field in ipairs(layout.fields) do
+        fields_html = fields_html .. "<div class=\"detail-row\"><span class=\"detail-label\">" ..
+            html_escape(field.label) .. "</span><span class=\"detail-value\">" ..
+            display_field_value(db_path, field, row[field.name]) .. "</span></div>"
+    end
+
+    history_rows = ""
+    for _, event in ipairs(history) do
+        changes = ""
+        for field_name, change in pairs(event.field_changes) do
+            changes = changes .. "<div class=\"change-item\"><strong>" .. html_escape(field_name) ..
+                "</strong>: " .. display_value(change.old) .. " &rarr; " .. display_value(change.new) .. "</div>"
+        end
+        history_rows = history_rows .. "<tr><td>#" .. tostring(event.event_id) .. "</td><td>" ..
+            html_escape(event.event_type) .. "</td><td>" .. display_value(event.author) .. "</td><td>" ..
+            html_escape(event.created_at) .. "</td><td>" .. changes .. "</td></tr>"
+    end
+
+    return string.format("""
+<div class="fossil-doc" data-title="%s %s">
+    <style>
+%s
+        .fossci-header { margin-bottom: 24px; border-bottom: 1px solid var(--fossci-bg-2, #f1f5f9); padding-bottom: 16px; }
+        .fossci-header h2 { margin: 0 0 6px 0; font-size: 1.6rem; font-weight: 700; color: var(--fossci-heading, #0f172a); letter-spacing: -0.02em; }
+        .fossci-header a { color: var(--fossci-accent, #4f46e5); text-decoration: none; font-weight: 600; font-size: 0.9rem; }
+        .fossci-header a:hover { text-decoration: underline; }
+        .fossci-subheading { font-size: 1.05rem; color: var(--fossci-heading, #0f172a); margin: 28px 0 14px 0; }
+        .fossci-detail-fields {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+            gap: 16px 24px;
+            padding: 20px;
+            background: var(--fossci-bg, #f8fafc);
+            border: 1px solid var(--fossci-border, #e2e8f0);
+            border-radius: var(--fossci-radius-md, 12px);
+        }
+        .detail-row { display: flex; flex-direction: column; gap: 4px; }
+        .detail-label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--fossci-muted, #64748b); font-weight: 600; }
+        .detail-value { font-size: 0.95rem; color: var(--fossci-heading, #0f172a); word-break: break-word; }
+        .fossci-table-wrapper { overflow-x: auto; border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-md, 12px); background: var(--fossci-bg, #f8fafc); }
+        #history-table { width: 100%%; border-collapse: separate; border-spacing: 0; min-width: 700px; }
+        #history-table th, #history-table td {
+            padding: 12px 16px;
+            text-align: left;
+            border-bottom: 1px solid var(--fossci-border, #e2e8f0);
+            font-size: 0.85rem;
+            vertical-align: top;
+        }
+        #history-table th {
+            background: var(--fossci-bg-2, #f1f5f9);
+            font-weight: 600;
+            font-size: 0.75rem;
+            color: var(--fossci-th-text, #475569);
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }
+        #history-table td { background: #ffffff; }
+        .change-item { margin-bottom: 4px; }
+        .change-item:last-child { margin-bottom: 0; }
+        .fossci-entity-ref { color: var(--fossci-accent, #4f46e5); text-decoration: none; font-weight: 600; }
+        .fossci-entity-ref::after { content: " \2197"; font-size: 0.85em; }
+        .fossci-entity-ref:hover { text-decoration: underline; }
+    </style>
+    %s
+    <div class="fossci-container">
+        <div class="fossci-header">
+            <h2>%s %s</h2>
+            <a href="fossci/browse?type=%s">&larr; Back to browse</a>
+        </div>
+
+        <div class="fossci-detail-fields">
+            %s
+        </div>
+
+        <h3 class="fossci-subheading">Ledger history</h3>
+        <div class="fossci-table-wrapper">
+            <table id="history-table">
+                <thead><tr><th>Event</th><th>Type</th><th>Author</th><th>When</th><th>Changes</th></tr></thead>
+                <tbody>%s</tbody>
+            </table>
+        </div>
+    </div>
+</div>
+%s
+""", escaped_type, title_id_part, fossci_container_css(1200), html.popover_css(), escaped_type, title_id_part, escaped_type, fields_html, history_rows, html.popover_js(nonce))
+end
+
+-- Generic view: any approved custom SQL view rendered as a table.
+-- Unlike browse/detail, columns come from the view's own declared
+-- `columns` list (name/label), not a schema -- a view can join/select
+-- across entity types, so there's no single schema to draw from.
+function html.render_view(view_def, rows, param_value)
+    title = view_def.title
+    if title == nil then
+        title = view_def.name
+    end
+    escaped_title = html_escape(title)
+
+    subtitle = tostring(#rows) .. " rows"
+    if view_def.param != nil then
+        subtitle = subtitle .. " -- filtered by " .. html_escape(view_def.param.name) ..
+            " = " .. html_escape(tostring(param_value))
+    end
+
+    header_cells = ""
+    for _, col in ipairs(view_def.columns) do
+        label = col.label
+        if label == nil then
+            label = col.name
+        end
+        header_cells = header_cells .. "<th>" .. html_escape(label) .. "</th>"
+    end
+
+    body_rows = ""
+    for _, row in ipairs(rows) do
+        cells = ""
+        for _, col in ipairs(view_def.columns) do
+            cells = cells .. "<td>" .. display_value(row[col.name]) .. "</td>"
+        end
+        body_rows = body_rows .. "<tr>" .. cells .. "</tr>"
+    end
+
+    table_or_empty = "<div class=\"fossci-table-wrapper\"><table id=\"view-table\"><thead><tr>" ..
+        header_cells .. "</tr></thead><tbody>" .. body_rows .. "</tbody></table></div>"
+    if #rows == 0 then
+        table_or_empty = "<p class=\"fossci-empty\">No rows.</p>"
+    end
+
+    -- A view has no schema of its own to register against (it can join
+    -- across entity types, see the function comment above) -- but a
+    -- view whose author declares a single `entity_type` it's primarily
+    -- about (e.g. a prioritized/filtered list over one real entity type)
+    -- can still offer the same "+ Register new" entry point
+    -- render_browse already has, instead of leaving read-only views as a
+    -- dead end with no way to add the row they're meant to be tracking.
+    register_link = ""
+    if view_def.entity_type != nil then
+        register_link = string.format(
+            "<a class=\"btn btn-primary\" href=\"fossci/register?type=%s\">+ Register new</a>",
+            html_escape(view_def.entity_type)
+        )
+    end
+
+    return string.format("""
+<div class="fossil-doc" data-title="%s">
+    <style>
+%s
+        .fossci-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px; border-bottom: 1px solid var(--fossci-bg-2, #f1f5f9); padding-bottom: 16px; }
+        .fossci-header h2 { margin: 0 0 6px 0; font-size: 1.6rem; font-weight: 700; color: var(--fossci-heading, #0f172a); letter-spacing: -0.02em; }
+        .fossci-header p { color: var(--fossci-muted, #64748b); margin: 0; font-size: 0.95rem; }
+        .fossci-table-wrapper { overflow-x: auto; border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-md, 12px); background: var(--fossci-bg, #f8fafc); }
+        #view-table { width: 100%%; border-collapse: separate; border-spacing: 0; min-width: 600px; }
+        #view-table th, #view-table td { padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--fossci-border, #e2e8f0); font-size: 0.9rem; }
+        #view-table th {
+            background: var(--fossci-bg-2, #f1f5f9);
+            font-weight: 600;
+            font-size: 0.78rem;
+            color: var(--fossci-th-text, #475569);
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }
+        #view-table td { background: #ffffff; }
+        .fossci-empty {
+            padding: 32px;
+            text-align: center;
+            color: var(--fossci-muted, #64748b);
+            background: var(--fossci-bg, #f8fafc);
+            border: 1px dashed var(--fossci-border, #e2e8f0);
+            border-radius: var(--fossci-radius-md, 12px);
+        }
+    </style>
+    <div class="fossci-container">
+        <div class="fossci-header">
+            <div>
+                <h2>%s</h2>
+                <p>%s</p>
+            </div>
+            %s
+        </div>
+        %s
+    </div>
+</div>
+""", escaped_title, fossci_container_css(1200), escaped_title, subtitle, register_link, table_or_empty)
+end
+
+-- Renders `entity_types`/`edges` (schema.relationships()'s output) as an
+-- inline SVG relation diagram -- nodes on a circle (a simple, stable
+-- layout: no physics simulation to converge, no risk of nodes drifting
+-- off-canvas), sized to the node count so labels don't crowd each other
+-- as a deployment registers more entity types. All positioning is
+-- computed server-side in Luam; the only client-side JS (diagram_js) is
+-- hover-highlight and click-to-browse, the same "server renders, client
+-- just does the interaction" split the popover feature already uses.
+function html.render_relation_diagram(entity_types, edges)
+    n = #entity_types
+    if n == 0 then
+        return "<p class=\"fossci-empty\">No entity types registered yet.</p>"
+    end
+
+    -- Radius grows with node count so per-node arc length (and so label
+    -- spacing) stays roughly constant instead of every node crowding
+    -- toward the center as more entity types get registered.
+    radius = 180
+    if n * 12 > radius then
+        radius = n * 12
+    end
+    cx = radius + 90
+    cy = radius + 40
+    size = radius * 2 + 180
+
+    index_by_name = {}
+    positions = {}
+    for i, row in ipairs(entity_types) do
+        index_by_name[row.name] = i
+        angle = (2 * math.pi * (i - 1)) / n - (math.pi / 2)
+        positions[i] = {x = cx + radius * math.cos(angle), y = cy + radius * math.sin(angle)}
+    end
+
+    edges_svg = ""
+    for _, edge in ipairs(edges) do
+        from_i = index_by_name[edge.from_type]
+        to_i = index_by_name[edge.to_type]
+        if from_i != nil and to_i != nil and from_i != to_i then
+            p1 = positions[from_i]
+            p2 = positions[to_i]
+            edges_svg = edges_svg .. string.format(
+                "<line class=\"fossci-diagram-edge\" data-from=\"%s\" data-to=\"%s\" x1=\"%.1f\" y1=\"%.1f\" x2=\"%.1f\" y2=\"%.1f\" marker-end=\"url(#fossci-diagram-arrow)\"></line>",
+                html_escape(edge.from_type), html_escape(edge.to_type), p1.x, p1.y, p2.x, p2.y
+            )
+        end
+    end
+
+    nodes_svg = ""
+    for i, row in ipairs(entity_types) do
+        escaped_name = html_escape(row.name)
+        p = positions[i]
+        nodes_svg = nodes_svg .. string.format(
+            "<g class=\"fossci-diagram-node\" data-entity-type=\"%s\" tabindex=\"0\">" ..
+            "<circle cx=\"%.1f\" cy=\"%.1f\" r=\"9\"></circle>" ..
+            "<text x=\"%.1f\" y=\"%.1f\">%s</text>" ..
+            "</g>",
+            escaped_name, p.x, p.y, p.x, p.y - 14, escaped_name
+        )
+    end
+
+    return string.format("""
+<div class="fossci-diagram-hint">Hover an entity to see its relations; click to browse it.</div>
+<div class="fossci-diagram-scroll">
+<svg id="fossci-diagram-svg" viewBox="0 0 %d %d" width="%d" height="%d">
+    <defs>
+        <marker id="fossci-diagram-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z"></path>
+        </marker>
+    </defs>
+    %s
+    %s
+</svg>
+</div>
+""", size, size, size, size, edges_svg, nodes_svg)
+end
+
+function html.relation_diagram_css()
+    return """
+        .fossci-diagram-hint { color: var(--fossci-muted, #64748b); font-size: 0.85rem; margin-bottom: 10px; }
+        .fossci-diagram-scroll { overflow: auto; border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-md, 12px); background: var(--fossci-bg, #f8fafc); }
+        .fossci-diagram-edge { stroke: var(--fossci-border, #cbd5e1); stroke-width: 1.5; transition: stroke 0.15s ease, opacity 0.15s ease; }
+        .fossci-diagram-edge.fossci-diagram-edge-active { stroke: var(--fossci-accent, #4f46e5); stroke-width: 2.5; }
+        .fossci-diagram-edge.fossci-diagram-edge-dim { opacity: 0.15; }
+        .fossci-diagram-arrow-fill { fill: var(--fossci-border, #cbd5e1); }
+        #fossci-diagram-arrow path { fill: var(--fossci-border, #cbd5e1); }
+        .fossci-diagram-node circle { fill: var(--fossci-bg, #ffffff); stroke: var(--fossci-accent, #4f46e5); stroke-width: 2; transition: var(--fossci-transition, all 0.2s cubic-bezier(0.4, 0, 0.2, 1)); }
+        .fossci-diagram-node text { font-size: 12px; font-weight: 600; text-anchor: middle; fill: var(--fossci-heading, #0f172a); text-transform: capitalize; }
+        .fossci-diagram-node { cursor: pointer; }
+        .fossci-diagram-node:hover circle, .fossci-diagram-node:focus circle { fill: var(--fossci-accent, #4f46e5); }
+        .fossci-diagram-node.fossci-diagram-node-dim { opacity: 0.25; }
+"""
+end
+
+-- `nonce` must be Fossil's own per-request CSP nonce, same requirement
+-- as html.popover_js.
+function html.diagram_js(nonce)
+    if nonce == nil then
+        nonce = ""
+    end
+    return string.format("""
+<script nonce="%s">
+(function(){
+    var toggle = document.getElementById('fossci-view-toggle');
+    var listView = document.getElementById('fossci-view-list');
+    var diagramView = document.getElementById('fossci-view-diagram');
+    if(toggle && listView && diagramView){
+        toggle.querySelectorAll('button').forEach(function(btn){
+            btn.addEventListener('click', function(){
+                var view = btn.getAttribute('data-view');
+                listView.style.display = (view === 'list') ? '' : 'none';
+                diagramView.style.display = (view === 'diagram') ? '' : 'none';
+                toggle.querySelectorAll('button').forEach(function(b){
+                    b.classList.toggle('fossci-view-active', b === btn);
+                });
+            });
+        });
+    }
+
+    var hideEmpty = document.getElementById('fossci-hide-empty');
+    if(hideEmpty && listView){
+        hideEmpty.addEventListener('change', function(){
+            listView.querySelectorAll('li[data-count]').forEach(function(li){
+                var isEmpty = li.getAttribute('data-count') === '0';
+                li.style.display = (hideEmpty.checked && isEmpty) ? 'none' : '';
+            });
+        });
+    }
+
+    var svg = document.getElementById('fossci-diagram-svg');
+    if(!svg) return;
+    var nodes = svg.querySelectorAll('.fossci-diagram-node');
+    var edges = svg.querySelectorAll('.fossci-diagram-edge');
+    function related(a, b){
+        var isRelated = false;
+        edges.forEach(function(edge){
+            var from = edge.getAttribute('data-from'), to = edge.getAttribute('data-to');
+            if((from === a && to === b) || (from === b && to === a)){ isRelated = true; }
+        });
+        return isRelated;
+    }
+    nodes.forEach(function(node){
+        var type = node.getAttribute('data-entity-type');
+        function highlight(){
+            edges.forEach(function(edge){
+                if(edge.getAttribute('data-from') === type || edge.getAttribute('data-to') === type){
+                    edge.classList.add('fossci-diagram-edge-active');
+                }else{
+                    edge.classList.add('fossci-diagram-edge-dim');
+                }
+            });
+            nodes.forEach(function(other){
+                var otherType = other.getAttribute('data-entity-type');
+                if(otherType != type && !related(type, otherType)){
+                    other.classList.add('fossci-diagram-node-dim');
+                }
+            });
+        }
+        function clear(){
+            edges.forEach(function(edge){ edge.classList.remove('fossci-diagram-edge-active', 'fossci-diagram-edge-dim'); });
+            nodes.forEach(function(other){ other.classList.remove('fossci-diagram-node-dim'); });
+        }
+        node.addEventListener('mouseenter', highlight);
+        node.addEventListener('focus', highlight);
+        node.addEventListener('mouseleave', clear);
+        node.addEventListener('blur', clear);
+        node.addEventListener('click', function(){
+            window.location.href = 'fossci/browse?type=' + encodeURIComponent(type);
+        });
+        node.addEventListener('keydown', function(e){
+            if(e.key === 'Enter' || e.key === ' '){
+                e.preventDefault();
+                window.location.href = 'fossci/browse?type=' + encodeURIComponent(type);
+            }
+        });
+    });
+})();
+</script>
+""", nonce)
+end
+
+-- fossci's own landing page: every registered entity type, linking to
+-- its browse view, plus a toggle to an interactive entity-relation
+-- diagram (html.render_relation_diagram) built from the same reference
+-- fields entity.lua/schema.lua already track -- same page/URL, just a
+-- second view of the same data, per the "toggle next to the list"
+-- design call rather than a separate route. This is the page a
+-- deployment's Fossil "mainmenu" entry (see doc/deployment.md) should
+-- point at, so there's a real entry point into fossci beyond knowing a
+-- /browse?type=... URL by hand.
+-- Unauthenticated -- no popover/autocomplete JS needed, so unlike
+-- every other render_* page here, no nonce-gated <script> at all.
+function html.render_login(error_message, nonce)
+    error_html = ""
+    if error_message != nil and error_message != "" then
+        error_html = "<div class=\"fossci-login-error\">" .. html_escape(error_message) .. "</div>"
+    end
+
+    return string.format("""
+<div class="fossil-doc" data-title="Log in">
+    <style>
+%s
+%s
+        .fossci-login-card { max-width: 360px; margin: 60px auto; padding: 28px; background: var(--fossci-bg, #f8fafc); border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-md, 12px); }
+        .fossci-login-card h2 { margin: 0 0 18px 0; font-size: 1.4rem; font-weight: 700; color: var(--fossci-heading, #0f172a); }
+        .fossci-login-card label { display: block; margin-bottom: 4px; font-size: 0.88rem; color: var(--fossci-muted, #64748b); }
+        .fossci-login-card input[type=text], .fossci-login-card input[type=password] {
+            width: 100%%; box-sizing: border-box; padding: 8px 10px; margin-bottom: 14px;
+            border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-item, 10px); font-size: 0.95rem;
+        }
+        .fossci-login-error { color: #991b1b; background: #fef2f2; border: 1px solid #fecaca; border-radius: var(--fossci-radius-item, 10px); padding: 10px 12px; margin-bottom: 14px; font-size: 0.88rem; }
+        .fossci-login-card .btn { width: 100%%; }
+    </style>
+    <form class="fossci-login-card" method="POST" action="/login">
+        <h2>Log in</h2>
+        %s
+        <label for="login">Login</label>
+        <input type="text" id="login" name="login" autocomplete="username" required>
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" autocomplete="current-password" required>
+        <button type="submit" class="btn btn-primary">Log in</button>
+    </form>
+</div>
+""", fossci_container_css(800), fossci_button_css(), error_html)
+end
+
+function html.render_index(entity_types, edges, show_sql_widget, nonce)
+    items = ""
+    for _, row in ipairs(entity_types) do
+        escaped_name = html_escape(row.name)
+        -- Row count used to be an always-visible inline badge; moved to
+        -- a hover popover (html.popover_css()) so the default view only
+        -- shows what's needed to decide "do I click into this."
+        trigger_class = ""
+        count_popover = ""
+        if row.count != nil then
+            count_label = tostring(row.count) .. " rows"
+            if row.count == 1 then
+                count_label = "1 row"
+            end
+            trigger_class = "fossci-popover-trigger"
+            count_popover = "<span class=\"fossci-popover\">" .. count_label .. "</span>"
+        end
+        row_count = 0
+        if row.count != nil then
+            row_count = row.count
+        end
+        items = items .. "<li data-count=\"" .. tostring(row_count) .. "\"><a href=\"fossci/browse?type=" .. escaped_name .. "\" class=\"" .. trigger_class .. "\" tabindex=\"0\">" .. escaped_name ..
+            count_popover .. "</a></li>"
+    end
+
+    list_or_empty = "<ul class=\"fossci-index-list\">" .. items .. "</ul>"
+    if #entity_types == 0 then
+        list_or_empty = "<p class=\"fossci-empty\">No entity types registered yet.</p>"
+    end
+
+    -- Setup/Admin only, matching /sql's own gate -- an iframe is legal
+    -- here (this page isn't wiki content, so none of Fossil's wiki
+    -- sanitizer restrictions on <iframe> apply), unlike the entry
+    -- notebook pages, which had to fall back to plain links instead.
+    -- No title/description here -- the embedded /sql page (title
+    -- "Query" as of this rewrite) already renders its own, and
+    -- html.in-iframe's CSS only flattens the *card* styling
+    -- (padding/border/shadow), not the heading text, so showing both
+    -- was a literal duplicate header, not just visual clutter.
+    sql_widget = ""
+    if show_sql_widget == true then
+        sql_widget = """
+    <div class="fossci-container">
+        <iframe src="fossci/sql" style="width:100%;height:520px;border:0;border-radius:var(--fossci-radius-md, 12px);"></iframe>
+    </div>
+"""
+    end
+
+    diagram_html = html.render_relation_diagram(entity_types, edges)
+
+    return string.format("""
+<div class="fossil-doc" data-title="fossci">
+    <style>
+%s
+        .fossci-header { margin-bottom: 20px; border-bottom: 1px solid var(--fossci-bg-2, #f1f5f9); padding-bottom: 16px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+        .fossci-header h2 { margin: 0 0 6px 0; font-size: 1.6rem; font-weight: 700; color: var(--fossci-heading, #0f172a); letter-spacing: -0.02em; }
+        .fossci-header p { color: var(--fossci-muted, #64748b); margin: 0; font-size: 0.95rem; }
+        .fossci-view-toggle { display: flex; gap: 6px; flex-shrink: 0; }
+        .fossci-view-toggle button { padding: 6px 14px; border-radius: var(--fossci-radius-sm, 8px); border: 1px solid var(--fossci-border, #e2e8f0); background: var(--fossci-bg, #f8fafc); color: var(--fossci-text, #334155); font-weight: 600; font-size: 0.85rem; cursor: pointer; transition: var(--fossci-transition, all 0.2s cubic-bezier(0.4, 0, 0.2, 1)); }
+        .fossci-view-toggle button.fossci-view-active { background: var(--fossci-accent, #4f46e5); border-color: var(--fossci-accent, #4f46e5); color: #ffffff; }
+        .fossci-hide-empty-toggle { display: flex; align-items: center; gap: 6px; font-size: 0.85rem; color: var(--fossci-muted, #64748b); cursor: pointer; user-select: none; margin-right: 8px; }
+        .fossci-hide-empty-toggle input { cursor: pointer; }
+        .fossci-index-list { list-style: none !important; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
+        .fossci-index-list li { list-style: none !important; background: var(--fossci-bg, #f8fafc); border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-item, 10px); display: flex; align-items: center; transition: var(--fossci-transition, all 0.2s cubic-bezier(0.4, 0, 0.2, 1)); }
+        .fossci-index-list li:hover { border-color: var(--fossci-accent, #4f46e5); box-shadow: 0 4px 12px rgba(0,0,0,0.06); }
+        .fossci-index-list li::marker { content: ""; }
+        .fossci-index-list a { flex: 1; display: block; padding: 12px 16px; color: var(--fossci-accent, #4f46e5); text-decoration: none; font-weight: 600; text-transform: capitalize; }
+        .fossci-index-list a:hover { background: var(--fossci-bg-2, #f1f5f9); border-radius: var(--fossci-radius-item, 10px) 0 0 var(--fossci-radius-item, 10px); }
+%s
+        .fossci-empty {
+            padding: 32px;
+            text-align: center;
+            color: var(--fossci-muted, #64748b);
+            background: var(--fossci-bg, #f8fafc);
+            border: 1px dashed var(--fossci-border, #e2e8f0);
+            border-radius: var(--fossci-radius-md, 12px);
+        }
+    </style>
+    %s
+    <div class="fossci-container">
+        <div class="fossci-header">
+            <div>
+                <h2>Entity types</h2>
+                <p>%d registered</p>
+            </div>
+            <div class="fossci-view-toggle" id="fossci-view-toggle">
+                <label class="fossci-hide-empty-toggle"><input type="checkbox" id="fossci-hide-empty"> Hide empty types</label>
+                <button type="button" data-view="list" class="fossci-view-active">List</button>
+                <button type="button" data-view="diagram">Diagram</button>
+            </div>
+        </div>
+        <div id="fossci-view-list">%s</div>
+        <div id="fossci-view-diagram" style="display:none;">%s</div>
+    </div>
+%s
+</div>
+%s
+""", fossci_container_css(800), html.relation_diagram_css(), html.popover_css(), #entity_types,
+     list_or_empty, diagram_html, sql_widget, html.diagram_js(nonce))
+end
+
+-- Every entry template found (whether it loaded cleanly or not), each
+-- linking to /template?name=... where the actual snippet is rendered.
+function html.render_templates_list(entries)
+    items = ""
+    for _, entry in ipairs(entries) do
+        escaped_name = html_escape(entry.name)
+        if entry.def == nil then
+            items = items .. "<li class=\"fossci-template-error\">" .. escaped_name ..
+                " -- ERROR: " .. html_escape(entry.err) .. "</li>"
+        else
+            label = entry.def.label
+            if label == nil then
+                label = entry.name
+            end
+            description = entry.def.description
+            if description == nil then
+                description = ""
+            end
+            escaped_label = html_escape(label)
+            escaped_desc = html_escape(description)
+            items = items .. "<li><a href=\"/ext/fossci/template?template_name=" .. escaped_name .. "\">" ..
+                escaped_label .. "</a><p>" .. escaped_desc .. "</p></li>"
+        end
+    end
+
+    list_or_empty = "<ul class=\"fossci-index-list\">" .. items .. "</ul>"
+    if #entries == 0 then
+        list_or_empty = "<p class=\"fossci-empty\">No entry templates yet.</p>"
+    end
+
+    return string.format("""
+<div class="fossil-doc" data-title="Entry templates">
+    <style>
+%s
+        .fossci-header { margin-bottom: 20px; border-bottom: 1px solid var(--fossci-bg-2, #f1f5f9); padding-bottom: 16px; }
+        .fossci-header h2 { margin: 0 0 6px 0; font-size: 1.6rem; font-weight: 700; color: var(--fossci-heading, #0f172a); letter-spacing: -0.02em; }
+        .fossci-header p { color: var(--fossci-muted, #64748b); margin: 0; font-size: 0.95rem; }
+        .fossci-index-list { list-style: none !important; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+        .fossci-index-list li { list-style: none !important; background: var(--fossci-bg, #f8fafc); border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-item, 10px); padding: 14px 16px; }
+        .fossci-index-list li::marker { content: ""; }
+        .fossci-index-list a { font-weight: 700; color: var(--fossci-accent, #4f46e5); text-decoration: none; }
+        .fossci-index-list a:hover { text-decoration: underline; }
+        .fossci-index-list p { margin: 6px 0 0 0; color: var(--fossci-muted, #64748b); font-size: 0.88rem; }
+        .fossci-template-error { color: #991b1b; background: #fef2f2; border: 1px solid #fecaca; border-radius: var(--fossci-radius-item, 10px); padding: 14px 16px; }
+        .fossci-empty {
+            padding: 32px;
+            text-align: center;
+            color: var(--fossci-muted, #64748b);
+            background: var(--fossci-bg, #f8fafc);
+            border: 1px dashed var(--fossci-border, #e2e8f0);
+            border-radius: var(--fossci-radius-md, 12px);
+        }
+    </style>
+    <div class="fossci-container">
+        <div class="fossci-header">
+            <h2>Entry templates</h2>
+            <p>Pick a template to create a new wiki page from it, or <a href="/ext/fossci/wiki-new">start a blank page</a>.</p>
+        </div>
+        %s
+    </div>
+</div>
+""", fossci_container_css(800), list_or_empty)
+end
+
+-- The rendered Markdown snippet for one template, in a read-only
+-- textarea for easy select-all-and-copy -- no JS needed (a "Copy"
+-- button would need one, and this is simple enough not to bother).
+function html.render_template(def, rendered_markdown, nonce)
+    if nonce == nil then
+        nonce = ""
+    end
+    label = def.label
+    if label == nil then
+        label = def.name
+    end
+    description = def.description
+    if description == nil then
+        description = ""
+    end
+    escaped_label = html_escape(label)
+    escaped_desc = html_escape(description)
+    escaped_body = html_escape(rendered_markdown)
+
+    -- Real bug found in production: this input had no default value at
+    -- all (a placeholder is greyed-out hint text, not an actual value --
+    -- it contributes nothing once submitted), so creating a page from a
+    -- template gave zero guidance on this deployment's own naming
+    -- convention (e.g. Celleste-Bio's "<top folder>/<entry name>" path
+    -- style, see software's convert_entries_to_wiki.py -- fossci itself
+    -- has no concept of that convention, so it can't be hardcoded here).
+    -- default_path is an optional field a template definition can
+    -- declare for exactly this; falls back to the template's own label
+    -- if absent, which is still strictly better than an empty field.
+    default_path = def.default_path
+    if default_path == nil then
+        default_path = label
+    end
+    escaped_default_path = html_escape(default_path)
+
+    return string.format("""
+<div class="fossil-doc" data-title="Template: %s">
+    <style>
+%s
+        .fossci-header { margin-bottom: 20px; border-bottom: 1px solid var(--fossci-bg-2, #f1f5f9); padding-bottom: 16px; }
+        .fossci-header h2 { margin: 0 0 6px 0; font-size: 1.6rem; font-weight: 700; color: var(--fossci-heading, #0f172a); letter-spacing: -0.02em; }
+        .fossci-header p { color: var(--fossci-muted, #64748b); margin: 0; font-size: 0.95rem; }
+        .fossci-header a { color: var(--fossci-accent, #4f46e5); text-decoration: none; font-weight: 600; }
+        .fossci-header a:hover { text-decoration: underline; }
+        .fossci-snippet {
+            width: 100%%;
+            min-height: 360px;
+            box-sizing: border-box;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 0.88rem;
+            padding: 16px;
+            border: 1px solid var(--fossci-border, #e2e8f0);
+            border-radius: var(--fossci-radius-md, 12px);
+            background: var(--fossci-bg, #f8fafc);
+            color: var(--fossci-input-text, #1e293b);
+        }
+        .fossci-create-block {
+            margin-top: 16px;
+            padding: 16px;
+            border: 1px solid var(--fossci-border, #e2e8f0);
+            border-radius: var(--fossci-radius-md, 12px);
+            background: var(--fossci-bg, #f8fafc);
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 10px;
+        }
+        .fossci-create-block label { font-weight: 600; font-size: 0.9rem; }
+        .fossci-create-block input[type="text"] {
+            flex: 1 1 260px;
+            padding: 8px 10px;
+            border: 1px solid var(--fossci-border, #e2e8f0);
+            border-radius: var(--fossci-radius-sm, 8px);
+            font-size: 0.9rem;
+            color: var(--fossci-input-text, #1e293b);
+        }
+        .fossci-create-block button {
+            padding: 8px 14px;
+            border: none;
+            border-radius: var(--fossci-radius-sm, 8px);
+            background: var(--fossci-accent, #4f46e5);
+            color: #fff;
+            font-weight: 600;
+            cursor: pointer;
+            transition: var(--fossci-transition, all 0.2s cubic-bezier(0.4, 0, 0.2, 1));
+        }
+        .fossci-create-block button:hover { opacity: 0.9; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+        .fossci-create-block button:active { transform: scale(0.96); }
+        .fossci-create-status { flex-basis: 100%%; font-size: 0.85rem; color: var(--fossci-muted, #64748b); }
+        .fossci-create-status.error { color: #991b1b; }
+    </style>
+    <div class="fossci-container">
+        <div class="fossci-header">
+            <h2>%s</h2>
+            <p>%s</p>
+            <p><a href="/ext/fossci/templates">&larr; All templates</a></p>
+        </div>
+        <p>Edit the snippet below if needed, then create a new wiki page from it directly.</p>
+        <textarea class="fossci-snippet" id="fossci-template-content">%s</textarea>
+        <div class="fossci-create-block">
+            <label for="fossci-new-page-name">New page name</label>
+            <input type="text" id="fossci-new-page-name" value="%s" placeholder="e.g. Experiment 512 - Fermentation Run">
+            <button type="button" id="fossci-create-from-template">Create wiki page</button>
+            <div class="fossci-create-status" id="fossci-create-status"></div>
+        </div>
+    </div>
+    <script nonce="%s">
+    (function(){
+        var btn = document.getElementById('fossci-create-from-template');
+        var nameInput = document.getElementById('fossci-new-page-name');
+        var content = document.getElementById('fossci-template-content');
+        var status = document.getElementById('fossci-create-status');
+        btn.addEventListener('click', function(){
+            var name = nameInput.value.trim();
+            status.className = 'fossci-create-status';
+            if(!name){
+                status.className = 'fossci-create-status error';
+                status.textContent = 'Enter a page name first.';
+                return;
+            }
+            status.textContent = 'Creating...';
+            btn.disabled = true;
+            fetch('/ext/fossci/wiki-create', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name: name, content: content.value, mimetype: 'text/x-markdown'})
+            }).then(function(resp){ return resp.json(); }).then(function(data){
+                if(data && data.success){
+                    window.location.href = '/wiki?name=' + encodeURIComponent(name);
+                }else{
+                    btn.disabled = false;
+                    status.className = 'fossci-create-status error';
+                    status.textContent = (data && data.error) || 'Failed to create page.';
+                }
+            }).catch(function(err){
+                btn.disabled = false;
+                status.className = 'fossci-create-status error';
+                status.textContent = 'Request failed: ' + (err && err.message ? err.message : err);
+            });
+        });
+    })();
+    </script>
+</div>
+""", escaped_label, fossci_container_css(900), escaped_label, escaped_desc, escaped_body, escaped_default_path, nonce)
+end
+
+-- Blank "create a new wiki page" form -- fills the "Notebook has no new
+-- page entry point" gap without reimplementing Fossil's own wiki editor;
+-- this just collects a name + optional starting content and hands off
+-- to the same /wiki-create route the template page uses, then lands on
+-- Fossil's native page view (which links to its own /wikiedit for
+-- further editing).
+function html.render_wiki_new(err, prefill_name, prefill_content, nonce)
+    if nonce == nil then
+        nonce = ""
+    end
+    escaped_name = ""
+    if prefill_name != nil then
+        escaped_name = html_escape(prefill_name)
+    end
+    escaped_content = ""
+    if prefill_content != nil then
+        escaped_content = html_escape(prefill_content)
+    end
+    error_html = ""
+    if err != nil and err != "" then
+        error_html = "<p class=\"fossci-create-status error\">" .. html_escape(err) .. "</p>"
+    end
+
+    return string.format("""
+<div class="fossil-doc" data-title="New wiki page">
+    <style>
+%s
+        .fossci-header { margin-bottom: 20px; border-bottom: 1px solid var(--fossci-bg-2, #f1f5f9); padding-bottom: 16px; }
+        .fossci-header h2 { margin: 0 0 6px 0; font-size: 1.6rem; font-weight: 700; color: var(--fossci-heading, #0f172a); letter-spacing: -0.02em; }
+        .fossci-header p { color: var(--fossci-muted, #64748b); margin: 0; font-size: 0.95rem; }
+        .fossci-header a { color: var(--fossci-accent, #4f46e5); text-decoration: none; font-weight: 600; }
+        .fossci-header a:hover { text-decoration: underline; }
+        .fossci-field { margin-bottom: 14px; }
+        .fossci-field label { display: block; font-weight: 600; font-size: 0.9rem; margin-bottom: 6px; }
+        .fossci-field input[type="text"] {
+            width: 100%%;
+            box-sizing: border-box;
+            padding: 10px 12px;
+            border: 1px solid var(--fossci-border, #e2e8f0);
+            border-radius: var(--fossci-radius-sm, 8px);
+            font-size: 0.95rem;
+            color: var(--fossci-input-text, #1e293b);
+        }
+        .fossci-field textarea {
+            width: 100%%;
+            min-height: 320px;
+            box-sizing: border-box;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 0.88rem;
+            padding: 16px;
+            border: 1px solid var(--fossci-border, #e2e8f0);
+            border-radius: var(--fossci-radius-md, 12px);
+            background: var(--fossci-bg, #f8fafc);
+            color: var(--fossci-input-text, #1e293b);
+        }
+        .fossci-create-status { font-size: 0.9rem; margin: 10px 0; color: var(--fossci-muted, #64748b); }
+        .fossci-create-status.error { color: #991b1b; }
+        #fossci-wiki-new-submit {
+            padding: 10px 18px;
+            border: none;
+            border-radius: var(--fossci-radius-sm, 8px);
+            background: var(--fossci-accent, #4f46e5);
+            color: #fff;
+            font-weight: 600;
+            cursor: pointer;
+            transition: var(--fossci-transition, all 0.2s cubic-bezier(0.4, 0, 0.2, 1));
+        }
+        #fossci-wiki-new-submit:hover { opacity: 0.9; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+        #fossci-wiki-new-submit:active { transform: scale(0.96); }
+    </style>
+    <div class="fossci-container">
+        <div class="fossci-header">
+            <h2>New wiki page</h2>
+            <p>Or start from an <a href="/ext/fossci/templates">entry template</a> instead.</p>
+        </div>
+        %s
+        <div class="fossci-field">
+            <label for="fossci-wiki-new-name">Page name</label>
+            <input type="text" id="fossci-wiki-new-name" value="%s" placeholder="e.g. Notebook/2026-07-15 Fermentation Notes">
+        </div>
+        <div class="fossci-field">
+            <label for="fossci-wiki-new-content">Content (Markdown, optional)</label>
+            <textarea id="fossci-wiki-new-content">%s</textarea>
+        </div>
+        <div id="fossci-wiki-new-status" class="fossci-create-status"></div>
+        <button type="button" id="fossci-wiki-new-submit">Create page</button>
+    </div>
+    <script nonce="%s">
+    (function(){
+        var btn = document.getElementById('fossci-wiki-new-submit');
+        var nameInput = document.getElementById('fossci-wiki-new-name');
+        var content = document.getElementById('fossci-wiki-new-content');
+        var status = document.getElementById('fossci-wiki-new-status');
+        btn.addEventListener('click', function(){
+            var name = nameInput.value.trim();
+            status.className = 'fossci-create-status';
+            if(!name){
+                status.className = 'fossci-create-status error';
+                status.textContent = 'Enter a page name first.';
+                return;
+            }
+            status.textContent = 'Creating...';
+            btn.disabled = true;
+            fetch('/ext/fossci/wiki-create', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name: name, content: content.value, mimetype: 'text/x-markdown'})
+            }).then(function(resp){ return resp.json(); }).then(function(data){
+                if(data && data.success){
+                    window.location.href = '/wiki?name=' + encodeURIComponent(name);
+                }else{
+                    btn.disabled = false;
+                    status.className = 'fossci-create-status error';
+                    status.textContent = (data && data.error) || 'Failed to create page.';
+                }
+            }).catch(function(err){
+                btn.disabled = false;
+                status.className = 'fossci-create-status error';
+                status.textContent = 'Request failed: ' + (err && err.message ? err.message : err);
+            });
+        });
+    })();
+    </script>
+</div>
+""", fossci_container_css(900), error_html, escaped_name, escaped_content, nonce)
+end
+
+-- Ad-hoc SQL console (Setup/Admin only -- see cgi.lua's /sql route):
+-- a plain GET form (no JS needed, unlike register's autocomplete) so
+-- the query is a normal, bookmarkable/shareable URL. `column_names`/
+-- `rows` are nil until a query has been run; `err` is set instead if
+-- it failed (not select-only, invalid sql, etc.).
+function html.render_sql(db_path, sql_text, column_names, rows, err, ref_columns, nonce)
+    if ref_columns == nil then
+        ref_columns = {}
+    end
+    if nonce == nil then
+        nonce = ""
+    end
+    sql_text_or_empty = sql_text
+    if sql_text_or_empty == nil then
+        sql_text_or_empty = ""
+    end
+    escaped_sql = html_escape(sql_text_or_empty)
+
+    result_html = ""
+    if err != nil then
+        result_html = "<div class=\"fossci-sql-error\">Error: " .. html_escape(err) .. "</div>"
+    elseif rows != nil then
+        header_cells = ""
+        for _, name in ipairs(column_names) do
+            header_cells = header_cells .. "<th>" .. html_escape(name) .. "</th>"
+        end
+        body_rows = ""
+        for _, row in ipairs(rows) do
+            cells = ""
+            for _, name in ipairs(column_names) do
+                ref_type = ref_columns[name]
+                if ref_type != nil then
+                    cells = cells .. "<td>" .. render_reference_value(db_path, ref_type, row[name]) .. "</td>"
+                else
+                    cells = cells .. "<td>" .. display_value(row[name]) .. "</td>"
+                end
+            end
+            body_rows = body_rows .. "<tr>" .. cells .. "</tr>"
+        end
+        if #rows == 0 then
+            result_html = "<p class=\"fossci-empty\">No rows.</p>"
+        else
+            result_html = "<div class=\"fossci-table-wrapper\"><table id=\"sql-table\"><thead><tr>" ..
+                header_cells .. "</tr></thead><tbody>" .. body_rows .. "</tbody></table></div>" ..
+                "<p class=\"fossci-sql-count\">" .. tostring(#rows) .. " rows</p>"
+        end
+    elseif sql_text_or_empty == "" then
+        -- Submitted with a genuinely empty box -- distinct from the
+        -- pre-run, example-prefilled first-load case below, which
+        -- needs no message at all (nothing has failed or been skipped).
+        result_html = "<p class=\"fossci-empty\">Enter a SQL query above, then click Run.</p>"
+    end
+
+    return string.format("""
+<div class="fossil-doc" data-title="Query">
+    <style>
+%s
+        .fossci-header { margin-bottom: 20px; border-bottom: 1px solid var(--fossci-bg-2, #f1f5f9); padding-bottom: 16px; }
+        .fossci-header h2 { margin: 0 0 6px 0; font-size: 1.6rem; font-weight: 700; color: var(--fossci-heading, #0f172a); letter-spacing: -0.02em; }
+        .fossci-header p { color: var(--fossci-muted, #64748b); margin: 0; font-size: 0.95rem; }
+        .fossci-sql-input {
+            width: 100%%;
+            /* max-width explicit, not left to inherit: Fossil's own base
+            ** CSS (src/default.css) has a bare "textarea { max-width:
+            ** 95%% }" rule that otherwise wins over nothing here -- a
+            ** real, confirmed-live gap between this box and the
+            ** .fossci-nlsql row above it (measured 1045px vs 1100px,
+            ** exactly 95%% of the same 1100px parent). This class
+            ** selector's higher specificity overrides it. */
+            max-width: 100%%;
+            min-height: 140px;
+            box-sizing: border-box;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 0.9rem;
+            padding: 14px;
+            border: 1px solid var(--fossci-border, #e2e8f0);
+            border-radius: var(--fossci-radius-item, 10px);
+            background: var(--fossci-bg, #f8fafc);
+            color: var(--fossci-input-text, #1e293b);
+            margin-bottom: 12px;
+        }
+        %s
+        .fossci-sql-error {
+            margin-top: 20px;
+            padding: 14px 18px;
+            border-radius: var(--fossci-radius-item, 10px);
+            background: #fef2f2;
+            border: 1px solid #fecaca;
+            color: #991b1b;
+        }
+        .fossci-sql-count { color: var(--fossci-muted, #64748b); font-size: 0.85rem; margin-top: 8px; }
+        .fossci-table-wrapper { overflow-x: auto; margin-top: 20px; border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-md, 12px); background: var(--fossci-bg, #f8fafc); }
+        #sql-table { width: 100%%; border-collapse: separate; border-spacing: 0; min-width: 600px; }
+        #sql-table th, #sql-table td { padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--fossci-border, #e2e8f0); font-size: 0.85rem; }
+        #sql-table th { background: var(--fossci-bg-2, #f1f5f9); font-weight: 600; font-size: 0.75rem; color: var(--fossci-th-text, #475569); text-transform: uppercase; letter-spacing: 0.06em; }
+        #sql-table td { background: #ffffff; }
+        .fossci-empty { margin-top: 20px; padding: 24px; text-align: center; color: var(--fossci-muted, #64748b); background: var(--fossci-bg, #f8fafc); border: 1px dashed var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-md, 12px); }
+        .fossci-entity-ref { color: var(--fossci-accent, #4f46e5); text-decoration: none; font-weight: 600; }
+        .fossci-entity-ref::after { content: " \2197"; font-size: 0.85em; }
+        .fossci-entity-ref:hover { text-decoration: underline; }
+        .fossci-nlsql { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+        .fossci-nlsql input {
+            flex: 1;
+            padding: 10px 14px;
+            border: 1px solid var(--fossci-border, #e2e8f0);
+            border-radius: var(--fossci-radius-sm, 8px);
+            background: var(--fossci-bg, #f8fafc);
+            color: var(--fossci-input-text, #1e293b);
+            font-size: 0.9rem;
+        }
+        .fossci-nlsql-status { font-size: 0.8rem; color: var(--fossci-muted, #64748b); white-space: nowrap; }
+    </style>
+    %s
+    <div class="fossci-container">
+        <div class="fossci-header">
+            <h2>Query</h2>
+            <p>Read-only (SELECT only) queries against the entity store. Setup/Admin only.</p>
+        </div>
+        <div class="fossci-nlsql" id="fossci-nlsql">
+            <input type="text" id="fossci-nlsql-input" placeholder="Ask the agent to write or update this query in plain English..." autocomplete="off" />
+            <button type="button" class="btn btn-secondary" id="fossci-nlsql-btn">Generate query</button>
+            <span class="fossci-nlsql-status" id="fossci-nlsql-status"></span>
+        </div>
+        <form method="get" action="fossci/sql">
+            <textarea class="fossci-sql-input" id="fossci-sql-query" name="q" placeholder="SELECT * FROM sample LIMIT 20;">%s</textarea>
+            <button class="btn btn-primary" type="submit">Run</button>
+        </form>
+        %s
+    </div>
+</div>
+%s
+""", fossci_container_css(1100), fossci_button_css(), html.popover_css(), escaped_sql, result_html, html.popover_js(nonce))
+end
+
+-- Percent-encodes everything except unreserved characters and "/" --
+-- wiki page names following the "<folder>/<entry>" convention (see
+-- html.render_notebook_tree) keep their literal slashes in the URL for
+-- readability; Fossil's own `name` query-param parsing decodes
+-- percent-encoding either way, so keeping "/" literal vs. encoding it as
+-- %2F makes no functional difference, just a more readable URL.
+function url_encode_keep_slash(s)
+    return (string.gsub(s, "[^%w%-%.%_%~/]", function(c)
+        return string.format("%%%02X", string.byte(c))
+    end))
+end
+
+-- Builds a nested {children = {name -> node}, entries = {{leaf, full_name}}}
+-- tree from a flat list of wiki page names, splitting each on "/" --
+-- e.g. "Celleste R&D/Experiments/test_experiment" becomes a "Celleste
+-- R&D" folder containing an "Experiments" folder containing one entry.
+-- A page name with no "/" at all becomes a root-level entry, not a
+-- folder. `prefix`, if given, keeps only names equal to it or starting
+-- with "prefix/" -- e.g. a deployment might scope this to just the
+-- migrated-content subtree, filtering out unrelated top-level pages
+-- (Home, System, ...) that don't use this convention at all.
+function build_notebook_tree(page_names, prefix)
+    root = {children = {}, entries = {}}
+    for _, name in ipairs(page_names) do
+        included = false
+        if prefix == nil or prefix == "" then
+            included = true
+        elseif name == prefix then
+            included = true
+        elseif string.sub(name, 1, string.len(prefix) + 1) == (prefix .. "/") then
+            included = true
+        end
+        if included then
+            segments = {}
+            for seg in string.gmatch(name, "[^/]+") do
+                table.insert(segments, seg)
+            end
+            n = #segments
+            if n > 0 then
+                leaf = segments[n]
+                node = root
+                for i = 1, n - 1 do
+                    seg = segments[i]
+                    if node.children[seg] == nil then
+                        node.children[seg] = {children = {}, entries = {}}
+                    end
+                    node = node.children[seg]
+                end
+                table.insert(node.entries, {leaf = leaf, full_name = name})
+            end
+        end
+    end
+    return root
+end
+
+function render_notebook_tree_node(node, depth)
+    folder_names = {}
+    for name, _ in pairs(node.children) do
+        table.insert(folder_names, name)
+    end
+    table.sort(folder_names)
+
+    parts = {}
+    for _, name in ipairs(folder_names) do
+        child = node.children[name]
+        open_attr = ""
+        if depth == 0 then
+            open_attr = " open"
+        end
+        table.insert(parts, "<details" .. open_attr .. "><summary>" .. html_escape(name) .. "</summary>")
+        table.insert(parts, render_notebook_tree_node(child, depth + 1))
+
+        entries = child.entries
+        table.sort(entries, function(a, b) return string.lower(a.leaf) < string.lower(b.leaf) end)
+        for _, entry in ipairs(entries) do
+            table.insert(parts, "<div class=\"entry-link\"><a href=\"/wiki?name=" ..
+                url_encode_keep_slash(entry.full_name) .. "\">" .. html_escape(entry.leaf) .. "</a></div>")
+        end
+        table.insert(parts, "</details>")
+    end
+    return table.concat(parts, "\n")
+end
+
+-- Generic, deployment-agnostic "folder tree" view over Fossil's live
+-- wiki page list -- see doc/task-management.md-style reasoning: this
+-- replaces what used to be a one-time static snapshot (a real bug found
+-- in production -- new pages never appeared on it, no matter their
+-- name, since it was generated once by a batch migration script and
+-- never regenerated). Rendered fresh on every request instead, directly
+-- against `wiki.list_pages`, so it can never go stale. `title` and
+-- `prefix` are both deployment choices -- fossci itself has no opinion
+-- on what a repository's top-level folder convention should be named.
+function html.render_notebook_tree(page_names, prefix, title, nonce)
+    if title == nil then
+        title = "Notebook"
+    end
+    if nonce == nil then
+        nonce = ""
+    end
+    tree = build_notebook_tree(page_names, prefix)
+    tree_html = render_notebook_tree_node(tree, 0)
+    if tree_html == "" then
+        tree_html = "<p class=\"fossci-empty\">No entries yet.</p>"
+    end
+
+    return string.format("""
+<div class="fossil-doc" data-title="%s">
+    <style>
+%s
+        .fossci-empty {
+            padding: 32px;
+            text-align: center;
+            color: var(--fossci-muted, #64748b);
+            background: var(--fossci-bg, #f8fafc);
+            border: 1px dashed var(--fossci-border, #e2e8f0);
+            border-radius: var(--fossci-radius-md, 12px);
+        }
+    </style>
+    <div class="fossci-container">
+        <h1>%s</h1>
+        <div class="fossci-notebook-tree">
+        %s
+        </div>
+    </div>
+</div>
+""", html_escape(title), fossci_container_css(900), html_escape(title), tree_html)
+end
+
+return html

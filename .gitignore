@@ -1,0 +1,14 @@
+# Build outputs
+bin/
+obj/
+
+# Local dev data
+.store/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Temporary files
+*.swp
+*~
