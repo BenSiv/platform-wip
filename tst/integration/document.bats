@@ -151,3 +151,20 @@ raw_document_preview() {
     run get_route "/documents" ""
     [[ "$output" =~ "No pages yet" ]]
 }
+
+@test "document reindex-embeddings CLI populates cached embeddings, explicitly not on every save" {
+    save_document "csrf_token=${CSRF}&title=Home&parent_id=&content=hello" >/dev/null
+
+    run "$BIN" entity list document
+    # Saving a page never computes an embedding as a side effect --
+    # only the explicit reindex command does (see document.lua's own
+    # comment on why: it's a real, avoidable API cost per save).
+    run bash -c "cd '$TEST_DIR' && sqlite3 .store/store.db 'SELECT COUNT(*) FROM document_embedding;'"
+    [ "$output" = "0" ]
+
+    AGENT_PROVIDER=test run "$BIN" document reindex-embeddings
+    [[ "$output" =~ "Reindexed 1 page(s), 0 failed" ]]
+
+    run bash -c "cd '$TEST_DIR' && sqlite3 .store/store.db 'SELECT COUNT(*) FROM document_embedding;'"
+    [ "$output" = "1" ]
+}

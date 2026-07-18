@@ -2109,4 +2109,166 @@ function html.render_document_edit(doc, parent_options_html, csrf_token, error_m
      html_escape(csrf_token), entity_id_value, title_value, parent_options_html, content_value, nonce)
 end
 
+--------------------------------------------------------------------------
+-- Chat/agent (src/agent.lua)
+--------------------------------------------------------------------------
+
+CHAT_ROLE_LABELS = {
+    user = "You",
+    assistant = "Assistant",
+    tool_result = "Tool result",
+    compaction_summary = "Compacted summary",
+}
+
+-- Every message renders, including ones marked out-of-context by
+-- compaction (dimmed, not hidden) -- transparency about what the model
+-- can/can't currently see, matching this system's own "nothing is ever
+-- hidden, only marked" stance elsewhere (archived_at, in_context).
+function render_chat_message(msg)
+    label = CHAT_ROLE_LABELS[msg.role]
+    if label == nil then
+        label = msg.role
+    end
+    css_class = "fossci-chat-msg fossci-chat-" .. msg.role
+    if tonumber(msg.in_context) == 0 then
+        css_class = css_class .. " fossci-chat-out-of-context"
+    end
+    return "<div class=\"" .. css_class .. "\"><strong>" .. html_escape(label) .. ":</strong> " ..
+        html_escape(msg.content) .. "</div>"
+end
+
+function render_chat_sessions_list(sessions, current_session_id)
+    items = ""
+    for _, s in ipairs(sessions) do
+        css_class = ""
+        if current_session_id != nil and s.id == current_session_id then
+            css_class = " class=\"fossci-chat-session-active\""
+        end
+        label = s.title
+        if label == nil or label == "" then
+            label = "Untitled chat"
+        end
+        items = items .. "<li" .. css_class .. "><a href=\"chat?session_id=" .. s.id .. "\">" ..
+            html_escape(label) .. "</a></li>"
+    end
+    if items == "" then
+        return "<p class=\"fossci-empty\">No chats yet.</p>"
+    end
+    return "<ul class=\"fossci-chat-sessions\">" .. items .. "</ul>"
+end
+
+-- `pending`, if not nil, blocks the plain message input and shows an
+-- approve/deny prompt instead -- a destructive tool call has to be
+-- resolved before the conversation can continue.
+function render_chat_pending(pending, csrf_token)
+    json = require("dkjson")
+    args, _, _ = json.decode(pending.args_json)
+    if args == nil then
+        args = {}
+    end
+    args_lines = ""
+    for k, v in pairs(args) do
+        args_lines = args_lines .. "<div>" .. html_escape(tostring(k)) .. " = " .. html_escape(tostring(v)) .. "</div>"
+    end
+
+    return string.format("""
+    <div class="fossci-chat-pending">
+        <p><strong>The assistant wants to run:</strong> %s.%s</p>
+        %s
+        <form method="POST" action="chat-approve" class="fossci-chat-pending-form">
+            <input type="hidden" name="csrf_token" value="%s">
+            <input type="hidden" name="pending_id" value="%s">
+            <input type="hidden" name="session_id" value="%s">
+            <button type="submit" class="btn btn-primary">Approve</button>
+        </form>
+        <form method="POST" action="chat-deny" class="fossci-chat-pending-form">
+            <input type="hidden" name="csrf_token" value="%s">
+            <input type="hidden" name="pending_id" value="%s">
+            <input type="hidden" name="session_id" value="%s">
+            <button type="submit" class="btn btn-secondary">Deny</button>
+        </form>
+    </div>
+""", html_escape(pending.tool), html_escape(pending.method), args_lines,
+     html_escape(csrf_token), tostring(pending.id), html_escape(pending.session_id),
+     html_escape(csrf_token), tostring(pending.id), html_escape(pending.session_id))
+end
+
+function html.render_chat(sessions, session, messages, pending, csrf_token, nonce)
+    current_session_id = nil
+    if session != nil then
+        current_session_id = session.id
+    end
+    sessions_html = render_chat_sessions_list(sessions, current_session_id)
+
+    main_html = "<p class=\"fossci-empty\">Start a new chat, or pick one from the list.</p>"
+    if session != nil then
+        messages_html = ""
+        for _, msg in ipairs(messages) do
+            messages_html = messages_html .. render_chat_message(msg)
+        end
+        if messages_html == "" then
+            messages_html = "<p class=\"fossci-empty\">No messages yet -- say something below.</p>"
+        end
+
+        input_html = ""
+        if pending != nil then
+            input_html = render_chat_pending(pending, csrf_token)
+        else
+            input_html = string.format("""
+        <form method="POST" action="chat-message" class="fossci-chat-input-form">
+            <input type="hidden" name="csrf_token" value="%s">
+            <input type="hidden" name="session_id" value="%s">
+            <input type="text" name="message" placeholder="Ask something, or ask the assistant to search or create a page..." required autofocus>
+            <button type="submit" class="btn btn-primary">Send</button>
+        </form>
+""", html_escape(csrf_token), html_escape(session.id))
+        end
+
+        main_html = "<div class=\"fossci-chat-messages\">" .. messages_html .. "</div>" .. input_html
+    end
+
+    return string.format("""
+<div class="fossil-doc" data-title="Chat">
+    <style>
+%s
+%s
+        .fossci-header { margin-bottom: 20px; border-bottom: 1px solid var(--fossci-bg-2, #f1f5f9); padding-bottom: 16px; }
+        .fossci-chat-layout { display: grid; grid-template-columns: 220px 1fr; gap: 20px; }
+        .fossci-chat-sessions { list-style: none !important; margin: 0; padding: 0; }
+        .fossci-chat-sessions li { margin: 4px 0; }
+        .fossci-chat-sessions a { color: var(--fossci-accent, #4f46e5); text-decoration: none; font-weight: 600; }
+        .fossci-chat-session-active a { text-decoration: underline; }
+        .fossci-chat-new-form { display: flex; gap: 6px; margin-bottom: 16px; }
+        .fossci-chat-new-form input[type=text] { flex: 1; padding: 6px 8px; border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-sm, 8px); }
+        .fossci-chat-messages { max-height: 55vh; overflow-y: auto; margin-bottom: 16px; padding: 12px; border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-md, 12px); background: var(--fossci-bg, #f8fafc); }
+        .fossci-chat-msg { margin-bottom: 10px; padding: 8px 10px; border-radius: var(--fossci-radius-sm, 8px); background: #fff; border: 1px solid var(--fossci-border, #e2e8f0); }
+        .fossci-chat-user { background: #eef2ff; }
+        .fossci-chat-tool_result { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; }
+        .fossci-chat-compaction_summary { font-style: italic; color: var(--fossci-muted, #64748b); }
+        .fossci-chat-out-of-context { opacity: 0.45; }
+        .fossci-chat-input-form { display: flex; gap: 8px; }
+        .fossci-chat-input-form input[type=text] { flex: 1; padding: 8px 10px; border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-sm, 8px); }
+        .fossci-chat-pending { padding: 14px; border: 1px solid #fde68a; background: #fffbeb; border-radius: var(--fossci-radius-md, 12px); }
+        .fossci-chat-pending-form { display: inline-block; margin-right: 8px; margin-top: 8px; }
+    </style>
+    <div class="fossci-container">
+        <div class="fossci-header"><h2>Chat</h2></div>
+        <div class="fossci-chat-layout">
+            <div>
+                <form method="POST" action="chat-start" class="fossci-chat-new-form">
+                    <input type="hidden" name="csrf_token" value="%s">
+                    <input type="text" name="title" placeholder="New chat title">
+                    <button type="submit" class="btn btn-secondary">+</button>
+                </form>
+                %s
+            </div>
+            <div>
+                %s
+            </div>
+        </div>
+    </div>
+</div>
+""", fossci_container_css(1200), fossci_button_css(), html_escape(csrf_token), sessions_html, main_html)
+end
+
 return html

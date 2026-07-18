@@ -198,3 +198,61 @@ holding expires on its own schedule.
 - **Permissions** are short capability strings on the account (a
   baseline capability everyone needs, plus elevated ones for
   higher-privilege actions like ad hoc querying), checked per route.
+
+## Chat
+
+A built-in assistant, not a bolted-on integration: real per-user
+conversation sessions, DB-backed history (nothing ever deleted --
+compaction marks old turns out-of-context, it doesn't remove them),
+and a small, explicit tool registry the model can act through.
+
+- **The LLM backend is pluggable, not hardcoded.** A thin interface
+  (`generate(model, system_prompt, prompt)`, optionally `embeddings`)
+  is loaded dynamically by name rather than required directly -- the
+  real backend (Google Vertex AI, via a `curl` shell-out authenticated
+  with fresh short-lived credentials, the same "bind to an existing,
+  battle-tested tool" stance used for Markdown rendering and password
+  hashing) and a fully deterministic backend used by this project's
+  own tests are just two named implementations behind the same seam.
+  Routine test runs use the deterministic one -- exercising a real
+  paid API on every test iteration would be slow, flaky, and a real,
+  avoidable cost.
+- **Context-window compaction**: once a session's active history
+  crosses an estimated token threshold, everything except the most
+  recent few turns gets summarized (via one real model call) into a
+  single new message, and the summarized originals are marked
+  out-of-context -- never deleted. The chat UI still shows them,
+  dimmed, so what the model can no longer see stays visible to the
+  human, not hidden.
+- **Tool use is a small, explicit registry, not an open plugin
+  system** -- the model can only ever call exactly what's listed
+  (searching pages, creating a page, updating a page today), with no
+  escape hatch to anything else.
+- **A destructive tool call cannot execute without a human approving
+  it first**, and that approval is a real, persisted two-phase state,
+  not a blocking prompt: a single web request can't pause mid-call
+  waiting on a person's real-world response time, so a destructive
+  request instead gets recorded as a pending action and the request
+  returns immediately; a separate, later request (clicking Approve or
+  Deny in the chat UI) executes it -- or records the refusal -- and
+  only then resumes the conversation. Read-only calls (search) run
+  immediately with no approval step; nothing about the mechanism
+  distinguishes "asking" from "changing data" except that one fact.
+- **Every tool call is attributed to the real, authenticated user
+  driving that conversation, never a separate "agent" identity** --
+  a page the assistant creates or updates shows up in that page's own
+  audit history exactly like a direct manual edit, just additionally
+  tagged with which chat session it came from, so the ledger can still
+  answer "was this a direct edit or something the assistant did" without
+  that ever affecting who it's attributed to.
+- **Semantic search** blends keyword matching with embedding
+  cosine-similarity when a page has been explicitly indexed -- indexing
+  a page is a deliberate, separate action, never an automatic side
+  effect of saving it, since computing an embedding is a real API call
+  per page. A query's own embedding, by contrast, is computed fresh on
+  every search (one cheap, real-time call) -- only the *document* side
+  of the comparison is precomputed and cached. SQLite FTS5 was
+  evaluated for the keyword half first, per the original plan for this
+  feature; confirmed directly that this project's SQLite binding
+  doesn't have it compiled in, so search instead scores every active
+  page directly, an acceptable tradeoff at the scale this is built for.

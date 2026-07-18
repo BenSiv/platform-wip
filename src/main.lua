@@ -23,6 +23,9 @@ do_view = view.do_view
 auth = require("auth")
 do_user = auth.do_user
 
+document = require("document")
+do_document = document.do_document
+
 cgi = require("cgi")
 
 function main()
@@ -49,6 +52,7 @@ function main()
         ["extension"] = do_extension,
         ["view"] = do_view,
         ["user"] = do_user,
+        ["document"] = do_document,
     }
 
     arg[-1] = "lua"
@@ -61,7 +65,7 @@ function main()
     end
 
     if command == nil or command == "-h" or command == "--help" then
-        print("Usage: platform <init|schema|entity|ledger|extension|view|user> ...")
+        print("Usage: platform <init|schema|entity|ledger|extension|view|user|document> ...")
         return
     end
 

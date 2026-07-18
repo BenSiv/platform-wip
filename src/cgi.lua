@@ -10,6 +10,7 @@ json = require("dkjson")
 paths = require("paths")
 auth = require("auth")
 document = require("document")
+agent = require("agent")
 
 cgi = {}
 
@@ -377,6 +378,7 @@ function cgi.handle_request()
     ledger.init_schema(db_path)
     auth.init_schema(db_path)
     document.init_schema(db_path)
+    agent.init_schema(db_path)
     secret_ok, secret_err = auth.ensure_session_secret(root)
     if secret_ok == nil then
         return print_response("500 Internal Server Error", "text/html", "<h3>Error: " .. tostring(secret_err) .. "</h3>")
@@ -598,7 +600,6 @@ function cgi.handle_request()
         if form.parent_id != nil and form.parent_id != "" then
             parent_id = tonumber(form.parent_id)
         end
-        values = {title = form.title, content = form.content, parent_id = parent_id}
 
         if entity_id != nil and document.would_create_cycle(db_path, entity_id, parent_id) then
             doc = entity.get(db_path, "document", entity_id)
@@ -611,9 +612,11 @@ function cgi.handle_request()
         saved_id = nil
         issues = nil
         if entity_id != nil then
-            saved_id, issues = entity.update(db_path, "document", entity_id, values, author, source_from_params(params))
+            saved_id, issues = document.update_page(db_path, author, entity_id, form.title, parent_id, form.content,
+                source_from_params(params))
         else
-            saved_id, issues = entity.create(db_path, "document", values, author, source_from_params(params))
+            saved_id, issues = document.create_page(db_path, author, form.title, parent_id, form.content,
+                source_from_params(params))
         end
 
         if saved_id == nil then
@@ -627,7 +630,6 @@ function cgi.handle_request()
             return print_response("200 OK", "text/html", body)
         end
 
-        document.sync_links(db_path, saved_id, form.content)
         return print_response("302 Found", "text/plain", "", {"Location: document?entity_id=" .. tostring(saved_id)})
     end
 
@@ -715,6 +717,76 @@ function cgi.handle_request()
             return print_response("200 OK", "text/html", body)
         end
         return print_response("302 Found", "text/plain", "", {"Location: admin-users"})
+    end
+
+    -- Chat/agent (src/agent.lua). AGENT_MODEL is configurable the same
+    -- way VERTEX_PROJECT/VERTEX_REGION/AGENT_PROVIDER are -- an env
+    -- var, not hardcoded, since a real model name is a deployment
+    -- choice, not something this generic platform should assume.
+    AGENT_DEFAULT_MODEL = "gemini-2.5-flash"
+
+    if path_info == "/chat" then
+        session_id = params.session_id
+        sessions = agent.list_sessions(db_path, author)
+        session = nil
+        messages = {}
+        pending = nil
+        if session_id != nil and session_id != "" then
+            session = agent.get_session(db_path, session_id, author)
+            if session == nil then
+                return print_response("404 Not Found", "text/html", "<h3>Error: no such chat session</h3>")
+            end
+            messages = agent.all_messages(db_path, session_id)
+            pending = agent.latest_pending(db_path, session_id)
+        end
+        body = html.render_chat(sessions, session, messages, pending, default_value(cookies.csrf, ""), nonce)
+        return print_response("200 OK", "text/html", body)
+    end
+
+    if path_info == "/chat-start" and method == "POST" then
+        form = parse_query(io.read("*all"))
+        if not require_csrf(cookies, form.csrf_token) then
+            return print_response("403 Forbidden", "text/html", "<h3>Forbidden: CSRF check failed</h3>")
+        end
+        new_session_id, err = agent.create_session(db_path, author, form.title)
+        if new_session_id == nil then
+            return print_response("500 Internal Server Error", "text/html", "<h3>Error: " .. tostring(err) .. "</h3>")
+        end
+        return print_response("302 Found", "text/plain", "", {"Location: chat?session_id=" .. new_session_id})
+    end
+
+    if path_info == "/chat-message" and method == "POST" then
+        form = parse_query(io.read("*all"))
+        if not require_csrf(cookies, form.csrf_token) then
+            return print_response("403 Forbidden", "text/html", "<h3>Forbidden: CSRF check failed</h3>")
+        end
+        session = agent.get_session(db_path, form.session_id, author)
+        if session == nil then
+            return print_response("404 Not Found", "text/html", "<h3>Error: no such chat session</h3>")
+        end
+        model = default_value(os.getenv("AGENT_MODEL"), AGENT_DEFAULT_MODEL)
+        agent.run_turn(db_path, form.session_id, author, nil, model, form.message)
+        return print_response("302 Found", "text/plain", "", {"Location: chat?session_id=" .. form.session_id})
+    end
+
+    if path_info == "/chat-approve" and method == "POST" then
+        form = parse_query(io.read("*all"))
+        if not require_csrf(cookies, form.csrf_token) then
+            return print_response("403 Forbidden", "text/html", "<h3>Forbidden: CSRF check failed</h3>")
+        end
+        model = default_value(os.getenv("AGENT_MODEL"), AGENT_DEFAULT_MODEL)
+        agent.approve_pending(db_path, tonumber(form.pending_id), author, nil, model)
+        return print_response("302 Found", "text/plain", "", {"Location: chat?session_id=" .. form.session_id})
+    end
+
+    if path_info == "/chat-deny" and method == "POST" then
+        form = parse_query(io.read("*all"))
+        if not require_csrf(cookies, form.csrf_token) then
+            return print_response("403 Forbidden", "text/html", "<h3>Forbidden: CSRF check failed</h3>")
+        end
+        model = default_value(os.getenv("AGENT_MODEL"), AGENT_DEFAULT_MODEL)
+        agent.deny_pending(db_path, tonumber(form.pending_id), author, nil, model)
+        return print_response("302 Found", "text/plain", "", {"Location: chat?session_id=" .. form.session_id})
     end
 
     if path_info == "/templates" then

@@ -1,0 +1,580 @@
+-- The chat/agent subsystem: real per-user sessions and DB-backed
+-- conversation history (not brain-ex's hardcoded single 'default'
+-- session -- every session belongs to a specific login, and every
+-- lookup checks that ownership), context-window compaction, and (see
+-- the tool-use section further down) a bounded turn loop that can act
+-- on the platform's own data through a small, explicit tool registry.
+--
+-- Nothing here is ever deleted. Compacting history marks old messages
+-- out-of-context (in_context = 0) rather than removing them -- the
+-- full conversation stays in SQL, only the live prompt sent to the
+-- model shrinks.
+
+db = require("db")
+agent_provider = require("agent_provider")
+document = require("document")
+
+agent = {}
+
+DEFAULT_COMPACTION_THRESHOLD = 4000
+MAX_TURNS = 10
+
+AGENT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS agent_session (
+    id TEXT PRIMARY KEY,
+    login TEXT NOT NULL,
+    title TEXT,
+    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS agent_message (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    in_context INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+
+-- A destructive tool call the model has proposed but not yet run --
+-- see "Tool use" below for why this has to be a real, persisted state
+-- rather than a blocking prompt: a single CGI request can't pause
+-- mid-call waiting on a human's real-world response time.
+CREATE TABLE IF NOT EXISTS agent_pending_action (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    tool TEXT NOT NULL,
+    method TEXT NOT NULL,
+    args_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    resolved_at TEXT
+);
+"""
+
+function agent.init_schema(db_path)
+    return db.exec(db_path, AGENT_SCHEMA)
+end
+
+--------------------------------------------------------------------------
+-- Sessions
+--------------------------------------------------------------------------
+
+-- Self-contained (not calling auth.lua's identical helper) so this
+-- module has no load-order dependency on auth.lua being required
+-- first -- it isn't conceptually an auth concern, just a source of
+-- unguessable ids, so it gets its own copy rather than an implicit
+-- cross-file dependency on one.
+function random_session_token()
+    urandom = io.open("/dev/urandom", "rb")
+    if urandom == nil then
+        return nil, "cannot open /dev/urandom"
+    end
+    raw = io.read(urandom, 16)
+    io.close(urandom)
+    if raw == nil or string.len(raw) != 16 then
+        return nil, "short read from /dev/urandom"
+    end
+    hex = {}
+    for i = 1, string.len(raw) do
+        table.insert(hex, string.format("%02x", string.byte(raw, i)))
+    end
+    return table.concat(hex)
+end
+
+function agent.create_session(db_path, login, title)
+    session_id, err = random_session_token()
+    if session_id == nil then
+        return nil, err
+    end
+    db.exec(db_path, string.format(
+        "INSERT INTO agent_session (id, login, title) VALUES (%s, %s, %s);",
+        db.quote(session_id), db.quote(login), db.literal(title)
+    ))
+    return session_id
+end
+
+-- Requires the session to belong to `login` -- one user can never
+-- read or continue another user's conversation just by guessing or
+-- reusing a session id.
+function agent.get_session(db_path, session_id, login)
+    rows = db.query(db_path, string.format(
+        "SELECT * FROM agent_session WHERE id = %s AND login = %s;",
+        db.quote(session_id), db.quote(login)
+    ))
+    if rows == nil or rows[1] == nil then
+        return nil
+    end
+    return rows[1]
+end
+
+function agent.list_sessions(db_path, login)
+    rows = db.query(db_path, string.format(
+        "SELECT * FROM agent_session WHERE login = %s ORDER BY updated_at DESC;",
+        db.quote(login)
+    ))
+    if rows == nil then
+        return {}
+    end
+    return rows
+end
+
+function agent.touch_session(db_path, session_id)
+    db.exec(db_path, string.format(
+        "UPDATE agent_session SET updated_at = datetime('now', 'localtime') WHERE id = %s;",
+        db.quote(session_id)
+    ))
+end
+
+--------------------------------------------------------------------------
+-- Messages
+--------------------------------------------------------------------------
+
+function agent.add_message(db_path, session_id, role, content, in_context)
+    if in_context == nil then
+        in_context = true
+    end
+    in_context_flag = 0
+    if in_context == true then
+        in_context_flag = 1
+    end
+    db.exec(db_path, string.format(
+        "INSERT INTO agent_message (session_id, role, content, in_context) VALUES (%s, %s, %s, %d);",
+        db.quote(session_id), db.quote(role), db.quote(content), in_context_flag
+    ))
+    agent.touch_session(db_path, session_id)
+    rows = db.query(db_path, "SELECT MAX(id) AS id FROM agent_message;")
+    return tonumber(rows[1].id)
+end
+
+function agent.active_messages(db_path, session_id)
+    rows = db.query(db_path, string.format(
+        "SELECT * FROM agent_message WHERE session_id = %s AND in_context = 1 ORDER BY id ASC;",
+        db.quote(session_id)
+    ))
+    if rows == nil then
+        return {}
+    end
+    return rows
+end
+
+-- Every message, active or compacted-away -- the full, never-deleted
+-- transcript, for a "show full history" view.
+function agent.all_messages(db_path, session_id)
+    rows = db.query(db_path, string.format(
+        "SELECT * FROM agent_message WHERE session_id = %s ORDER BY id ASC;",
+        db.quote(session_id)
+    ))
+    if rows == nil then
+        return {}
+    end
+    return rows
+end
+
+--------------------------------------------------------------------------
+-- Context-window compaction
+--------------------------------------------------------------------------
+
+-- A simple chars/4 heuristic, not a real tokenizer -- ported as-is
+-- from brain-ex: cheap, no model-specific vocabulary to keep in sync,
+-- and only needs to be roughly right (the threshold check it feeds has
+-- headroom built in, not a hard model context limit).
+function agent.estimate_tokens(text)
+    if text == nil then
+        return 0
+    end
+    return math.ceil(string.len(text) / 4)
+end
+
+-- Summarizes everything except the last `keep_last` active messages
+-- into one new 'compaction_summary' message once the active window's
+-- estimated token count crosses the threshold, then marks the
+-- summarized originals in_context = 0 -- ported from brain-ex's
+-- agent_engine.run_agent, same threshold/keep-last defaults. Never
+-- deletes anything; the summary is itself just another additive
+-- message.
+function agent.compact_if_needed(db_path, session_id, system_prompt, model)
+    active = agent.active_messages(db_path, session_id)
+
+    threshold = DEFAULT_COMPACTION_THRESHOLD
+    env_threshold = tonumber(os.getenv("AGENT_COMPACTION_THRESHOLD"))
+    if env_threshold != nil then
+        threshold = env_threshold
+    end
+
+    keep_last = 4
+    if #active <= keep_last then
+        return false
+    end
+
+    total_tokens = agent.estimate_tokens(system_prompt)
+    for _, msg in ipairs(active) do
+        total_tokens = total_tokens + agent.estimate_tokens(msg.content)
+    end
+
+    if total_tokens <= threshold then
+        return false
+    end
+
+    to_compact = {}
+    for i = 1, #active - keep_last do
+        table.insert(to_compact, active[i])
+    end
+
+    summary_prompt = "You are a context compaction engine. Please summarize the following " ..
+        "conversation history into a concise, structured Markdown summary of goals, key " ..
+        "information established, and progress. Focus on preserving factual details and " ..
+        "state, so that a future model invocation has all the necessary context. Keep the " ..
+        "summary under 300 words.\n\nConversation to summarize:\n"
+    for _, msg in ipairs(to_compact) do
+        summary_prompt = summary_prompt .. string.upper(msg.role) .. ": " .. msg.content .. "\n"
+    end
+
+    summary, err = agent_provider.generate(model, "You are a concise summarizer.", summary_prompt)
+    if summary == nil or err != nil then
+        return false, err
+    end
+
+    agent.add_message(db_path, session_id, "compaction_summary", summary, true)
+
+    ids = {}
+    for _, msg in ipairs(to_compact) do
+        table.insert(ids, tostring(msg.id))
+    end
+    db.exec(db_path, "UPDATE agent_message SET in_context = 0 WHERE id IN (" .. table.concat(ids, ",") .. ");")
+
+    return true
+end
+
+--------------------------------------------------------------------------
+-- Tool use
+--------------------------------------------------------------------------
+--
+-- A small, explicit built-in registry (not an open-ended plugin
+-- system the way extensions are) -- the model can only ever call
+-- exactly what's listed here, with no escape hatch. Each entry is
+-- marked destructive or not; the turn loop below auto-executes
+-- non-destructive calls and pauses destructive ones for a human to
+-- approve, replacing brain-ex's blocking terminal y/N prompt (which
+-- assumes a synchronous, long-lived process -- CGI has neither) with a
+-- real two-phase state machine: a destructive request is persisted as
+-- an agent_pending_action row and the turn loop returns immediately;
+-- a *separate* later request (agent.approve_pending/deny_pending)
+-- executes it (or records the denial) and resumes the loop from there.
+
+AGENT_TOOLS = {
+    document = {
+        search = {destructive = false},
+        create = {destructive = true},
+        update = {destructive = true},
+    },
+}
+
+function agent.is_known_tool(tool_name, method_name)
+    group = AGENT_TOOLS[tool_name]
+    if group == nil then
+        return false
+    end
+    return group[method_name] != nil
+end
+
+function agent.is_destructive(tool_name, method_name)
+    group = AGENT_TOOLS[tool_name]
+    if group == nil or group[method_name] == nil then
+        return false
+    end
+    return group[method_name].destructive == true
+end
+
+function issues_summary(issues)
+    if issues == nil or #issues == 0 then
+        return "failed"
+    end
+    parts = {}
+    for _, issue in ipairs(issues) do
+        if issue.severity == "error" then
+            table.insert(parts, tostring(issue.message))
+        end
+    end
+    if #parts == 0 then
+        return "failed"
+    end
+    return table.concat(parts, "; ")
+end
+
+-- Runs one already-approved (or non-destructive) tool call. `author`
+-- is the real, authenticated login the call runs as -- tool actions
+-- are attributed the same way any other write in this system is, never
+-- to a separate "agent" identity. `session_id` is recorded as the
+-- write's source (entity_event.source_notebook_entry_id) so the ledger
+-- can still distinguish *how* a change happened -- via this chat
+-- session, not the direct edit form -- without that ever affecting who
+-- it's attributed to.
+function agent.execute_tool(db_path, author, session_id, tool_name, method_name, args)
+    source = {notebook_entry_id = "agent-session:" .. tostring(session_id)}
+
+    if tool_name == "document" and method_name == "search" then
+        results = document.search(db_path, args.query, 5, true)
+        if #results == 0 then
+            return "No matching pages found."
+        end
+        lines = {}
+        for _, r in ipairs(results) do
+            table.insert(lines, string.format("#%s %s", tostring(r.id), r.title))
+        end
+        return table.concat(lines, "\n")
+    end
+
+    if tool_name == "document" and method_name == "create" then
+        parent_id = tonumber(args.parent_id)
+        created_id, issues = document.create_page(db_path, author, args.title, parent_id, args.content, source)
+        if created_id == nil then
+            return nil, issues_summary(issues)
+        end
+        return "Created page #" .. tostring(created_id) .. " (" .. tostring(args.title) .. ")"
+    end
+
+    if tool_name == "document" and method_name == "update" then
+        target_id = tonumber(args.entity_id)
+        if target_id == nil then
+            return nil, "update requires entity_id"
+        end
+        parent_id = tonumber(args.parent_id)
+        updated_id, issues = document.update_page(db_path, author, target_id, args.title, parent_id, args.content, source)
+        if updated_id == nil then
+            return nil, issues_summary(issues)
+        end
+        return "Updated page #" .. tostring(updated_id)
+    end
+
+    return nil, "unknown tool: " .. tostring(tool_name) .. "." .. tostring(method_name)
+end
+
+function agent.create_pending_action(db_path, session_id, tool_name, method_name, args)
+    json = require("dkjson")
+    db.exec(db_path, string.format(
+        "INSERT INTO agent_pending_action (session_id, tool, method, args_json) VALUES (%s, %s, %s, %s);",
+        db.quote(session_id), db.quote(tool_name), db.quote(method_name), db.quote(json.encode(args))
+    ))
+    rows = db.query(db_path, "SELECT MAX(id) AS id FROM agent_pending_action;")
+    return tonumber(rows[1].id)
+end
+
+-- Requires the pending action's own session to belong to `login` --
+-- same ownership discipline as agent.get_session.
+function agent.get_pending_action(db_path, pending_id, login)
+    rows = db.query(db_path, string.format("""
+        SELECT p.* FROM agent_pending_action p
+        JOIN agent_session s ON s.id = p.session_id
+        WHERE p.id = %d AND s.login = %s;
+    """, tonumber(pending_id), db.quote(login)))
+    if rows == nil or rows[1] == nil then
+        return nil
+    end
+    return rows[1]
+end
+
+function agent.resolve_pending_action(db_path, pending_id, status)
+    db.exec(db_path, string.format(
+        "UPDATE agent_pending_action SET status = %s, resolved_at = datetime('now', 'localtime') WHERE id = %d;",
+        db.quote(status), tonumber(pending_id)
+    ))
+end
+
+-- The most recent unresolved pending action for a session, if any --
+-- what a chat UI checks to decide whether to show an approve/deny
+-- prompt instead of a plain message input.
+function agent.latest_pending(db_path, session_id)
+    rows = db.query(db_path, string.format(
+        "SELECT * FROM agent_pending_action WHERE session_id = %s AND status = 'pending' ORDER BY id DESC LIMIT 1;",
+        db.quote(session_id)
+    ))
+    if rows == nil or rows[1] == nil then
+        return nil
+    end
+    return rows[1]
+end
+
+--------------------------------------------------------------------------
+-- The turn loop
+--------------------------------------------------------------------------
+
+function build_history_prompt(messages)
+    parts = {}
+    for _, msg in ipairs(messages) do
+        if msg.role == "compaction_summary" then
+            table.insert(parts, "[COMPACTED HISTORY SUMMARY]:\n" .. msg.content)
+        elseif msg.role == "user" then
+            table.insert(parts, "User: " .. msg.content)
+        elseif msg.role == "assistant" then
+            table.insert(parts, "Assistant: " .. msg.content)
+        elseif msg.role == "tool_result" then
+            table.insert(parts, "Tool Output:\n" .. msg.content)
+        end
+    end
+    return table.concat(parts, "\n\n")
+end
+
+function strip_spaces(s)
+    return (string.gsub(s, "^%s*(.-)%s*$", "%1"))
+end
+
+function parse_tool_call(result)
+    tool_name = string.match(result, "<tool>%s*(.-)%s*</tool>")
+    method_name = string.match(result, "<method>%s*(.-)%s*</method>")
+    args_str = string.match(result, "<args>%s*(.-)%s*</args>")
+    args = {}
+    if args_str != nil then
+        for line in string.gmatch(args_str, "[^\r\n]+") do
+            k, v = string.match(line, "^(.-)=(.*)$")
+            if k != nil and v != nil then
+                args[strip_spaces(k)] = v
+            end
+        end
+    end
+    return tool_name, method_name, args
+end
+
+-- The default system prompt teaching the model the tag protocol and
+-- listing exactly the tools in AGENT_TOOLS -- generated from the
+-- registry itself, not hand-maintained separately, so it can never
+-- drift out of sync with what agent.execute_tool actually supports.
+function agent.default_system_prompt()
+    return """
+You are an assistant embedded in a data platform. Answer directly when you can, or use a tool to look up or change data.
+
+Available tools:
+- document.search -- search pages by keyword or topic. Args: query=<search text>
+- document.create -- create a new page. Args: title=<title>, parent_id=<optional parent page id>, content=<markdown content>
+- document.update -- update an existing page. Args: entity_id=<page id>, title=<optional new title>, parent_id=<optional new parent id>, content=<optional new content>
+
+To call a tool, reply with EXACTLY this shape and nothing else:
+<tool>document</tool>
+<method>search</method>
+<args>
+query=some search text
+</args>
+
+Each argument goes on its own line as key=value. After a tool call you will be given its result as a new turn, and can call another tool or give a final answer.
+
+When you have a final answer for the user, reply with EXACTLY:
+<done>Your final answer here.</done>
+
+Never mix a tool call and a <done> reply in the same turn.
+"""
+end
+
+-- Runs the turn loop starting from the session's current active-message
+-- state. `user_message`, if given, is recorded as a new user turn
+-- before the loop starts; pass nil when resuming after a tool
+-- approval/denial -- the loop just continues from whatever's already
+-- in the active history. Returns a table:
+--   {status = "done", message = "..."}
+--   {status = "pending_approval", pending_id = N, tool = "...", method = "...", args = {...}}
+--   {status = "turn_limit", message = "..."}
+--   {status = "error", message = "..."}
+--
+-- Each call gets its own fresh MAX_TURNS budget, even a resume after a
+-- pause -- deliberate, not an oversight: the approval pause is itself
+-- a human circuit breaker, so restarting the budget on resume doesn't
+-- reopen an unbounded-loop risk the way it would in a fully autonomous
+-- run with no pauses at all.
+function agent.run_turn(db_path, session_id, login, system_prompt, model, user_message)
+    if system_prompt == nil or system_prompt == "" then
+        system_prompt = agent.default_system_prompt()
+    end
+
+    if user_message != nil and user_message != "" then
+        agent.add_message(db_path, session_id, "user", user_message, true)
+    end
+
+    agent.compact_if_needed(db_path, session_id, system_prompt, model)
+
+    for turn = 1, MAX_TURNS do
+        active = agent.active_messages(db_path, session_id)
+        prompt = build_history_prompt(active)
+
+        result, err = agent_provider.generate(model, system_prompt, prompt)
+        if result == nil then
+            return {status = "error", message = tostring(err)}
+        end
+
+        agent.add_message(db_path, session_id, "assistant", result, true)
+
+        done_message = string.match(result, "<done>%s*(.-)%s*</done>")
+        if done_message != nil then
+            return {status = "done", message = done_message}
+        end
+
+        tool_name, method_name, args = parse_tool_call(result)
+        if tool_name == nil or method_name == nil then
+            return {status = "done", message = result}
+        end
+
+        if not agent.is_known_tool(tool_name, method_name) then
+            agent.add_message(db_path, session_id, "tool_result",
+                "ERROR: unknown tool " .. tostring(tool_name) .. "." .. tostring(method_name), true)
+        elseif agent.is_destructive(tool_name, method_name) then
+            pending_id = agent.create_pending_action(db_path, session_id, tool_name, method_name, args)
+            return {status = "pending_approval", pending_id = pending_id, tool = tool_name, method = method_name, args = args}
+        else
+            tool_result, tool_err = agent.execute_tool(db_path, login, session_id, tool_name, method_name, args)
+            summary = tostring(tool_result)
+            if tool_err != nil then
+                summary = "ERROR: " .. tostring(tool_err)
+            end
+            agent.add_message(db_path, session_id, "tool_result", summary, true)
+        end
+    end
+
+    return {status = "turn_limit", message = "Unable to complete tool-assisted run in " .. tostring(MAX_TURNS) .. " turns."}
+end
+
+-- Executes an approved pending action, records its result, and resumes
+-- the turn loop from there.
+function agent.approve_pending(db_path, pending_id, login, system_prompt, model)
+    pending = agent.get_pending_action(db_path, pending_id, login)
+    if pending == nil then
+        return nil, "no such pending action"
+    end
+    if pending.status != "pending" then
+        return nil, "action already " .. tostring(pending.status)
+    end
+
+    json = require("dkjson")
+    args, _, _ = json.decode(pending.args_json)
+    if args == nil then
+        args = {}
+    end
+
+    tool_result, tool_err = agent.execute_tool(db_path, login, pending.session_id, pending.tool, pending.method, args)
+    summary = tostring(tool_result)
+    if tool_err != nil then
+        summary = "ERROR: " .. tostring(tool_err)
+    end
+    agent.add_message(db_path, pending.session_id, "tool_result", summary, true)
+    agent.resolve_pending_action(db_path, pending_id, "approved")
+
+    return agent.run_turn(db_path, pending.session_id, login, system_prompt, model, nil)
+end
+
+-- Denies a pending action, records the denial as a tool_result (so the
+-- model sees it and can react), and resumes the turn loop -- a denial
+-- is just another outcome the model gets to respond to, not a dead end.
+function agent.deny_pending(db_path, pending_id, login, system_prompt, model)
+    pending = agent.get_pending_action(db_path, pending_id, login)
+    if pending == nil then
+        return nil, "no such pending action"
+    end
+    if pending.status != "pending" then
+        return nil, "action already " .. tostring(pending.status)
+    end
+
+    agent.add_message(db_path, pending.session_id, "tool_result", "User denied execution of this action.", true)
+    agent.resolve_pending_action(db_path, pending_id, "denied")
+
+    return agent.run_turn(db_path, pending.session_id, login, system_prompt, model, nil)
+end
+
+return agent

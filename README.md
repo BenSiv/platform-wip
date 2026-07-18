@@ -25,7 +25,9 @@ directory's name are both placeholders pending a real project name.
 - **Storage** -- already a single file; nothing to consolidate.
 - **Pages** (a built-in document/notebook record type: a real tree, not
   a name-is-identity wiki page) -- done. See "Pages" below.
-- An assistant/chat layer is not built yet.
+- **Chat/assistant** (conversation history, context-window compaction,
+  tool use with a web-native approval gate, semantic search) -- done.
+  See "Chat" below.
 
 ## Building
 
@@ -36,8 +38,14 @@ env var if yours lives elsewhere.
 
 Also requires `cmark` on `PATH` **at runtime** (`apt install cmark` /
 `brew install cmark`) -- unlike everything else here, it isn't compiled
-into the binary; Pages rendering shells out to it. Nothing else in this
-project needs it.
+into the binary; Pages rendering shells out to it.
+
+Chat/assistant features additionally need `curl` and `gcloud` on `PATH`
+at runtime (the built-in provider calls Google Vertex AI's REST API,
+authenticated via `gcloud auth application-default login`), plus a
+`VERTEX_PROJECT` env var naming a real GCP project -- there's no
+default, since that's always a real, potentially billed deployment
+choice, never something to hardcode. See "Chat" below.
 
 ```sh
 ./bld/build.sh          # -> bin/platform
@@ -78,6 +86,7 @@ platform user passwd <login> <new_password>
 platform user capabilities <login> <cap_string>
 platform user list [--include-archived]
 platform user archive|unarchive <login>
+platform document reindex-embeddings [entity_id]
 ```
 
 Running with no arguments uses this CLI dispatch; running under a real
@@ -123,6 +132,36 @@ backlinks on the page they point to. `/documents` lists the tree,
 edits one (a plain textarea with a live preview). A link to a page
 that doesn't exist yet renders as a plain, clearly-marked placeholder
 rather than a broken link.
+
+## Chat
+
+A built-in assistant (`src/agent.lua`) at `/chat`: real per-user
+conversation sessions with full history (nothing ever deleted -- see
+"Traceability"), automatic context-window compaction once a
+conversation gets long (the oldest turns get summarized into one new
+message and marked out-of-context, dimmed but still visible, never
+removed), and a small, explicit set of built-in tools (search pages,
+create a page, update a page) the assistant can call mid-conversation.
+
+Every tool call is attributed to the real logged-in user, never a
+separate "agent" identity -- creating or updating a page through chat
+shows up in that page's own audit history exactly like a direct edit,
+just tagged with which chat session it came from. Read-only tool calls
+(search) run immediately; anything that changes data (create, update)
+pauses as a pending action and waits for an explicit Approve/Deny in
+the chat UI before running at all -- there's no way for the assistant
+to change data without a human confirming it first.
+
+Page search blends keyword matching with semantic similarity (an
+embedding comparison) when a page has been explicitly indexed via
+`platform document reindex-embeddings` -- indexing is never an
+automatic side effect of saving a page, since it costs a real API
+call per page.
+
+The LLM backend is pluggable (`src/agent_provider*.lua`, selected by
+the `AGENT_PROVIDER` env var) -- ships with a real Google Vertex AI
+backend and a deterministic backend used by this project's own test
+suite so routine test runs don't repeatedly hit a paid API.
 
 ## Docs
 
