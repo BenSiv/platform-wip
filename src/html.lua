@@ -280,6 +280,7 @@ function html.page_shell(title, active, body, nonce, show_sql, show_admin, theme
         {key = "documents", href = "documents", label = "Notebook", icon = ICON_NOTEBOOK},
         {key = "data", href = "data", label = "Data", icon = ICON_DATA},
         {key = "tasks", href = "view?view_name=prioritized_tasks", label = "Tasks", icon = ICON_TASKS},
+        {key = "chat", href = "chat", label = "Chats", icon = ICON_CHAT_BUBBLE},
     }
     if show_sql or show_admin then
         table.insert(nav_items, {key = "system", href = "system", label = "System", icon = ICON_SYSTEM})
