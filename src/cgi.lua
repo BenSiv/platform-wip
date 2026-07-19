@@ -426,6 +426,30 @@ function cgi.handle_request()
         return print_response("200 OK", "image/png", asset_bytes, {"Cache-Control: public, max-age=86400"})
     end
 
+    -- Vendored static assets (e.g. the Toast UI Editor bundle) --
+    -- allowlisted by exact name + content-type, same "never path-build
+    -- from user input" reasoning as /theme-asset above, just a
+    -- platform-owned static/ directory rather than a deployment's
+    -- own DOCUMENT_ROOT-relative theme-assets/.
+    if path_info == "/static" then
+        allowed_static_assets = {
+            ["toastui-editor-all.min.js"] = {path = "toastui/toastui-editor-all.min.js", content_type = "application/javascript"},
+            ["toastui-editor.min.css"] = {path = "toastui/toastui-editor.min.css", content_type = "text/css"},
+        }
+        asset = allowed_static_assets[params.name]
+        if asset == nil then
+            return print_response("404 Not Found", "text/plain", "")
+        end
+        asset_path = paths.joinpath(config.static_assets_dir(), asset.path)
+        asset_file = io.open(asset_path, "rb")
+        if asset_file == nil then
+            return print_response("404 Not Found", "text/plain", "")
+        end
+        asset_bytes = io.read(asset_file, "*all")
+        io.close(asset_file)
+        return print_response("200 OK", asset.content_type, asset_bytes, {"Cache-Control: public, max-age=86400"})
+    end
+
     if path_info == "/login" then
         return handle_login(root, db_path, method, nonce)
     end

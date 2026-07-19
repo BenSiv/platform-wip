@@ -50,6 +50,8 @@ function js_string_literal(s)
     s = tostring(s)
     s = string.gsub(s, "\\", "\\\\")
     s = string.gsub(s, "\"", "\\\"")
+    s = string.gsub(s, "\r\n", "\\n")
+    s = string.gsub(s, "\r", "\\n")
     s = string.gsub(s, "\n", "\\n")
     s = string.gsub(s, "<", "\\u003c")
     return s
@@ -2461,13 +2463,13 @@ function html.render_document_edit(doc, parent_options_html, csrf_token, error_m
     heading = "New page"
     entity_id_value = ""
     title_value = ""
-    content_value = ""
+    content_value_raw = ""
     if is_edit then
         heading = "Edit: " .. html.html_escape(doc.title)
         entity_id_value = tostring(doc.id)
         title_value = html.html_escape(doc.title)
         if doc.content != nil then
-            content_value = html.html_escape(doc.content)
+            content_value_raw = doc.content
         end
     end
 
@@ -2478,20 +2480,11 @@ function html.render_document_edit(doc, parent_options_html, csrf_token, error_m
 
     return string.format("""
 <div class="fossil-doc" data-title="%s">
+    <link rel="stylesheet" href="static?name=toastui-editor.min.css">
     <style>
 %s
 %s
         .fossci-login-error { color: #991b1b; background: #fef2f2; border: 1px solid #fecaca; border-radius: var(--fossci-radius-item, 10px); padding: 10px 12px; margin-bottom: 14px; font-size: 0.88rem; }
-        .fossci-document-edit-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-        .fossci-document-edit-grid textarea {
-            width: 100%%; min-height: 420px; box-sizing: border-box;
-            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.88rem;
-            padding: 12px; border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-md, 12px);
-        }
-        .fossci-document-preview {
-            border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-md, 12px);
-            padding: 16px; min-height: 420px; overflow-y: auto;
-        }
         .fossci-document-edit-fields { display: flex; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
         .fossci-document-edit-fields input[type=text], .fossci-document-edit-fields select {
             padding: 8px 10px; border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-sm, 8px); font-size: 0.9rem;
@@ -2500,9 +2493,10 @@ function html.render_document_edit(doc, parent_options_html, csrf_token, error_m
     <div class="fossci-container">
         <div class="fossci-header"><h2>%s</h2></div>
         %s
-        <form method="POST" action="document-save">
+        <form method="POST" action="document-save" id="fossci-document-edit-form">
             <input type="hidden" name="csrf_token" value="%s">
             <input type="hidden" name="entity_id" value="%s">
+            <input type="hidden" name="content" id="fossci-document-content-hidden">
             <div class="fossci-document-edit-fields">
                 <input type="text" name="title" value="%s" placeholder="Title" required>
                 <select name="parent_id">
@@ -2511,40 +2505,39 @@ function html.render_document_edit(doc, parent_options_html, csrf_token, error_m
                 </select>
                 <button type="submit" class="btn btn-primary">Save</button>
             </div>
-            <div class="fossci-document-edit-grid">
-                <textarea name="content" id="fossci-document-content" placeholder="Write in Markdown. Link to other pages with [[title]] or [[folder/title]].">%s</textarea>
-                <div class="fossci-document-preview" id="fossci-document-preview">Preview will appear here.</div>
-            </div>
+            <div id="fossci-toastui-editor"></div>
         </form>
     </div>
+    <script src="static?name=toastui-editor-all.min.js" nonce="%s"></script>
     <script nonce="%s">
     (function(){
-        var textarea = document.getElementById('fossci-document-content');
-        var preview = document.getElementById('fossci-document-preview');
-        var timer = null;
-        function getCsrfToken() {
-            var match = document.cookie.match(/(?:^|;\\s*)csrf=([^;]*)/);
-            return match ? match[1] : "";
-        }
-        function refreshPreview() {
-            fetch('api/document-preview', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
-                body: JSON.stringify({content: textarea.value})
-            }).then(function(res){ return res.json(); }).then(function(data){
-                preview.innerHTML = data.html || '';
-            }).catch(function(){ });
-        }
-        textarea.addEventListener('input', function(){
-            clearTimeout(timer);
-            timer = setTimeout(refreshPreview, 400);
+        // Starts in 'markdown' mode -- the familiar plain-text +
+        // toolbar experience -- with 'wysiwyg' (syntax hidden, edit
+        // the rendered view directly) one click away via the
+        // editor's own built-in mode tab, not a separate feature to
+        // build. getMarkdown() on submit keeps document-save's
+        // contract (a plain markdown `content` field) unchanged --
+        // schema.lua/document.lua/cmark downstream never know the
+        // editor changed.
+        var editor = new toastui.Editor({
+            el: document.querySelector('#fossci-toastui-editor'),
+            height: '460px',
+            initialEditType: 'markdown',
+            previewStyle: 'vertical',
+            initialValue: "%s",
+            placeholder: 'Write in Markdown. Link to other pages with [[title]] or [[folder/title]].'
         });
-        refreshPreview();
+        var form = document.getElementById('fossci-document-edit-form');
+        var hiddenContent = document.getElementById('fossci-document-content-hidden');
+        form.addEventListener('submit', function(){
+            hiddenContent.value = editor.getMarkdown();
+        });
     })();
     </script>
 </div>
 """, heading, fossci_container_css(1200), fossci_button_css(), heading, error_html,
-     html.html_escape(csrf_token), entity_id_value, title_value, parent_options_html, content_value, nonce)
+     html.html_escape(csrf_token), entity_id_value, title_value, parent_options_html,
+     nonce, nonce, js_string_literal(content_value_raw))
 end
 
 --------------------------------------------------------------------------

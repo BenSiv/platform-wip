@@ -117,6 +117,22 @@ function config.theme_assets_dir(root)
     return paths.joinpath(root, "theme-assets")
 end
 
+-- Vendored static assets platform itself ships (e.g. the Toast UI
+-- Editor bundle) -- unlike theme_assets_dir, this is NOT
+-- DOCUMENT_ROOT-relative: these files belong to the platform-wip
+-- checkout/build, not a deployment's own data. PLATFORM_STATIC_DIR
+-- lets a real deployment point at wherever it actually copied
+-- static/ to (e.g. /app/static in the Celleste Docker image);
+-- unset defaults to "./static", which matches running from a plain
+-- repo checkout (CLI/dev usage, tests).
+function config.static_assets_dir()
+    dir = os.getenv("PLATFORM_STATIC_DIR")
+    if dir != nil and dir != "" then
+        return dir
+    end
+    return "./static"
+end
+
 -- Deliberately generic here: platform itself ships no brand identity,
 -- just a hook. A deployment that wants one drops an optional
 -- theme.json at the store root (e.g. seeded by its own deploy tooling,
