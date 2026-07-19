@@ -159,6 +159,34 @@ function agent.active_messages(db_path, session_id)
     return rows
 end
 
+-- Cleans a message's content for DISPLAY only -- never called on what
+-- active_messages/build_history_prompt feeds back to the model itself,
+-- which still needs its own raw <tool>/<method>/<args>/<done> tag
+-- protocol and the real page-context text intact to make sense of its
+-- own prior turns. A human reading the transcript doesn't need any of
+-- that literally: a <done>...</done>-wrapped final answer should just
+-- read as its own inner text, a tool call as a short "-> what ran"
+-- line instead of raw tags, and the [Current page: ...] annotation
+-- html.render_chat_widget's own JS prepends to every user message
+-- (see its own comment on why every message, not just the first) is
+-- there for the model, not for the user to see restated back to them.
+function agent.display_content(content)
+    if content == nil then
+        return content
+    end
+    content = string.gsub(content, "^%[Current page: \".-\" %(id=%d+%)%]\n\n", "")
+    done_message = string.match(content, "^%s*<done>%s*(.-)%s*</done>%s*$")
+    if done_message != nil then
+        return done_message
+    end
+    tool_name = string.match(content, "<tool>%s*(.-)%s*</tool>")
+    method_name = string.match(content, "<method>%s*(.-)%s*</method>")
+    if tool_name != nil and method_name != nil then
+        return "-> " .. tool_name .. "." .. method_name .. "(...)"
+    end
+    return content
+end
+
 -- Every message, active or compacted-away -- the full, never-deleted
 -- transcript, for a "show full history" view.
 function agent.all_messages(db_path, session_id)
@@ -168,6 +196,9 @@ function agent.all_messages(db_path, session_id)
     ))
     if rows == nil then
         return {}
+    end
+    for _, row in ipairs(rows) do
+        row.content = agent.display_content(row.content)
     end
     return rows
 end

@@ -2741,9 +2741,11 @@ function fossci_chat_widget_css()
 .fossci-chat-widget-toggle:hover { filter: brightness(1.08); }
 .fossci-chat-widget-panel {
     position: absolute; right: 0; bottom: 64px; width: 320px; height: 440px;
+    min-width: 280px; min-height: 320px; max-width: 90vw; max-height: 80vh;
     background: var(--fossci-bg, #ffffff); border: 1px solid var(--fossci-border, #e2e8f0);
     border-radius: var(--fossci-radius-md, 12px); box-shadow: 0 10px 30px rgba(0,0,0,0.2);
     display: none; flex-direction: column; overflow: hidden;
+    resize: both;
 }
 .fossci-chat-widget.fossci-chat-widget-open .fossci-chat-widget-panel { display: flex; }
 .fossci-chat-widget-header {
@@ -2760,6 +2762,7 @@ function fossci_chat_widget_css()
     border-radius: var(--fossci-radius-sm, 8px); font-size: 0.85rem;
 }
 .fossci-chat-widget-empty { padding: 20px; text-align: center; color: var(--fossci-muted, #64748b); font-size: 0.85rem; }
+.fossci-chat-widget-thinking { padding: 8px 10px; color: var(--fossci-muted, #64748b); font-size: 0.85rem; font-style: italic; }
 """
 end
 
@@ -2837,9 +2840,48 @@ function html.render_chat_widget(nonce)
         });
     }
 
+    var OPEN_KEY = 'platform_chat_widget_open';
+    var SIZE_KEY = 'platform_chat_widget_size';
+    var panel = root.querySelector('.fossci-chat-widget-panel');
+
+    // A full page load (not a SPA route change) re-renders this whole
+    // widget from scratch every navigation, so "is the panel open"
+    // needs its own persisted flag -- same reasoning as the session id
+    // itself, just for UI state instead of conversation state.
+    if (localStorage.getItem(OPEN_KEY) === '1') {
+        root.classList.add('fossci-chat-widget-open');
+    }
+    var savedSize = localStorage.getItem(SIZE_KEY);
+    if (savedSize) {
+        var parts = savedSize.split('x');
+        if (parts.length === 2) {
+            panel.style.width = parts[0] + 'px';
+            panel.style.height = parts[1] + 'px';
+        }
+    }
+    if (window.ResizeObserver) {
+        new ResizeObserver(function(){
+            // ResizeObserver fires once immediately on observe(), even
+            // while the panel is display:none (offsetWidth/Height 0) --
+            // guard against that firing clobbering a real saved size.
+            if (panel.offsetWidth === 0 || panel.offsetHeight === 0) return;
+            localStorage.setItem(SIZE_KEY, Math.round(panel.offsetWidth) + 'x' + Math.round(panel.offsetHeight));
+        }).observe(panel);
+    }
+
     toggle.addEventListener('click', function(){
-        root.classList.toggle('fossci-chat-widget-open');
+        var isOpen = root.classList.toggle('fossci-chat-widget-open');
+        localStorage.setItem(OPEN_KEY, isOpen ? '1' : '0');
     });
+
+    function showThinking() {
+        var el = document.createElement('div');
+        el.className = 'fossci-chat-widget-thinking';
+        el.textContent = 'Thinking...';
+        messagesEl.appendChild(el);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+        return el;
+    }
 
     form.addEventListener('submit', function(e){
         e.preventDefault();
@@ -2856,15 +2898,20 @@ function html.render_chat_widget(nonce)
         if (window.PLATFORM_PAGE_CONTEXT) {
             text = '[Current page: "' + window.PLATFORM_PAGE_CONTEXT.title + '" (id=' + window.PLATFORM_PAGE_CONTEXT.id + ')]\n\n' + text;
         }
+        var thinkingEl = showThinking();
         ensureSession().then(function(sessionId){
             return post('api/chat-widget-send', {session_id: sessionId, message: text});
-        }).then(render);
+        }).then(function(state){ thinkingEl.remove(); render(state); })
+          .catch(function(){ thinkingEl.remove(); });
     });
 
     messagesEl.addEventListener('click', function(e){
         var sessionId = localStorage.getItem(STORAGE_KEY);
         if (e.target.hasAttribute('data-approve')) {
-            post('api/chat-widget-approve', {pending_id: e.target.getAttribute('data-approve'), session_id: sessionId}).then(render);
+            var thinkingEl = showThinking();
+            post('api/chat-widget-approve', {pending_id: e.target.getAttribute('data-approve'), session_id: sessionId})
+                .then(function(state){ thinkingEl.remove(); render(state); })
+                .catch(function(){ thinkingEl.remove(); });
         } else if (e.target.hasAttribute('data-deny')) {
             post('api/chat-widget-deny', {pending_id: e.target.getAttribute('data-deny'), session_id: sessionId}).then(render);
         }
