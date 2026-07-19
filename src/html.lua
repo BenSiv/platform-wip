@@ -2195,6 +2195,19 @@ end
 -- html.lua never checks capabilities itself, same convention
 -- render_index's show_sql_widget already uses; cgi.lua decides and
 -- passes the answer in.
+-- Flat {id, title} pairs for the fuzzy-search box's client-side
+-- matching -- the same `rows` the tree itself is built from
+-- (document.all_active), just the two fields the search actually
+-- needs, not the full row (content, timestamps, etc).
+function document_search_index_json(rows)
+    json = require("dkjson")
+    index = {}
+    for _, row in ipairs(rows) do
+        table.insert(index, {id = tonumber(row.id), title = row.title})
+    end
+    return json_for_script(json.encode(index))
+end
+
 function html.render_document_tree(rows, can_create, nonce)
     by_parent = build_document_tree_index(rows)
     tree_items = render_document_tree_level(by_parent, "root", 0)
@@ -2215,6 +2228,23 @@ function html.render_document_tree(rows, can_create, nonce)
 %s
         .fossci-header { margin-bottom: 20px; border-bottom: 1px solid var(--fossci-bg-2, #f1f5f9); padding-bottom: 16px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
         .fossci-header h2 { margin: 0 0 6px 0; font-size: 1.6rem; font-weight: 700; color: var(--fossci-heading, #0f172a); letter-spacing: -0.02em; }
+        .fossci-document-search { position: relative; margin-bottom: 16px; }
+        .fossci-document-search input {
+            width: 100%%; padding: 10px 12px; box-sizing: border-box;
+            border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-sm, 8px); font-size: 0.92rem;
+        }
+        .fossci-document-search-results {
+            position: absolute; left: 0; right: 0; top: calc(100%% + 4px); z-index: 30;
+            background: var(--fossci-bg, #ffffff); border: 1px solid var(--fossci-border, #e2e8f0);
+            border-radius: var(--fossci-radius-md, 12px); box-shadow: 0 6px 20px rgba(0,0,0,0.12);
+            max-height: 320px; overflow-y: auto; display: none;
+        }
+        .fossci-document-search-results.fossci-document-search-open { display: block; }
+        .fossci-document-search-results a {
+            display: block; padding: 8px 12px; color: var(--fossci-text, #334155); text-decoration: none; font-size: 0.9rem;
+        }
+        .fossci-document-search-results a:hover, .fossci-document-search-results a.fossci-search-active { background: var(--fossci-bg-2, #f1f5f9); }
+        .fossci-document-search-empty { padding: 10px 12px; color: var(--fossci-muted, #64748b); font-size: 0.88rem; }
         .fossci-document-tree, .fossci-document-tree ul { list-style: none !important; margin: 0; padding-left: 20px; }
         .fossci-document-tree { padding-left: 0; }
         .fossci-document-tree li { margin: 4px 0; }
@@ -2234,10 +2264,76 @@ function html.render_document_tree(rows, can_create, nonce)
             <h2>Pages</h2>
             %s
         </div>
+        <div class="fossci-document-search">
+            <input type="text" id="fossci-document-search-input" placeholder="Fuzzy search page titles..." autocomplete="off">
+            <div class="fossci-document-search-results" id="fossci-document-search-results"></div>
+        </div>
         %s
     </div>
+    <script nonce="%s">
+    (function(){
+        var index = %s;
+        var input = document.getElementById('fossci-document-search-input');
+        var results = document.getElementById('fossci-document-search-results');
+
+        // Simple ordered-subsequence fuzzy match: every character of
+        // the query must appear in the title, in order (not
+        // necessarily contiguous) -- consecutive matches score higher,
+        // so "exp277" ranks "Experiment 277" above a title that merely
+        // contains the same letters scattered further apart.
+        function fuzzyScore(query, title) {
+            var qi = 0, score = 0, lastMatch = -2;
+            var q = query.toLowerCase(), t = title.toLowerCase();
+            for (var ti = 0; ti < t.length && qi < q.length; ti++) {
+                if (t[ti] === q[qi]) {
+                    score += (ti === lastMatch + 1) ? 3 : 1;
+                    lastMatch = ti;
+                    qi++;
+                }
+            }
+            return (qi === q.length) ? score : -1;
+        }
+
+        function renderResults(query) {
+            if (!query) { results.classList.remove('fossci-document-search-open'); results.innerHTML = ''; return; }
+            var scored = [];
+            index.forEach(function(item){
+                var score = fuzzyScore(query, item.title);
+                if (score >= 0) scored.push({item: item, score: score});
+            });
+            scored.sort(function(a, b){ return b.score - a.score; });
+            scored = scored.slice(0, 15);
+            if (scored.length === 0) {
+                results.innerHTML = '<div class="fossci-document-search-empty">No matching pages.</div>';
+            } else {
+                results.innerHTML = scored.map(function(s){
+                    var title = s.item.title.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                    return '<a href="document?entity_id=' + s.item.id + '">' + title + '</a>';
+                }).join('');
+            }
+            results.classList.add('fossci-document-search-open');
+        }
+
+        input.addEventListener('input', function(){ renderResults(input.value); });
+        input.addEventListener('focus', function(){ if (input.value) renderResults(input.value); });
+        document.addEventListener('click', function(e){
+            if (e.target !== input && !results.contains(e.target)) {
+                results.classList.remove('fossci-document-search-open');
+            }
+        });
+        input.addEventListener('keydown', function(e){
+            if (e.key === 'Enter') {
+                var first = results.querySelector('a');
+                if (first) { window.location.href = first.getAttribute('href'); }
+            } else if (e.key === 'Escape') {
+                results.classList.remove('fossci-document-search-open');
+            }
+        });
+    })();
+    </script>
 </div>
-""", fossci_container_css(900), fossci_button_css(), new_page_link, tree_html)
+""", fossci_container_css(900), fossci_button_css(), new_page_link, tree_html,
+     nonce, document_search_index_json(rows))
 end
 
 -- `can_edit` is likewise a plain boolean, decided by cgi.lua.
@@ -2311,9 +2407,11 @@ function html.render_document(doc, rendered_html, breadcrumbs, children, backlin
         %s
         %s
     </div>
+    <script nonce="%s">window.PLATFORM_PAGE_CONTEXT = {id: %s, title: "%s"};</script>
 </div>
 """, html_escape(doc.title), fossci_container_css(900), fossci_button_css(),
-     breadcrumb_html, html_escape(doc.title), edit_link, rendered_html, children_block, backlinks_block)
+     breadcrumb_html, html_escape(doc.title), edit_link, rendered_html, children_block, backlinks_block,
+     nonce, tostring(doc.id), js_string_literal(doc.title))
 end
 
 -- `doc` is nil for "create a new page", or the current row for editing
@@ -2718,6 +2816,16 @@ function html.render_chat_widget(nonce)
         var text = input.value;
         if (!text) return;
         input.value = '';
+        // Read lazily, at send time, not at widget-init time -- whatever
+        // page.PLATFORM_PAGE_CONTEXT is set to *right now* (only
+        // html.render_document sets it) is what the agent should be
+        // told, every message, not just the first -- if the widget's
+        // conversation carries over as the user browses to a different
+        // page, the agent should track that, not still think it's
+        // editing wherever the chat happened to start.
+        if (window.PLATFORM_PAGE_CONTEXT) {
+            text = '[Current page: "' + window.PLATFORM_PAGE_CONTEXT.title + '" (id=' + window.PLATFORM_PAGE_CONTEXT.id + ')]\n\n' + text;
+        }
         ensureSession().then(function(sessionId){
             return post('api/chat-widget-send', {session_id: sessionId, message: text});
         }).then(render);
