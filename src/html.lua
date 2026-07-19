@@ -105,11 +105,10 @@ function fossci_button_css()
             text-decoration: none;
         }
         .btn-primary {
-            background: linear-gradient(135deg, var(--fossci-accent, #4f46e5), var(--fossci-accent-2, #6366f1));
+            background: var(--fossci-accent, #4f46e5);
             color: #ffffff;
-            box-shadow: 0 4px 12px rgba(99, 102, 241, 0.2);
         }
-        .btn-primary:hover { box-shadow: 0 6px 16px rgba(99, 102, 241, 0.3); filter: brightness(1.05); }
+        .btn-primary:hover { filter: brightness(1.08); }
         .btn-primary:active { transform: scale(0.98); }
         .btn-secondary {
             background: var(--fossci-bg, #f8fafc);
@@ -241,7 +240,21 @@ THEME_COLOR_KEYS = {
 -- own beyond the existing var(--fossci-*, <fallback>) defaults already
 -- used throughout this file, which are left completely untouched when
 -- theme.colors is empty (the out-of-the-box, unconfigured case).
-function html.page_shell(title, active, body, nonce, show_sql, show_admin, theme)
+-- Plain, generic (not brand-specific) 20x20 line icons for the nav
+-- rail -- reused as-is from this deployment's own earlier hand-built
+-- icon set (house/document/book/database/checkmark/gear), which lived
+-- fine as generic iconography rather than anything Celleste-specific.
+ICON_HOME = "<svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M3 11l9-8 9 8\"/><path d=\"M5 10v10a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V10\"/></svg>"
+ICON_NEW_PAGE = "<svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z\"/><path d=\"M13 2v7h7\"/><path d=\"M12 12v6M9 15h6\"/></svg>"
+ICON_NOTEBOOK = "<svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M4 5a2 2 0 0 1 2-2h5v18H6a2 2 0 0 1-2-2V5z\"/><path d=\"M20 5a2 2 0 0 0-2-2h-5v18h5a2 2 0 0 0 2-2V5z\"/></svg>"
+ICON_DATA = "<svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><ellipse cx=\"12\" cy=\"5\" rx=\"8\" ry=\"3\"/><path d=\"M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5\"/><path d=\"M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6\"/></svg>"
+ICON_TASKS = "<svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M9 11l3 3L22 4\"/><path d=\"M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11\"/></svg>"
+ICON_SYSTEM = "<svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"12\" cy=\"12\" r=\"3\"/><path d=\"M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z\"/></svg>"
+-- Chat bubble -- the floating widget's toggle button icon, not part of
+-- the icon rail's own order (see html.render_chat_widget below).
+ICON_CHAT_BUBBLE = "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z\"/></svg>"
+
+function html.page_shell(title, active, body, nonce, show_sql, show_admin, theme, author)
     if theme == nil then
         theme = {site_name = "Platform", colors = {}}
     end
@@ -259,17 +272,18 @@ function html.page_shell(title, active, body, nonce, show_sql, show_admin, theme
         root_css = ":root { " .. table.concat(root_vars, " ") .. " }"
     end
 
+    -- Icon-rail order: Home, New Page, Notebook, Data, Tasks, (System
+    -- if Setup/Admin) -- matches this deployment's own earlier design.
+    -- Chat has no rail icon of its own; it's the floating widget below.
     nav_items = {
-        {key = "home", href = "/", label = "Data"},
-        {key = "documents", href = "documents", label = "Pages"},
-        {key = "chat", href = "chat", label = "Chat"},
-        {key = "templates", href = "templates", label = "Templates"},
+        {key = "home", href = "/", label = "Home", icon = ICON_HOME},
+        {key = "new-page", href = "document-edit", label = "New Page", icon = ICON_NEW_PAGE},
+        {key = "documents", href = "documents", label = "Notebook", icon = ICON_NOTEBOOK},
+        {key = "data", href = "data", label = "Data", icon = ICON_DATA},
+        {key = "tasks", href = "view?view_name=prioritized_tasks", label = "Tasks", icon = ICON_TASKS},
     }
-    if show_sql then
-        table.insert(nav_items, {key = "sql", href = "sql", label = "SQL"})
-    end
-    if show_admin then
-        table.insert(nav_items, {key = "admin-users", href = "admin-users", label = "Users"})
+    if show_sql or show_admin then
+        table.insert(nav_items, {key = "system", href = "system", label = "System", icon = ICON_SYSTEM})
     end
 
     nav_links = {}
@@ -279,8 +293,19 @@ function html.page_shell(title, active, body, nonce, show_sql, show_admin, theme
             link_class = link_class .. " fossci-nav-link-active"
         end
         table.insert(nav_links, string.format(
-            '<a class="%s" href="%s">%s</a>', link_class, item.href, html_escape(item.label)
+            '<a class="%s" href="%s" title="%s">%s<span class="fossci-nav-label">%s</span></a>',
+            link_class, item.href, html_escape(item.label), item.icon, html_escape(item.label)
         ))
+    end
+
+    user_box = ""
+    if author != nil then
+        user_box = string.format("""
+<div class="fossci-nav-user">
+    <div class="fossci-nav-user-name">%s</div>
+    <a href="logout">Log out</a>
+</div>
+""", html_escape(author))
     end
 
     return string.format("""<!doctype html>
@@ -292,54 +317,91 @@ function html.page_shell(title, active, body, nonce, show_sql, show_admin, theme
 <style>
 %s
 * { box-sizing: border-box; }
+html, body { margin: 0; height: 100%%; }
 body {
-    margin: 0;
+    display: flex;
     font-family: 'Outfit', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: var(--fossci-bg-2, #f1f5f9);
 }
 .fossci-nav {
+    width: 72px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 2px;
+    padding: 12px 8px;
+    background: var(--fossci-bg, #ffffff);
+    border-right: 1px solid var(--fossci-border, #e2e8f0);
+    min-height: 100vh;
+}
+.fossci-nav-link {
+    position: relative;
     display: flex;
     align-items: center;
-    gap: 4px;
-    padding: 0 20px;
-    height: 56px;
-    background: var(--fossci-bg, #ffffff);
-    border-bottom: 1px solid var(--fossci-border, #e2e8f0);
-}
-.fossci-nav-brand {
-    font-weight: 700;
-    font-size: 1.1rem;
-    color: var(--fossci-heading, #0f172a);
-    margin-right: 20px;
-    text-decoration: none;
-    white-space: nowrap;
-}
-.fossci-nav-links { display: flex; gap: 4px; flex-wrap: wrap; }
-.fossci-nav-link {
-    padding: 8px 14px;
+    justify-content: center;
+    padding: 12px;
     border-radius: var(--fossci-radius-sm, 8px);
     color: var(--fossci-th-text, #475569);
     text-decoration: none;
-    font-size: 0.92rem;
-    font-weight: 500;
     transition: var(--fossci-transition, all 0.15s ease);
 }
 .fossci-nav-link:hover { background: var(--fossci-bg-2, #f1f5f9); color: var(--fossci-heading, #0f172a); }
-.fossci-nav-link-active { background: var(--fossci-bg-2, #f1f5f9); color: var(--fossci-accent, #4f46e5); }
+.fossci-nav-link-active { background: var(--fossci-accent, #4f46e5); color: #ffffff; }
 .fossci-nav-spacer { flex: 1; }
+.fossci-nav-label {
+    position: absolute;
+    left: calc(100%% + 8px);
+    top: 50%%;
+    transform: translateY(-50%%);
+    padding: 6px 10px;
+    white-space: nowrap;
+    background: var(--fossci-heading, #1e293b);
+    color: #ffffff;
+    border-radius: var(--fossci-radius-sm, 8px);
+    font-size: 0.8rem;
+    font-weight: 600;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    z-index: 20;
+    transition: var(--fossci-transition, all 0.15s ease);
+}
+.fossci-nav-link:hover .fossci-nav-label, .fossci-nav-link:focus .fossci-nav-label { opacity: 1; visibility: visible; }
+.fossci-nav-user {
+    padding: 10px 6px;
+    border-top: 1px solid var(--fossci-border, #e2e8f0);
+    text-align: center;
+}
+.fossci-nav-user-name {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--fossci-muted, #64748b);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-bottom: 4px;
+}
+.fossci-nav-user a { font-size: 0.75rem; color: var(--fossci-accent, #4f46e5); text-decoration: none; font-weight: 600; }
+.fossci-nav-user a:hover { text-decoration: underline; }
+.fossci-main { flex: 1; min-width: 0; }
+%s
 </style>
 </head>
 <body>
 <nav class="fossci-nav">
-<a class="fossci-nav-brand" href="/">%s</a>
-<div class="fossci-nav-links">%s</div>
+%s
 <div class="fossci-nav-spacer"></div>
-<a class="fossci-nav-link" href="logout">Log out</a>
+%s
 </nav>
+<div class="fossci-main">
+%s
+</div>
 %s
 </body>
 </html>
-""", html_escape(title), root_css, html_escape(theme.site_name), table.concat(nav_links, ""), body)
+""", html_escape(title), root_css, fossci_chat_widget_css(), table.concat(nav_links, ""), user_box, body,
+     html.render_chat_widget(nonce))
 end
 
 -- `nonce` must be Fossil's own per-request CSP nonce (the FOSSIL_NONCE
@@ -1607,6 +1669,95 @@ function html.render_admin_users(users, csrf_token, message, is_error)
 """, fossci_container_css(1000), fossci_button_css(), message_html, escaped_csrf, rows_html)
 end
 
+-- v1 landing page: basic information and quick links, deliberately
+-- not an activity dashboard (working lists, a calendar, recent-entries
+-- feed) yet -- a real starting point, not the end state. `theme` is
+-- config.load_theme(root)'s return value, purely for site_name; no
+-- other Celleste-specific content belongs here (see theme.json's own
+-- split from platform-wip).
+function html.render_home(theme, show_sql, show_admin)
+    site_name = "Platform"
+    if theme != nil then
+        site_name = theme.site_name
+    end
+
+    system_link = ""
+    if show_sql or show_admin then
+        system_link = "<li><a href=\"system\">System</a><p>Admin, SQL console, and templates.</p></li>"
+    end
+
+    return string.format("""
+<div class="fossil-doc" data-title="Home">
+    <style>
+%s
+        .fossci-header { margin-bottom: 20px; border-bottom: 1px solid var(--fossci-bg-2, #f1f5f9); padding-bottom: 16px; }
+        .fossci-header h2 { margin: 0 0 6px 0; font-size: 1.6rem; font-weight: 700; color: var(--fossci-heading, #0f172a); letter-spacing: -0.02em; }
+        .fossci-header p { color: var(--fossci-muted, #64748b); margin: 0; font-size: 0.95rem; }
+        .fossci-sitemap { list-style: none !important; margin: 16px 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; }
+        .fossci-sitemap li { list-style: none !important; background: var(--fossci-bg, #f8fafc); border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-item, 10px); padding: 16px 18px; transition: var(--fossci-transition, all 0.2s cubic-bezier(0.4, 0, 0.2, 1)); }
+        .fossci-sitemap li:hover { border-color: var(--fossci-accent, #4f46e5); box-shadow: 0 4px 12px rgba(0,0,0,0.06); }
+        .fossci-sitemap a { font-weight: 700; color: var(--fossci-accent, #4f46e5); text-decoration: none; font-size: 1.05rem; }
+        .fossci-sitemap a:hover { text-decoration: underline; }
+        .fossci-sitemap p { margin: 6px 0 0 0; color: var(--fossci-muted, #64748b); font-size: 0.9rem; }
+    </style>
+    <div class="fossci-container">
+        <div class="fossci-header">
+            <h2>%s</h2>
+            <p>Welcome back. Use the sidebar to get around, or jump in below.</p>
+        </div>
+        <ul class="fossci-sitemap">
+            <li><a href="document-edit">New Page</a><p>Write a new notebook page from scratch.</p></li>
+            <li><a href="documents">Notebook</a><p>Browse all pages, organized as a tree.</p></li>
+            <li><a href="data">Data</a><p>Registered entity types, row counts, and relations.</p></li>
+            <li><a href="view?view_name=prioritized_tasks">Tasks</a><p>Open tasks, ranked by priority.</p></li>
+            %s
+        </ul>
+    </div>
+</div>
+""", fossci_container_css(1200), html_escape(site_name), system_link)
+end
+
+-- Landing page for Setup/Admin-only tooling -- a single destination
+-- rather than SQL/Users/Templates each getting their own top-level nav
+-- icon, matching this deployment's earlier "System" concept. Callers
+-- (cgi.lua) already gate the route itself on show_sql/show_admin
+-- before rendering this; the links below still only show what the
+-- caller says is allowed, so this function has the final say on its
+-- own content the same way html.render_index's show_sql_widget already
+-- works.
+function html.render_system(show_sql, show_admin)
+    items = ""
+    if show_sql then
+        items = items .. "<li><a href=\"sql\">SQL console</a><p>Run ad hoc, read-only queries.</p></li>"
+    end
+    if show_admin then
+        items = items .. "<li><a href=\"admin-users\">Users</a><p>Manage accounts and capabilities.</p></li>"
+    end
+    items = items .. "<li><a href=\"templates\">Templates</a><p>Reusable entry templates for new pages.</p></li>"
+
+    return string.format("""
+<div class="fossil-doc" data-title="System">
+    <style>
+%s
+        .fossci-header { margin-bottom: 20px; border-bottom: 1px solid var(--fossci-bg-2, #f1f5f9); padding-bottom: 16px; }
+        .fossci-header h2 { margin: 0 0 6px 0; font-size: 1.6rem; font-weight: 700; color: var(--fossci-heading, #0f172a); letter-spacing: -0.02em; }
+        .fossci-sitemap { list-style: none !important; margin: 16px 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; }
+        .fossci-sitemap li { list-style: none !important; background: var(--fossci-bg, #f8fafc); border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-item, 10px); padding: 16px 18px; transition: var(--fossci-transition, all 0.2s cubic-bezier(0.4, 0, 0.2, 1)); }
+        .fossci-sitemap li:hover { border-color: var(--fossci-accent, #4f46e5); box-shadow: 0 4px 12px rgba(0,0,0,0.06); }
+        .fossci-sitemap a { font-weight: 700; color: var(--fossci-accent, #4f46e5); text-decoration: none; font-size: 1.05rem; }
+        .fossci-sitemap a:hover { text-decoration: underline; }
+        .fossci-sitemap p { margin: 6px 0 0 0; color: var(--fossci-muted, #64748b); font-size: 0.9rem; }
+    </style>
+    <div class="fossci-container">
+        <div class="fossci-header"><h2>System</h2></div>
+        <ul class="fossci-sitemap">
+%s
+        </ul>
+    </div>
+</div>
+""", fossci_container_css(1200), items)
+end
+
 function html.render_index(entity_types, edges, show_sql_widget, nonce)
     items = ""
     for _, row in ipairs(entity_types) do
@@ -1650,7 +1801,7 @@ function html.render_index(entity_types, edges, show_sql_widget, nonce)
     if show_sql_widget == true then
         sql_widget = """
     <div class="fossci-container">
-        <iframe src="sql" style="width:100%;height:520px;border:0;border-radius:var(--fossci-radius-md, 12px);"></iframe>
+        <iframe src="sql?embed=1" style="width:100%;height:520px;border:0;border-radius:var(--fossci-radius-md, 12px);"></iframe>
     </div>
 """
     end
@@ -2275,6 +2426,25 @@ CHAT_ROLE_LABELS = {
 -- compaction (dimmed, not hidden) -- transparency about what the model
 -- can/can't currently see, matching this system's own "nothing is ever
 -- hidden, only marked" stance elsewhere (archived_at, in_context).
+-- Shared `.fossci-chat-*` thread rules -- used by both html.render_chat
+-- and the inline "Edit with AI" panel on a document page (see
+-- html.render_document_ai_panel below), same de-duplication reasoning
+-- as fossci_container_css/fossci_button_css above.
+function fossci_chat_thread_css()
+    return """
+        .fossci-chat-messages { max-height: 55vh; overflow-y: auto; margin-bottom: 16px; padding: 12px; border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-md, 12px); background: var(--fossci-bg, #f8fafc); }
+        .fossci-chat-msg { margin-bottom: 10px; padding: 8px 10px; border-radius: var(--fossci-radius-sm, 8px); background: #fff; border: 1px solid var(--fossci-border, #e2e8f0); }
+        .fossci-chat-user { background: #eef2ff; }
+        .fossci-chat-tool_result { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; }
+        .fossci-chat-compaction_summary { font-style: italic; color: var(--fossci-muted, #64748b); }
+        .fossci-chat-out-of-context { opacity: 0.45; }
+        .fossci-chat-input-form { display: flex; gap: 8px; }
+        .fossci-chat-input-form input[type=text] { flex: 1; padding: 8px 10px; border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-sm, 8px); }
+        .fossci-chat-pending { padding: 14px; border: 1px solid #fde68a; background: #fffbeb; border-radius: var(--fossci-radius-md, 12px); }
+        .fossci-chat-pending-form { display: inline-block; margin-right: 8px; margin-top: 8px; }
+"""
+end
+
 function render_chat_message(msg)
     label = CHAT_ROLE_LABELS[msg.role]
     if label == nil then
@@ -2420,6 +2590,158 @@ function html.render_chat(sessions, session, messages, pending, csrf_token, nonc
     </div>
 </div>
 """, fossci_container_css(1200), fossci_button_css(), html_escape(csrf_token), sessions_html, main_html)
+end
+
+--------------------------------------------------------------------------
+-- Floating chat widget -- rendered on every authenticated page (see
+-- html.page_shell), talking to /api/chat-widget-* (cgi.lua) rather
+-- than the full-page /chat/chat-start/chat-message/chat-approve/
+-- chat-deny routes render_chat above uses. Its own session_id lives in
+-- the browser's localStorage (not server-rendered state), so it
+-- survives a normal, full-page navigation between one platform page
+-- and the next the same way it would if this were a true SPA.
+function fossci_chat_widget_css()
+    return """
+.fossci-chat-widget { position: fixed; right: 20px; bottom: 20px; z-index: 1000; font-family: inherit; }
+.fossci-chat-widget-toggle {
+    width: 56px; height: 56px; border-radius: 50%;
+    background: var(--fossci-accent, #4f46e5); color: #ffffff; border: none;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.2); cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: var(--fossci-transition, all 0.15s ease);
+}
+.fossci-chat-widget-toggle:hover { filter: brightness(1.08); }
+.fossci-chat-widget-panel {
+    position: absolute; right: 0; bottom: 64px; width: 320px; height: 440px;
+    background: var(--fossci-bg, #ffffff); border: 1px solid var(--fossci-border, #e2e8f0);
+    border-radius: var(--fossci-radius-md, 12px); box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+    display: none; flex-direction: column; overflow: hidden;
+}
+.fossci-chat-widget.fossci-chat-widget-open .fossci-chat-widget-panel { display: flex; }
+.fossci-chat-widget-header {
+    padding: 12px 14px; border-bottom: 1px solid var(--fossci-border, #e2e8f0);
+    font-weight: 700; color: var(--fossci-heading, #0f172a); font-size: 0.95rem;
+}
+.fossci-chat-widget-messages { flex: 1; overflow-y: auto; padding: 10px; }
+.fossci-chat-widget-messages .fossci-chat-msg { font-size: 0.85rem; }
+.fossci-chat-widget-input {
+    display: flex; gap: 6px; padding: 10px; border-top: 1px solid var(--fossci-border, #e2e8f0);
+}
+.fossci-chat-widget-input input[type=text] {
+    flex: 1; padding: 8px 10px; border: 1px solid var(--fossci-border, #e2e8f0);
+    border-radius: var(--fossci-radius-sm, 8px); font-size: 0.85rem;
+}
+.fossci-chat-widget-empty { padding: 20px; text-align: center; color: var(--fossci-muted, #64748b); font-size: 0.85rem; }
+"""
+end
+
+function html.render_chat_widget(nonce)
+    return string.format("""
+<div class="fossci-chat-widget" id="fossci-chat-widget">
+    <div class="fossci-chat-widget-panel">
+        <div class="fossci-chat-widget-header">Chat</div>
+        <div class="fossci-chat-widget-messages" id="fossci-chat-widget-messages">
+            <p class="fossci-chat-widget-empty">Ask something, or ask the assistant to search or create a page...</p>
+        </div>
+        <form class="fossci-chat-widget-input" id="fossci-chat-widget-form">
+            <input type="text" id="fossci-chat-widget-text" placeholder="Message" required autofocus>
+            <button type="submit" class="btn btn-primary">Send</button>
+        </form>
+    </div>
+    <button type="button" class="fossci-chat-widget-toggle" id="fossci-chat-widget-toggle" aria-label="Chat">%s</button>
+</div>
+<script nonce="%s">
+(function(){
+    var STORAGE_KEY = 'platform_chat_widget_session';
+    var root = document.getElementById('fossci-chat-widget');
+    var toggle = document.getElementById('fossci-chat-widget-toggle');
+    var messagesEl = document.getElementById('fossci-chat-widget-messages');
+    var form = document.getElementById('fossci-chat-widget-form');
+    var input = document.getElementById('fossci-chat-widget-text');
+
+    function getCsrfToken() {
+        var match = document.cookie.match(/(?:^|;\\s*)csrf=([^;]*)/);
+        return match ? match[1] : "";
+    }
+
+    var ROLE_LABELS = {user: 'You', assistant: 'Assistant', tool_result: 'Tool result', compaction_summary: 'Compacted summary'};
+    function escapeHtml(s) {
+        return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+    function render(state) {
+        if (!state || !state.messages || state.messages.length === 0) {
+            messagesEl.innerHTML = '<p class="fossci-chat-widget-empty">Ask something, or ask the assistant to search or create a page...</p>';
+        } else {
+            var html = '';
+            state.messages.forEach(function(msg){
+                var label = ROLE_LABELS[msg.role] || msg.role;
+                html += '<div class="fossci-chat-msg fossci-chat-' + msg.role + '"><strong>' + escapeHtml(label) + ':</strong> ' + escapeHtml(msg.content) + '</div>';
+            });
+            messagesEl.innerHTML = html;
+        }
+        if (state && state.pending) {
+            var argsLines = '';
+            for (var k in state.pending.args) { argsLines += '<div>' + escapeHtml(k) + ' = ' + escapeHtml(state.pending.args[k]) + '</div>'; }
+            messagesEl.innerHTML += '<div class="fossci-chat-pending"><p><strong>Run:</strong> ' + escapeHtml(state.pending.tool) + '.' + escapeHtml(state.pending.method) + '</p>' + argsLines +
+                '<button type="button" class="btn btn-primary" data-approve="' + state.pending.id + '">Approve</button> ' +
+                '<button type="button" class="btn btn-secondary" data-deny="' + state.pending.id + '">Deny</button></div>';
+            form.style.display = 'none';
+        } else {
+            form.style.display = 'flex';
+        }
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function post(url, body) {
+        return fetch(url, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken()},
+            body: JSON.stringify(body)
+        }).then(function(res){ return res.json(); });
+    }
+
+    function ensureSession() {
+        var sessionId = localStorage.getItem(STORAGE_KEY);
+        if (sessionId) return Promise.resolve(sessionId);
+        return post('api/chat-widget-start', {}).then(function(state){
+            localStorage.setItem(STORAGE_KEY, state.session_id);
+            return state.session_id;
+        });
+    }
+
+    toggle.addEventListener('click', function(){
+        root.classList.toggle('fossci-chat-widget-open');
+    });
+
+    form.addEventListener('submit', function(e){
+        e.preventDefault();
+        var text = input.value;
+        if (!text) return;
+        input.value = '';
+        ensureSession().then(function(sessionId){
+            return post('api/chat-widget-send', {session_id: sessionId, message: text});
+        }).then(render);
+    });
+
+    messagesEl.addEventListener('click', function(e){
+        var sessionId = localStorage.getItem(STORAGE_KEY);
+        if (e.target.hasAttribute('data-approve')) {
+            post('api/chat-widget-approve', {pending_id: e.target.getAttribute('data-approve'), session_id: sessionId}).then(render);
+        } else if (e.target.hasAttribute('data-deny')) {
+            post('api/chat-widget-deny', {pending_id: e.target.getAttribute('data-deny'), session_id: sessionId}).then(render);
+        }
+    });
+
+    var existingSessionId = localStorage.getItem(STORAGE_KEY);
+    if (existingSessionId) {
+        fetch('api/chat-widget-history?session_id=' + encodeURIComponent(existingSessionId))
+            .then(function(res){ if (!res.ok) { throw new Error('no session'); } return res.json(); })
+            .then(render)
+            .catch(function(){ localStorage.removeItem(STORAGE_KEY); });
+    }
+})();
+</script>
+""", ICON_CHAT_BUBBLE, nonce)
 end
 
 return html

@@ -47,6 +47,24 @@ end
 -- Collapses entity.create/update's issues list into one human-readable
 -- string, for a plain-form page (document-edit) that has nowhere to
 -- show per-field errors the way the JS-driven registration table does.
+-- The current state of one chat session as a JSON-safe table -- shared
+-- by every /api/chat-widget-* route (start/send/approve/deny/history)
+-- below, all of which end by returning "here's the state now" so the
+-- floating widget (see html.page_shell) never has to separately poll.
+function chat_widget_state(db_path, session_id)
+    messages = agent.all_messages(db_path, session_id)
+    pending = agent.latest_pending(db_path, session_id)
+    pending_out = nil
+    if pending != nil then
+        args, _, _ = json.decode(pending.args_json)
+        if args == nil then
+            args = {}
+        end
+        pending_out = {id = pending.id, tool = pending.tool, method = pending.method, args = args}
+    end
+    return {session_id = session_id, messages = messages, pending = pending_out}
+end
+
 function issues_to_message(issues)
     if issues == nil or #issues == 0 then
         return "Could not save."
@@ -445,7 +463,7 @@ function cgi.handle_request()
 
         body = html.render(entity_type, layout_json, nonce)
         return print_response("200 OK", "text/html",
-            html.page_shell(entity_type .. " · Register", "home", body, nonce, show_sql_nav, show_admin_nav, theme))
+            html.page_shell(entity_type .. " · Register", "data", body, nonce, show_sql_nav, show_admin_nav, theme, author))
     end
 
     if path_info == "/browse" then
@@ -471,10 +489,25 @@ function cgi.handle_request()
         rows = entity.list(db_path, entity_type, BROWSE_PAGE_SIZE, offset)
         body = html.render_browse(db_path, entity_type, layout, rows, page, BROWSE_PAGE_SIZE, total, nonce)
         return print_response("200 OK", "text/html",
-            html.page_shell(entity_type .. " · Browse", "home", body, nonce, show_sql_nav, show_admin_nav, theme))
+            html.page_shell(entity_type .. " · Browse", "data", body, nonce, show_sql_nav, show_admin_nav, theme, author))
     end
 
+    -- A simple, mostly-static landing page -- basic information and
+    -- quick links, deliberately not an activity dashboard (working
+    -- lists, a calendar, recent-entries feed) yet. Taking inspiration
+    -- from Benchling's own Home concept without copying its actual
+    -- design; this is a real v1 (a start), not the end state.
     if path_info == "/" or path_info == "" then
+        body = html.render_home(theme, show_sql_nav, show_admin_nav)
+        return print_response("200 OK", "text/html",
+            html.page_shell(theme.site_name, "home", body, nonce, show_sql_nav, show_admin_nav, theme, author))
+    end
+
+    -- What "/" used to render, in full, before Home became its own
+    -- separate landing page above -- the entity-type overview, the
+    -- relation diagram, and (Setup/Admin only) the embedded ad hoc SQL
+    -- widget.
+    if path_info == "/data" then
         entity_types = schema.list(db_path)
         for _, row in ipairs(entity_types) do
             row.count = entity.count(db_path, row.name)
@@ -489,7 +522,20 @@ function cgi.handle_request()
         show_sql_widget = cgi.has_capability(capabilities, "s") or cgi.has_capability(capabilities, "a")
         body = html.render_index(entity_types, edges, show_sql_widget, nonce)
         return print_response("200 OK", "text/html",
-            html.page_shell(theme.site_name, "home", body, nonce, show_sql_nav, show_admin_nav, theme))
+            html.page_shell("Data", "data", body, nonce, show_sql_nav, show_admin_nav, theme, author))
+    end
+
+    -- Landing page for admin/setup-only tooling (SQL console, user
+    -- admin, templates) -- a single "System" destination rather than
+    -- three separate top-level tabs, matching the old fossci
+    -- deployment's own "System" concept.
+    if path_info == "/system" then
+        if show_sql_nav == false and show_admin_nav == false then
+            return print_response("403 Forbidden", "text/html", "<h3>Forbidden: requires Setup or Admin capability</h3>")
+        end
+        body = html.render_system(show_sql_nav, show_admin_nav)
+        return print_response("200 OK", "text/html",
+            html.page_shell("System", "system", body, nonce, show_sql_nav, show_admin_nav, theme, author))
     end
 
     if path_info == "/detail" then
@@ -515,7 +561,7 @@ function cgi.handle_request()
         history = ledger.history(db_path, entity_id)
         body = html.render_detail(db_path, entity_type, layout, row, history, nonce)
         return print_response("200 OK", "text/html",
-            html.page_shell(entity_type .. " #" .. tostring(entity_id), "home", body, nonce, show_sql_nav, show_admin_nav, theme))
+            html.page_shell(entity_type .. " #" .. tostring(entity_id), "data", body, nonce, show_sql_nav, show_admin_nav, theme, author))
     end
 
     if path_info == "/view" then
@@ -544,7 +590,7 @@ function cgi.handle_request()
         end
         body = html.render_view(view_def, rows, param_value)
         return print_response("200 OK", "text/html",
-            html.page_shell(view_name, "home", body, nonce, show_sql_nav, show_admin_nav, theme))
+            html.page_shell(view_name, "data", body, nonce, show_sql_nav, show_admin_nav, theme, author))
     end
 
     -- Documents (src/document.lua): a real parent_id tree, not a
@@ -560,7 +606,7 @@ function cgi.handle_request()
         rows = document.all_active(db_path)
         body = html.render_document_tree(rows, true, nonce)
         return print_response("200 OK", "text/html",
-            html.page_shell("Pages", "documents", body, nonce, show_sql_nav, show_admin_nav, theme))
+            html.page_shell("Pages", "documents", body, nonce, show_sql_nav, show_admin_nav, theme, author))
     end
 
     if path_info == "/document" then
@@ -578,7 +624,7 @@ function cgi.handle_request()
         backlinks = document.backlinks(db_path, entity_id)
         body = html.render_document(doc, rendered_html, breadcrumbs, children, backlinks, true, nonce)
         return print_response("200 OK", "text/html",
-            html.page_shell(doc.title, "documents", body, nonce, show_sql_nav, show_admin_nav, theme))
+            html.page_shell(doc.title, "documents", body, nonce, show_sql_nav, show_admin_nav, theme, author))
     end
 
     if path_info == "/document-edit" then
@@ -597,7 +643,7 @@ function cgi.handle_request()
         parent_options_html = html.document_parent_options(document.all_active(db_path), parent_id, entity_id)
         body = html.render_document_edit(doc, parent_options_html, default_value(cookies.csrf, ""), nil, nonce)
         return print_response("200 OK", "text/html",
-            html.page_shell("Edit page", "documents", body, nonce, show_sql_nav, show_admin_nav, theme))
+            html.page_shell("Edit page", "documents", body, nonce, show_sql_nav, show_admin_nav, theme, author))
     end
 
     if path_info == "/document-save" and method == "POST" then
@@ -618,7 +664,7 @@ function cgi.handle_request()
             body = html.render_document_edit(doc, parent_options_html, default_value(cookies.csrf, ""),
                 "Can't move a page underneath its own sub-page.", nonce)
             return print_response("200 OK", "text/html",
-                html.page_shell("Edit page", "documents", body, nonce, show_sql_nav, show_admin_nav, theme))
+                html.page_shell("Edit page", "documents", body, nonce, show_sql_nav, show_admin_nav, theme, author))
         end
 
         saved_id = nil
@@ -640,7 +686,7 @@ function cgi.handle_request()
             body = html.render_document_edit(doc, parent_options_html, default_value(cookies.csrf, ""),
                 issues_to_message(issues), nonce)
             return print_response("200 OK", "text/html",
-                html.page_shell("Edit page", "documents", body, nonce, show_sql_nav, show_admin_nav, theme))
+                html.page_shell("Edit page", "documents", body, nonce, show_sql_nav, show_admin_nav, theme, author))
         end
 
         return print_response("302 Found", "text/plain", "", {"Location: document?entity_id=" .. tostring(saved_id)})
@@ -671,8 +717,17 @@ function cgi.handle_request()
             end
         end
         body = html.render_sql(db_path, sql_text, column_names, rows, sql_err, ref_columns, nonce)
+        -- ?embed=1 is the home page's own SQL widget iframe (see
+        -- render_index) -- it's already inside a page shell, so
+        -- nesting a second full <html>/<nav> shell inside a 520px
+        -- iframe would just show a broken, redundant page-within-a-
+        -- page. Only skip the shell for that specific embed, not
+        -- direct /sql visits, which still get the real nav.
+        if params.embed == "1" then
+            return print_response("200 OK", "text/html", body)
+        end
         return print_response("200 OK", "text/html",
-            html.page_shell("SQL", "sql", body, nonce, show_sql_nav, show_admin_nav, theme))
+            html.page_shell("SQL", "system", body, nonce, show_sql_nav, show_admin_nav, theme, author))
     end
 
     if path_info == "/admin-users" then
@@ -682,7 +737,7 @@ function cgi.handle_request()
         users = auth.list_users(db_path, true)
         body = html.render_admin_users(users, default_value(cookies.csrf, ""), nil, false)
         return print_response("200 OK", "text/html",
-            html.page_shell("Users", "admin-users", body, nonce, show_sql_nav, show_admin_nav, theme))
+            html.page_shell("Users", "system", body, nonce, show_sql_nav, show_admin_nav, theme, author))
     end
 
     -- Flat, single-segment names (not "/admin/users/create" etc) --
@@ -709,7 +764,7 @@ function cgi.handle_request()
             users = auth.list_users(db_path, true)
             body = html.render_admin_users(users, default_value(cookies.csrf, ""), "CSRF check failed.", true)
             return print_response("403 Forbidden", "text/html",
-                html.page_shell("Users", "admin-users", body, nonce, show_sql_nav, show_admin_nav, theme))
+                html.page_shell("Users", "system", body, nonce, show_sql_nav, show_admin_nav, theme, author))
         end
 
         ok = nil
@@ -731,7 +786,7 @@ function cgi.handle_request()
             users = auth.list_users(db_path, true)
             body = html.render_admin_users(users, default_value(cookies.csrf, ""), tostring(err), true)
             return print_response("200 OK", "text/html",
-                html.page_shell("Users", "admin-users", body, nonce, show_sql_nav, show_admin_nav, theme))
+                html.page_shell("Users", "system", body, nonce, show_sql_nav, show_admin_nav, theme, author))
         end
         return print_response("302 Found", "text/plain", "", {"Location: admin-users"})
     end
@@ -758,7 +813,7 @@ function cgi.handle_request()
         end
         body = html.render_chat(sessions, session, messages, pending, default_value(cookies.csrf, ""), nonce)
         return print_response("200 OK", "text/html",
-            html.page_shell("Chat", "chat", body, nonce, show_sql_nav, show_admin_nav, theme))
+            html.page_shell("Chat", "chat", body, nonce, show_sql_nav, show_admin_nav, theme, author))
     end
 
     if path_info == "/chat-start" and method == "POST" then
@@ -807,11 +862,92 @@ function cgi.handle_request()
         return print_response("302 Found", "text/plain", "", {"Location: chat?session_id=" .. form.session_id})
     end
 
+    -- JSON counterparts of the four routes just above, for the floating
+    -- chat widget (html.page_shell) rather than the full /chat page --
+    -- same underlying agent.* calls, fetch()-friendly responses instead
+    -- of a 302 redirect back to a full page render. `chat_widget_state`
+    -- (above) is the one place "here's the session now" gets built, so
+    -- all four stay in sync with each other and with /chat itself.
+    if path_info == "/api/chat-widget-start" and method == "POST" then
+        if not require_csrf(cookies) then
+            return print_response("403 Forbidden", "application/json", json.encode({error = "CSRF check failed"}))
+        end
+        input = io.read("*all")
+        body_data, _, err = json.decode(input)
+        if body_data == nil then
+            return print_response("400 Bad Request", "application/json", json.encode({error = "Invalid JSON: " .. tostring(err)}))
+        end
+        new_session_id, create_err = agent.create_session(db_path, author, body_data.title)
+        if new_session_id == nil then
+            return print_response("500 Internal Server Error", "application/json", json.encode({error = tostring(create_err)}))
+        end
+        return print_response("200 OK", "application/json", json.encode(chat_widget_state(db_path, new_session_id)))
+    end
+
+    if path_info == "/api/chat-widget-send" and method == "POST" then
+        if not require_csrf(cookies) then
+            return print_response("403 Forbidden", "application/json", json.encode({error = "CSRF check failed"}))
+        end
+        input = io.read("*all")
+        body_data, _, err = json.decode(input)
+        if body_data == nil then
+            return print_response("400 Bad Request", "application/json", json.encode({error = "Invalid JSON: " .. tostring(err)}))
+        end
+        session = agent.get_session(db_path, body_data.session_id, author)
+        if session == nil then
+            return print_response("404 Not Found", "application/json", json.encode({error = "no such chat session"}))
+        end
+        model = default_value(os.getenv("AGENT_MODEL"), AGENT_DEFAULT_MODEL)
+        agent.run_turn(db_path, body_data.session_id, author, nil, model, body_data.message)
+        return print_response("200 OK", "application/json", json.encode(chat_widget_state(db_path, body_data.session_id)))
+    end
+
+    if path_info == "/api/chat-widget-approve" and method == "POST" then
+        if not require_csrf(cookies) then
+            return print_response("403 Forbidden", "application/json", json.encode({error = "CSRF check failed"}))
+        end
+        input = io.read("*all")
+        body_data, _, err = json.decode(input)
+        if body_data == nil then
+            return print_response("400 Bad Request", "application/json", json.encode({error = "Invalid JSON: " .. tostring(err)}))
+        end
+        model = default_value(os.getenv("AGENT_MODEL"), AGENT_DEFAULT_MODEL)
+        agent.approve_pending(db_path, tonumber(body_data.pending_id), author, nil, model)
+        return print_response("200 OK", "application/json", json.encode(chat_widget_state(db_path, body_data.session_id)))
+    end
+
+    if path_info == "/api/chat-widget-deny" and method == "POST" then
+        if not require_csrf(cookies) then
+            return print_response("403 Forbidden", "application/json", json.encode({error = "CSRF check failed"}))
+        end
+        input = io.read("*all")
+        body_data, _, err = json.decode(input)
+        if body_data == nil then
+            return print_response("400 Bad Request", "application/json", json.encode({error = "Invalid JSON: " .. tostring(err)}))
+        end
+        model = default_value(os.getenv("AGENT_MODEL"), AGENT_DEFAULT_MODEL)
+        agent.deny_pending(db_path, tonumber(body_data.pending_id), author, nil, model)
+        return print_response("200 OK", "application/json", json.encode(chat_widget_state(db_path, body_data.session_id)))
+    end
+
+    -- GET, not POST -- just reads back state, no CSRF needed (matches
+    -- every other read-only /api/* route in this file). Used to
+    -- rehydrate the floating widget's panel after a full page
+    -- navigation, since its own session_id lives in localStorage
+    -- (see html.page_shell's script), not anything server-rendered.
+    if path_info == "/api/chat-widget-history" then
+        session = agent.get_session(db_path, params.session_id, author)
+        if session == nil then
+            return print_response("404 Not Found", "application/json", json.encode({error = "no such chat session"}))
+        end
+        return print_response("200 OK", "application/json", json.encode(chat_widget_state(db_path, params.session_id)))
+    end
+
     if path_info == "/templates" then
         templates_dir = config.templates_dir(root)
         body = html.render_templates_list(template.all(templates_dir))
         return print_response("200 OK", "text/html",
-            html.page_shell("Templates", "templates", body, nonce, show_sql_nav, show_admin_nav, theme))
+            html.page_shell("Templates", "system", body, nonce, show_sql_nav, show_admin_nav, theme, author))
     end
 
     if path_info == "/template" then
@@ -829,7 +965,7 @@ function cgi.handle_request()
         rendered = template.render(template_def)
         body = html.render_template(template_def, rendered, nonce)
         return print_response("200 OK", "text/html",
-            html.page_shell(template_name, "templates", body, nonce, show_sql_nav, show_admin_nav, theme))
+            html.page_shell(template_name, "system", body, nonce, show_sql_nav, show_admin_nav, theme, author))
     end
 
     if path_info == "/api/autocomplete" then

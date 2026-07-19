@@ -51,8 +51,10 @@ teardown() {
     cleanup_test_env
 }
 
-@test "/ renders the entity-relation diagram with a node per type and an edge for each reference field" {
-    run_cgi "/" ""
+@test "/data renders the entity-relation diagram with a node per type and an edge for each reference field" {
+    # Moved off "/" when Home became its own separate landing page --
+    # see html.render_home/render_index's own comments.
+    run_cgi "/data" ""
     [ "$status" -eq 0 ]
     [[ "$output" =~ "200 OK" ]]
     [[ "$output" =~ "fossci-diagram-node\" data-entity-type=\"person\"" ]]
@@ -62,13 +64,13 @@ teardown() {
     [[ "$output" =~ "fossci-diagram-edge\" data-from=\"sample\" data-to=\"experiment\"" ]]
 }
 
-@test "/ sorts entity types by row count descending, alphabetical tiebreak, with data-count for the hide-empty toggle" {
+@test "/data sorts entity types by row count descending, alphabetical tiebreak, with data-count for the hide-empty toggle" {
     "$BIN" entity create person full_name="Dr. Amare"
     "$BIN" entity create person full_name="Dr. Beadle"
     # person now has 3 rows (1 from setup + 2 here); experiment and
     # sample each still have 1 -- person must sort first, then
     # experiment before sample (alphabetical tiebreak on equal counts).
-    run_cgi "/" ""
+    run_cgi "/data" ""
     [ "$status" -eq 0 ]
     [[ "$output" =~ 'data-count="3"><a href="browse?type=person"' ]]
     before_experiment="${output%%'type=experiment"'*}"
