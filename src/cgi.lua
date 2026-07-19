@@ -292,7 +292,7 @@ function handle_preview(db_path, params)
     end
     row = rows[1]
 
-    title = own_row_label(db_path, entity_type, row)
+    title = html.own_row_label(db_path, entity_type, row)
     if title == nil then
         title = entity_type .. " #" .. tostring(entity_id)
     end
@@ -311,13 +311,13 @@ function handle_preview(db_path, params)
             if value != nil and tostring(value) != "" then
                 display_value = tostring(value)
                 if field.type == "reference" and field.ref_entity_type != nil then
-                    ref_label = entity_display_label(db_path, field.ref_entity_type, value)
+                    ref_label = html.entity_display_label(db_path, field.ref_entity_type, value)
                     if ref_label != nil then
                         display_value = ref_label
                     end
                 end
-                field_lines = field_lines .. "<div><strong>" .. html_escape(field.label) .. ":</strong> " ..
-                    html_escape(display_value) .. "</div>"
+                field_lines = field_lines .. "<div><strong>" .. html.html_escape(field.label) .. ":</strong> " ..
+                    html.html_escape(display_value) .. "</div>"
                 shown = shown + 1
             end
         end
@@ -326,7 +326,7 @@ function handle_preview(db_path, params)
         field_lines = "<div style=\"color:#94a3b8;\">No fields to show.</div>"
     end
 
-    preview_html = "<strong>" .. html_escape(title) .. "</strong>" ..
+    preview_html = "<strong>" .. html.html_escape(title) .. "</strong>" ..
         "<hr style=\"margin:6px 0;border:none;border-top:1px solid #e2e8f0;\">" ..
         field_lines
     return print_response("200 OK", "application/json", json.encode({html = preview_html}))
@@ -555,7 +555,7 @@ function cgi.handle_request()
 
         row = entity.get(db_path, entity_type, entity_id)
         if row == nil then
-            return print_response("404 Not Found", "text/html", "<h3>Error: no such " .. html_escape(entity_type) .. " #" .. tostring(entity_id) .. "</h3>")
+            return print_response("404 Not Found", "text/html", "<h3>Error: no such " .. html.html_escape(entity_type) .. " #" .. tostring(entity_id) .. "</h3>")
         end
 
         history = ledger.history(db_path, entity_id)
@@ -576,7 +576,7 @@ function cgi.handle_request()
             return print_response("404 Not Found", "text/html", "<h3>Error: " .. tostring(err) .. "</h3>")
         end
         if view.is_approved(db_path, view_def) == false then
-            return print_response("403 Forbidden", "text/html", "<h3>Error: view '" .. html_escape(view_name) .. "' is not approved</h3>")
+            return print_response("403 Forbidden", "text/html", "<h3>Error: view '" .. html.html_escape(view_name) .. "' is not approved</h3>")
         end
 
         param_value = nil

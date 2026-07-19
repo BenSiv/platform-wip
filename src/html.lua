@@ -6,7 +6,7 @@ html = {}
 -- Entity field values and (in principle) entity_type ultimately come
 -- from user-submitted data -- escape before ever interpolating into
 -- HTML text/attributes.
-function html_escape(s)
+function html.html_escape(s)
     s = tostring(s)
     s = string.gsub(s, "&", "&amp;")
     s = string.gsub(s, "<", "&lt;")
@@ -294,7 +294,7 @@ function html.page_shell(title, active, body, nonce, show_sql, show_admin, theme
         end
         table.insert(nav_links, string.format(
             '<a class="%s" href="%s" title="%s">%s<span class="fossci-nav-label">%s</span></a>',
-            link_class, item.href, html_escape(item.label), item.icon, html_escape(item.label)
+            link_class, item.href, html.html_escape(item.label), item.icon, html.html_escape(item.label)
         ))
     end
 
@@ -305,7 +305,7 @@ function html.page_shell(title, active, body, nonce, show_sql, show_admin, theme
     <div class="fossci-nav-user-name">%s</div>
     <a href="logout">Log out</a>
 </div>
-""", html_escape(author))
+""", html.html_escape(author))
     end
 
     return string.format("""<!doctype html>
@@ -400,7 +400,7 @@ body {
 %s
 </body>
 </html>
-""", html_escape(title), root_css, fossci_chat_widget_css(), table.concat(nav_links, ""), user_box, body,
+""", html.html_escape(title), root_css, fossci_chat_widget_css(), table.concat(nav_links, ""), user_box, body,
      html.render_chat_widget(nonce))
 end
 
@@ -410,7 +410,7 @@ end
 -- CSP, so an inline <script> without the matching nonce is silently
 -- blocked by the browser: the page loads, but no JS in it ever runs.
 function html.render(entity_type, layout_json, nonce)
-    escaped_type = html_escape(entity_type)
+    escaped_type = html.html_escape(entity_type)
     return string.format("""
 <div class="fossil-doc" data-title="Register %s">
     <style>
@@ -858,7 +858,7 @@ function display_value(value)
     if value == nil or tostring(value) == "" then
         return "&mdash;"
     end
-    return html_escape(value)
+    return html.html_escape(value)
 end
 
 -- Reference-type field values are a raw entity id -- fossci has no
@@ -900,7 +900,7 @@ function format_display_label(entity_type, field, raw_value)
     return tostring(raw_value)
 end
 
-function entity_display_label(db_path, entity_type, entity_id)
+function html.entity_display_label(db_path, entity_type, entity_id)
     rows = db.query(db_path, string.format(
         "SELECT name FROM %s WHERE id = %s;", entity_type, db.quote(entity_id)
     ))
@@ -935,7 +935,7 @@ end
 -- Same two-source priority as entity_display_label, but for a row this
 -- page already has fully loaded -- no second query needed for either
 -- source, just reading row.name and (if empty) a schema.fields() lookup.
-function own_row_label(db_path, entity_type, row)
+function html.own_row_label(db_path, entity_type, row)
     if row.name != nil and tostring(row.name) != "" then
         return tostring(row.name)
     end
@@ -960,12 +960,12 @@ function render_reference_value(db_path, ref_entity_type, value)
     if value == nil or tostring(value) == "" then
         return "&mdash;"
     end
-    escaped_type = html_escape(ref_entity_type)
-    escaped_id = html_escape(tostring(value))
+    escaped_type = html.html_escape(ref_entity_type)
+    escaped_id = html.html_escape(tostring(value))
     link_text = "#" .. escaped_id
-    label = entity_display_label(db_path, ref_entity_type, value)
+    label = html.entity_display_label(db_path, ref_entity_type, value)
     if label != nil then
-        link_text = html_escape(label)
+        link_text = html.html_escape(label)
     end
     -- Hover reveals a preview of the referenced row (fetched lazily via
     -- /api/preview, see cgi.lua) rather than making every reference
@@ -996,19 +996,19 @@ function html.render_browse(db_path, entity_type, layout, rows, page, page_size,
     if nonce == nil then
         nonce = ""
     end
-    escaped_type = html_escape(entity_type)
+    escaped_type = html.html_escape(entity_type)
 
     header_cells = "<th>ID</th>"
     for _, field in ipairs(layout.fields) do
-        header_cells = header_cells .. "<th>" .. html_escape(field.label) .. "</th>"
+        header_cells = header_cells .. "<th>" .. html.html_escape(field.label) .. "</th>"
     end
 
     body_rows = ""
     for _, row in ipairs(rows) do
-        own_label = own_row_label(db_path, entity_type, row)
+        own_label = html.own_row_label(db_path, entity_type, row)
         id_link_text = "#" .. tostring(row.id)
         if own_label != nil then
-            id_link_text = html_escape(own_label)
+            id_link_text = html.html_escape(own_label)
         end
         cells = "<td><a href=\"detail?type=" .. escaped_type .. "&entity_id=" .. tostring(row.id) ..
             "\">" .. id_link_text .. "</a></td>"
@@ -1142,18 +1142,18 @@ function html.render_detail(db_path, entity_type, layout, row, history, nonce)
     if nonce == nil then
         nonce = ""
     end
-    escaped_type = html_escape(entity_type)
+    escaped_type = html.html_escape(entity_type)
     id_str = tostring(row.id)
-    own_label = own_row_label(db_path, entity_type, row)
+    own_label = html.own_row_label(db_path, entity_type, row)
     title_id_part = "#" .. id_str
     if own_label != nil then
-        title_id_part = html_escape(own_label) .. " (#" .. id_str .. ")"
+        title_id_part = html.html_escape(own_label) .. " (#" .. id_str .. ")"
     end
 
     fields_html = ""
     for _, field in ipairs(layout.fields) do
         fields_html = fields_html .. "<div class=\"detail-row\"><span class=\"detail-label\">" ..
-            html_escape(field.label) .. "</span><span class=\"detail-value\">" ..
+            html.html_escape(field.label) .. "</span><span class=\"detail-value\">" ..
             display_field_value(db_path, field, row[field.name]) .. "</span></div>"
     end
 
@@ -1161,12 +1161,12 @@ function html.render_detail(db_path, entity_type, layout, row, history, nonce)
     for _, event in ipairs(history) do
         changes = ""
         for field_name, change in pairs(event.field_changes) do
-            changes = changes .. "<div class=\"change-item\"><strong>" .. html_escape(field_name) ..
+            changes = changes .. "<div class=\"change-item\"><strong>" .. html.html_escape(field_name) ..
                 "</strong>: " .. display_value(change.old) .. " &rarr; " .. display_value(change.new) .. "</div>"
         end
         history_rows = history_rows .. "<tr><td>#" .. tostring(event.event_id) .. "</td><td>" ..
-            html_escape(event.event_type) .. "</td><td>" .. display_value(event.author) .. "</td><td>" ..
-            html_escape(event.created_at) .. "</td><td>" .. changes .. "</td></tr>"
+            html.html_escape(event.event_type) .. "</td><td>" .. display_value(event.author) .. "</td><td>" ..
+            html.html_escape(event.created_at) .. "</td><td>" .. changes .. "</td></tr>"
     end
 
     return string.format("""
@@ -1247,12 +1247,12 @@ function html.render_view(view_def, rows, param_value)
     if title == nil then
         title = view_def.name
     end
-    escaped_title = html_escape(title)
+    escaped_title = html.html_escape(title)
 
     subtitle = tostring(#rows) .. " rows"
     if view_def.param != nil then
-        subtitle = subtitle .. " -- filtered by " .. html_escape(view_def.param.name) ..
-            " = " .. html_escape(tostring(param_value))
+        subtitle = subtitle .. " -- filtered by " .. html.html_escape(view_def.param.name) ..
+            " = " .. html.html_escape(tostring(param_value))
     end
 
     header_cells = ""
@@ -1261,7 +1261,7 @@ function html.render_view(view_def, rows, param_value)
         if label == nil then
             label = col.name
         end
-        header_cells = header_cells .. "<th>" .. html_escape(label) .. "</th>"
+        header_cells = header_cells .. "<th>" .. html.html_escape(label) .. "</th>"
     end
 
     body_rows = ""
@@ -1290,7 +1290,7 @@ function html.render_view(view_def, rows, param_value)
     if view_def.entity_type != nil then
         register_link = string.format(
             "<a class=\"btn btn-primary\" href=\"register?type=%s\">+ Register new</a>",
-            html_escape(view_def.entity_type)
+            html.html_escape(view_def.entity_type)
         )
     end
 
@@ -1378,14 +1378,14 @@ function html.render_relation_diagram(entity_types, edges)
             p2 = positions[to_i]
             edges_svg = edges_svg .. string.format(
                 "<line class=\"fossci-diagram-edge\" data-from=\"%s\" data-to=\"%s\" x1=\"%.1f\" y1=\"%.1f\" x2=\"%.1f\" y2=\"%.1f\" marker-end=\"url(#fossci-diagram-arrow)\"></line>",
-                html_escape(edge.from_type), html_escape(edge.to_type), p1.x, p1.y, p2.x, p2.y
+                html.html_escape(edge.from_type), html.html_escape(edge.to_type), p1.x, p1.y, p2.x, p2.y
             )
         end
     end
 
     nodes_svg = ""
     for i, row in ipairs(entity_types) do
-        escaped_name = html_escape(row.name)
+        escaped_name = html.html_escape(row.name)
         p = positions[i]
         nodes_svg = nodes_svg .. string.format(
             "<g class=\"fossci-diagram-node\" data-entity-type=\"%s\" tabindex=\"0\">" ..
@@ -1530,7 +1530,7 @@ end
 function html.render_login(error_message, nonce)
     error_html = ""
     if error_message != nil and error_message != "" then
-        error_html = "<div class=\"fossci-login-error\">" .. html_escape(error_message) .. "</div>"
+        error_html = "<div class=\"fossci-login-error\">" .. html.html_escape(error_message) .. "</div>"
     end
 
     return string.format("""
@@ -1571,7 +1571,7 @@ end
 -- custom request header, so the double-submit token has to travel as
 -- form data instead (see cgi.lua's require_csrf).
 function html.render_admin_users(users, csrf_token, message, is_error)
-    escaped_csrf = html_escape(csrf_token)
+    escaped_csrf = html.html_escape(csrf_token)
 
     message_html = ""
     if message != nil and message != "" then
@@ -1579,12 +1579,12 @@ function html.render_admin_users(users, csrf_token, message, is_error)
         if is_error == true then
             css_class = "fossci-admin-message fossci-admin-message-error"
         end
-        message_html = "<div class=\"" .. css_class .. "\">" .. html_escape(message) .. "</div>"
+        message_html = "<div class=\"" .. css_class .. "\">" .. html.html_escape(message) .. "</div>"
     end
 
     rows_html = ""
     for _, u in ipairs(users) do
-        escaped_login = html_escape(u.login)
+        escaped_login = html.html_escape(u.login)
         status = "active"
         if u.archived_at != nil and u.archived_at != "" then
             status = "archived"
@@ -1622,7 +1622,7 @@ function html.render_admin_users(users, csrf_token, message, is_error)
                 </form>
             </td>
         </tr>
-""", escaped_login, escaped_csrf, escaped_login, html_escape(u.cap), status,
+""", escaped_login, escaped_csrf, escaped_login, html.html_escape(u.cap), status,
      escaped_csrf, escaped_login, archive_action, escaped_csrf, escaped_login, archive_label)
     end
 
@@ -1714,7 +1714,7 @@ function html.render_home(theme, show_sql, show_admin)
         </ul>
     </div>
 </div>
-""", fossci_container_css(1200), html_escape(site_name), system_link)
+""", fossci_container_css(1200), html.html_escape(site_name), system_link)
 end
 
 -- Landing page for Setup/Admin-only tooling -- a single destination
@@ -1761,7 +1761,7 @@ end
 function html.render_index(entity_types, edges, show_sql_widget, nonce)
     items = ""
     for _, row in ipairs(entity_types) do
-        escaped_name = html_escape(row.name)
+        escaped_name = html.html_escape(row.name)
         -- Row count used to be an always-visible inline badge; moved to
         -- a hover popover (html.popover_css()) so the default view only
         -- shows what's needed to decide "do I click into this."
@@ -1864,10 +1864,10 @@ end
 function html.render_templates_list(entries)
     items = ""
     for _, entry in ipairs(entries) do
-        escaped_name = html_escape(entry.name)
+        escaped_name = html.html_escape(entry.name)
         if entry.def == nil then
             items = items .. "<li class=\"fossci-template-error\">" .. escaped_name ..
-                " -- ERROR: " .. html_escape(entry.err) .. "</li>"
+                " -- ERROR: " .. html.html_escape(entry.err) .. "</li>"
         else
             label = entry.def.label
             if label == nil then
@@ -1877,8 +1877,8 @@ function html.render_templates_list(entries)
             if description == nil then
                 description = ""
             end
-            escaped_label = html_escape(label)
-            escaped_desc = html_escape(description)
+            escaped_label = html.html_escape(label)
+            escaped_desc = html.html_escape(description)
             items = items .. "<li><a href=\"template?template_name=" .. escaped_name .. "\">" ..
                 escaped_label .. "</a><p>" .. escaped_desc .. "</p></li>"
         end
@@ -1938,9 +1938,9 @@ function html.render_template(def, rendered_markdown, nonce)
     if description == nil then
         description = ""
     end
-    escaped_label = html_escape(label)
-    escaped_desc = html_escape(description)
-    escaped_body = html_escape(rendered_markdown)
+    escaped_label = html.html_escape(label)
+    escaped_desc = html.html_escape(description)
+    escaped_body = html.html_escape(rendered_markdown)
 
     return string.format("""
 <div class="fossil-doc" data-title="Template: %s">
@@ -1993,15 +1993,15 @@ function html.render_sql(db_path, sql_text, column_names, rows, err, ref_columns
     if sql_text_or_empty == nil then
         sql_text_or_empty = ""
     end
-    escaped_sql = html_escape(sql_text_or_empty)
+    escaped_sql = html.html_escape(sql_text_or_empty)
 
     result_html = ""
     if err != nil then
-        result_html = "<div class=\"fossci-sql-error\">Error: " .. html_escape(err) .. "</div>"
+        result_html = "<div class=\"fossci-sql-error\">Error: " .. html.html_escape(err) .. "</div>"
     elseif rows != nil then
         header_cells = ""
         for _, name in ipairs(column_names) do
-            header_cells = header_cells .. "<th>" .. html_escape(name) .. "</th>"
+            header_cells = header_cells .. "<th>" .. html.html_escape(name) .. "</th>"
         end
         body_rows = ""
         for _, row in ipairs(rows) do
@@ -2155,7 +2155,7 @@ function render_document_tree_level(by_parent, key, depth)
     for _, row in ipairs(children) do
         child_key = tostring(tonumber(row.id))
         nested = render_document_tree_level(by_parent, child_key, depth + 1)
-        link = "<a href=\"document?entity_id=" .. tostring(row.id) .. "\">" .. html_escape(row.title) .. "</a>"
+        link = "<a href=\"document?entity_id=" .. tostring(row.id) .. "\">" .. html.html_escape(row.title) .. "</a>"
         if nested == "" then
             items = items .. "<li class=\"fossci-tree-leaf\">" .. link .. "</li>"
         else
@@ -2185,7 +2185,7 @@ function html.document_parent_options(rows, selected_id, exclude_id)
                 selected_attr = " selected"
             end
             options = options .. "<option value=\"" .. tostring(row.id) .. "\"" .. selected_attr .. ">" ..
-                html_escape(row.title) .. "</option>"
+                html.html_escape(row.title) .. "</option>"
         end
     end
     return options
@@ -2350,17 +2350,17 @@ function html.render_document(doc, rendered_html, breadcrumbs, children, backlin
             breadcrumb_html = breadcrumb_html .. " / "
         end
         if i == #breadcrumbs then
-            breadcrumb_html = breadcrumb_html .. html_escape(crumb.title)
+            breadcrumb_html = breadcrumb_html .. html.html_escape(crumb.title)
         else
             breadcrumb_html = breadcrumb_html .. "<a href=\"document?entity_id=" .. tostring(crumb.id) .. "\">" ..
-                html_escape(crumb.title) .. "</a>"
+                html.html_escape(crumb.title) .. "</a>"
         end
     end
 
     children_html = ""
     for _, child in ipairs(children) do
         children_html = children_html .. "<li><a href=\"document?entity_id=" .. tostring(child.id) .. "\">" ..
-            html_escape(child.title) .. "</a></li>"
+            html.html_escape(child.title) .. "</a></li>"
     end
     children_block = ""
     if children_html != "" then
@@ -2370,7 +2370,7 @@ function html.render_document(doc, rendered_html, breadcrumbs, children, backlin
     backlinks_html = ""
     for _, link in ipairs(backlinks) do
         backlinks_html = backlinks_html .. "<li><a href=\"document?entity_id=" .. tostring(link.id) .. "\">" ..
-            html_escape(link.title) .. "</a></li>"
+            html.html_escape(link.title) .. "</a></li>"
     end
     backlinks_block = ""
     if backlinks_html != "" then
@@ -2409,8 +2409,8 @@ function html.render_document(doc, rendered_html, breadcrumbs, children, backlin
     </div>
     <script nonce="%s">window.PLATFORM_PAGE_CONTEXT = {id: %s, title: "%s"};</script>
 </div>
-""", html_escape(doc.title), fossci_container_css(900), fossci_button_css(),
-     breadcrumb_html, html_escape(doc.title), edit_link, rendered_html, children_block, backlinks_block,
+""", html.html_escape(doc.title), fossci_container_css(900), fossci_button_css(),
+     breadcrumb_html, html.html_escape(doc.title), edit_link, rendered_html, children_block, backlinks_block,
      nonce, tostring(doc.id), js_string_literal(doc.title))
 end
 
@@ -2425,17 +2425,17 @@ function html.render_document_edit(doc, parent_options_html, csrf_token, error_m
     title_value = ""
     content_value = ""
     if is_edit then
-        heading = "Edit: " .. html_escape(doc.title)
+        heading = "Edit: " .. html.html_escape(doc.title)
         entity_id_value = tostring(doc.id)
-        title_value = html_escape(doc.title)
+        title_value = html.html_escape(doc.title)
         if doc.content != nil then
-            content_value = html_escape(doc.content)
+            content_value = html.html_escape(doc.content)
         end
     end
 
     error_html = ""
     if error_message != nil and error_message != "" then
-        error_html = "<div class=\"fossci-login-error\">" .. html_escape(error_message) .. "</div>"
+        error_html = "<div class=\"fossci-login-error\">" .. html.html_escape(error_message) .. "</div>"
     end
 
     return string.format("""
@@ -2506,7 +2506,7 @@ function html.render_document_edit(doc, parent_options_html, csrf_token, error_m
     </script>
 </div>
 """, heading, fossci_container_css(1200), fossci_button_css(), heading, error_html,
-     html_escape(csrf_token), entity_id_value, title_value, parent_options_html, content_value, nonce)
+     html.html_escape(csrf_token), entity_id_value, title_value, parent_options_html, content_value, nonce)
 end
 
 --------------------------------------------------------------------------
@@ -2552,8 +2552,8 @@ function render_chat_message(msg)
     if tonumber(msg.in_context) == 0 then
         css_class = css_class .. " fossci-chat-out-of-context"
     end
-    return "<div class=\"" .. css_class .. "\"><strong>" .. html_escape(label) .. ":</strong> " ..
-        html_escape(msg.content) .. "</div>"
+    return "<div class=\"" .. css_class .. "\"><strong>" .. html.html_escape(label) .. ":</strong> " ..
+        html.html_escape(msg.content) .. "</div>"
 end
 
 function render_chat_sessions_list(sessions, current_session_id)
@@ -2568,7 +2568,7 @@ function render_chat_sessions_list(sessions, current_session_id)
             label = "Untitled chat"
         end
         items = items .. "<li" .. css_class .. "><a href=\"chat?session_id=" .. s.id .. "\">" ..
-            html_escape(label) .. "</a></li>"
+            html.html_escape(label) .. "</a></li>"
     end
     if items == "" then
         return "<p class=\"fossci-empty\">No chats yet.</p>"
@@ -2587,7 +2587,7 @@ function render_chat_pending(pending, csrf_token)
     end
     args_lines = ""
     for k, v in pairs(args) do
-        args_lines = args_lines .. "<div>" .. html_escape(tostring(k)) .. " = " .. html_escape(tostring(v)) .. "</div>"
+        args_lines = args_lines .. "<div>" .. html.html_escape(tostring(k)) .. " = " .. html.html_escape(tostring(v)) .. "</div>"
     end
 
     return string.format("""
@@ -2607,9 +2607,9 @@ function render_chat_pending(pending, csrf_token)
             <button type="submit" class="btn btn-secondary">Deny</button>
         </form>
     </div>
-""", html_escape(pending.tool), html_escape(pending.method), args_lines,
-     html_escape(csrf_token), tostring(pending.id), html_escape(pending.session_id),
-     html_escape(csrf_token), tostring(pending.id), html_escape(pending.session_id))
+""", html.html_escape(pending.tool), html.html_escape(pending.method), args_lines,
+     html.html_escape(csrf_token), tostring(pending.id), html.html_escape(pending.session_id),
+     html.html_escape(csrf_token), tostring(pending.id), html.html_escape(pending.session_id))
 end
 
 function html.render_chat(sessions, session, messages, pending, csrf_token, nonce)
@@ -2640,7 +2640,7 @@ function html.render_chat(sessions, session, messages, pending, csrf_token, nonc
             <input type="text" name="message" placeholder="Ask something, or ask the assistant to search or create a page..." required autofocus>
             <button type="submit" class="btn btn-primary">Send</button>
         </form>
-""", html_escape(csrf_token), html_escape(session.id))
+""", html.html_escape(csrf_token), html.html_escape(session.id))
         end
 
         main_html = "<div class=\"fossci-chat-messages\">" .. messages_html .. "</div>" .. input_html
@@ -2687,7 +2687,7 @@ function html.render_chat(sessions, session, messages, pending, csrf_token, nonc
         </div>
     </div>
 </div>
-""", fossci_container_css(1200), fossci_button_css(), html_escape(csrf_token), sessions_html, main_html)
+""", fossci_container_css(1200), fossci_button_css(), html.html_escape(csrf_token), sessions_html, main_html)
 end
 
 --------------------------------------------------------------------------
