@@ -528,6 +528,12 @@ function agent.run_turn(db_path, session_id, login, system_prompt, model, user_m
 
         result, err = agent_provider.generate(model, system_prompt, prompt)
         if result == nil then
+            -- Persisted, not just returned -- every run_turn call site
+            -- (chat-message, chat-widget-send/approve/deny) previously
+            -- discarded this return value entirely, so a provider
+            -- failure was completely invisible: the turn just vanished
+            -- with no trace in the transcript.
+            agent.add_message(db_path, session_id, "tool_result", "ERROR: " .. tostring(err), true)
             return {status = "error", message = tostring(err)}
         end
 

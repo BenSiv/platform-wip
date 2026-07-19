@@ -2753,13 +2753,34 @@ function fossci_chat_widget_css()
     background: var(--fossci-bg, #ffffff); border: 1px solid var(--fossci-border, #e2e8f0);
     border-radius: var(--fossci-radius-md, 12px); box-shadow: 0 10px 30px rgba(0,0,0,0.2);
     display: none; flex-direction: column; overflow: hidden;
-    resize: both;
 }
 .fossci-chat-widget.fossci-chat-widget-open .fossci-chat-widget-panel { display: flex; }
+/* Native CSS `resize: both` always draws its drag handle at the
+   element's own bottom-right corner -- wrong here, since this panel
+   is anchored bottom-right (right:0; bottom:64px) and grows up and to
+   the left, which puts the free/grabbable corner at the TOP-left, not
+   the bottom-right (which sits jammed against the toggle button and
+   screen edge). `resize` has no way to relocate its handle to another
+   corner, so this is a small custom drag handle + JS instead. */
+.fossci-chat-widget-resize-handle {
+    position: absolute; top: 0; left: 0; width: 16px; height: 16px;
+    cursor: nwse-resize; z-index: 1;
+}
+.fossci-chat-widget-resize-handle::before {
+    content: ""; position: absolute; top: 5px; left: 5px; width: 7px; height: 7px;
+    border-top: 2px solid var(--fossci-border-2, #cbd5e1);
+    border-left: 2px solid var(--fossci-border-2, #cbd5e1);
+}
 .fossci-chat-widget-header {
     padding: 12px 14px; border-bottom: 1px solid var(--fossci-border, #e2e8f0);
     font-weight: 700; color: var(--fossci-heading, #0f172a); font-size: 0.95rem;
+    display: flex; align-items: center; justify-content: space-between;
 }
+.fossci-chat-widget-new {
+    background: none; border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-sm, 8px);
+    color: var(--fossci-accent, #4f46e5); font-size: 0.75rem; font-weight: 600; padding: 3px 8px; cursor: pointer;
+}
+.fossci-chat-widget-new:hover { background: var(--fossci-bg-2, #f1f5f9); }
 .fossci-chat-widget-messages { flex: 1; overflow-y: auto; padding: 10px; }
 .fossci-chat-widget-messages .fossci-chat-msg { font-size: 0.85rem; }
 .fossci-chat-widget-input {
@@ -2778,7 +2799,8 @@ function html.render_chat_widget(nonce)
     return string.format("""
 <div class="fossci-chat-widget" id="fossci-chat-widget">
     <div class="fossci-chat-widget-panel">
-        <div class="fossci-chat-widget-header">Chat</div>
+        <div class="fossci-chat-widget-resize-handle" id="fossci-chat-widget-resize-handle"></div>
+        <div class="fossci-chat-widget-header">Chat<button type="button" class="fossci-chat-widget-new" id="fossci-chat-widget-new" title="Start a new chat">+ New</button></div>
         <div class="fossci-chat-widget-messages" id="fossci-chat-widget-messages">
             <p class="fossci-chat-widget-empty">Ask something, or ask the assistant to search or create a page...</p>
         </div>
@@ -2877,9 +2899,37 @@ function html.render_chat_widget(nonce)
         }).observe(panel);
     }
 
+    var resizeHandle = document.getElementById('fossci-chat-widget-resize-handle');
+    resizeHandle.addEventListener('mousedown', function(e){
+        e.preventDefault();
+        var startX = e.clientX, startY = e.clientY;
+        var startWidth = panel.offsetWidth, startHeight = panel.offsetHeight;
+        function onMove(moveEvent) {
+            // The handle sits at the panel's top-left corner, the
+            // corner that's free to move (bottom-right is pinned via
+            // the panel's own right:0; bottom:64px anchoring) -- so
+            // dragging up-left (negative delta) grows the panel,
+            // dragging down-right shrinks it. CSS min/max-width/height
+            // on the panel itself still clamp the result.
+            panel.style.width = (startWidth - (moveEvent.clientX - startX)) + 'px';
+            panel.style.height = (startHeight - (moveEvent.clientY - startY)) + 'px';
+        }
+        function onUp() {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+        }
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+    });
+
     toggle.addEventListener('click', function(){
         var isOpen = root.classList.toggle('fossci-chat-widget-open');
         localStorage.setItem(OPEN_KEY, isOpen ? '1' : '0');
+    });
+
+    document.getElementById('fossci-chat-widget-new').addEventListener('click', function(){
+        localStorage.removeItem(STORAGE_KEY);
+        render(null);
     });
 
     function showThinking() {
