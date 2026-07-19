@@ -1543,9 +1543,16 @@ end
 -- Unauthenticated -- no popover/autocomplete JS needed, so unlike
 -- every other render_* page here, no nonce-gated <script> at all.
 function html.render_login(error_message, nonce)
+    -- render.lua demo: autoescapes error_message by construction rather
+    -- than relying on remembering to call html.html_escape here.
+    render_lib = require("render")
+
     error_html = ""
     if error_message != nil and error_message != "" then
-        error_html = "<div class=\"fossci-login-error\">" .. html.html_escape(error_message) .. "</div>"
+        error_html = render_lib.render(
+            "<div class=\"fossci-login-error\">{{ error_message }}</div>",
+            {error_message = error_message}
+        )
     end
 
     return string.format("""
