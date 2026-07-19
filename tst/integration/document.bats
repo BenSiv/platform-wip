@@ -68,9 +68,11 @@ raw_document_preview() {
     run get_route "/documents" ""
     [[ "$output" =~ "200 OK" ]]
     [[ "$output" =~ 'href="document?entity_id=1">Home' ]]
-    # Setup's <li> must be nested inside Guides' <li>, which is nested
-    # inside Home's -- not just present anywhere on the page.
-    [[ "$output" =~ 'Home</a><ul><li><a href="document?entity_id=2">Guides</a><ul><li><a href="document?entity_id=3">Setup' ]]
+    # Setup's <li> must be nested inside Guides' <details>, which is
+    # nested inside Home's -- not just present anywhere on the page.
+    # Collapsible <details>/<summary> nodes now, not a flat always-
+    # expanded <ul><li> -- see html.lua's render_document_tree_level.
+    [[ "$output" =~ 'Home</a></summary><ul><li><details><summary><a href="document?entity_id=2">Guides</a></summary><ul><li class="fossci-tree-leaf"><a href="document?entity_id=3">Setup' ]]
 }
 
 @test "/document shows breadcrumbs from root to self" {

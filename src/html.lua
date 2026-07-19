@@ -1982,20 +1982,39 @@ function build_document_tree_index(rows)
     return by_parent
 end
 
-function render_document_tree_level(by_parent, key)
+-- Renders one tree level as collapsible <details>/<summary> nodes --
+-- pure CSS/HTML (no JS, no CSP-nonce plumbing needed, see html.lua's
+-- own render() comment on why an inline <script> would need one).
+-- Previously always fully expanded, every level, in one shot -- fine
+-- for a handful of pages, unusable once real content brought hundreds
+-- of folders (confirmed against real production data: 376 folder
+-- nodes). depth 0 (top level) starts open so the overall shape is
+-- visible immediately; everything nested starts closed, since a
+-- fully-expanded deep tree is exactly the problem being fixed here.
+-- The link and the disclosure triangle are deliberately separate
+-- click targets -- summary normally toggles on any click inside it,
+-- but browsers let a nested <a>'s own click take over instead, so the
+-- title text still navigates rather than only expanding.
+function render_document_tree_level(by_parent, key, depth)
     children = by_parent[key]
     if children == nil then
         return ""
     end
     items = ""
     for _, row in ipairs(children) do
-        nested = render_document_tree_level(by_parent, tostring(tonumber(row.id)))
-        nested_html = ""
-        if nested != "" then
-            nested_html = "<ul>" .. nested .. "</ul>"
+        child_key = tostring(tonumber(row.id))
+        nested = render_document_tree_level(by_parent, child_key, depth + 1)
+        link = "<a href=\"document?entity_id=" .. tostring(row.id) .. "\">" .. html_escape(row.title) .. "</a>"
+        if nested == "" then
+            items = items .. "<li class=\"fossci-tree-leaf\">" .. link .. "</li>"
+        else
+            open_attr = ""
+            if depth < 1 then
+                open_attr = " open"
+            end
+            items = items .. "<li><details" .. open_attr .. "><summary>" .. link .. "</summary><ul>" ..
+                nested .. "</ul></details></li>"
         end
-        items = items .. "<li><a href=\"document?entity_id=" .. tostring(row.id) .. "\">" ..
-            html_escape(row.title) .. "</a>" .. nested_html .. "</li>"
     end
     return items
 end
@@ -2027,7 +2046,7 @@ end
 -- passes the answer in.
 function html.render_document_tree(rows, can_create, nonce)
     by_parent = build_document_tree_index(rows)
-    tree_items = render_document_tree_level(by_parent, "root")
+    tree_items = render_document_tree_level(by_parent, "root", 0)
     tree_html = "<ul class=\"fossci-document-tree\">" .. tree_items .. "</ul>"
     if tree_items == "" then
         tree_html = "<p class=\"fossci-empty\">No pages yet.</p>"
@@ -2047,9 +2066,17 @@ function html.render_document_tree(rows, can_create, nonce)
         .fossci-header h2 { margin: 0 0 6px 0; font-size: 1.6rem; font-weight: 700; color: var(--fossci-heading, #0f172a); letter-spacing: -0.02em; }
         .fossci-document-tree, .fossci-document-tree ul { list-style: none !important; margin: 0; padding-left: 20px; }
         .fossci-document-tree { padding-left: 0; }
-        .fossci-document-tree li { margin: 6px 0; }
+        .fossci-document-tree li { margin: 4px 0; }
         .fossci-document-tree a { color: var(--fossci-accent, #4f46e5); text-decoration: none; font-weight: 600; }
         .fossci-document-tree a:hover { text-decoration: underline; }
+        .fossci-document-tree details > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 4px; padding: 2px 0; }
+        .fossci-document-tree details > summary::-webkit-details-marker { display: none; }
+        .fossci-document-tree details > summary::before {
+            content: "▸"; display: inline-block; color: var(--fossci-muted, #94a3b8);
+            font-size: 0.75rem; width: 12px; transition: transform 0.15s ease;
+        }
+        .fossci-document-tree details[open] > summary::before { transform: rotate(90deg); }
+        .fossci-tree-leaf { padding: 2px 0 2px 16px; }
     </style>
     <div class="fossci-container">
         <div class="fossci-header">
