@@ -245,7 +245,6 @@ THEME_COLOR_KEYS = {
 -- icon set (house/document/book/database/checkmark/gear), which lived
 -- fine as generic iconography rather than anything Celleste-specific.
 ICON_HOME = "<svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M3 11l9-8 9 8\"/><path d=\"M5 10v10a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V10\"/></svg>"
-ICON_NEW_PAGE = "<svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z\"/><path d=\"M13 2v7h7\"/><path d=\"M12 12v6M9 15h6\"/></svg>"
 ICON_NOTEBOOK = "<svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M4 5a2 2 0 0 1 2-2h5v18H6a2 2 0 0 1-2-2V5z\"/><path d=\"M20 5a2 2 0 0 0-2-2h-5v18h5a2 2 0 0 0 2-2V5z\"/></svg>"
 ICON_DATA = "<svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><ellipse cx=\"12\" cy=\"5\" rx=\"8\" ry=\"3\"/><path d=\"M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5\"/><path d=\"M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6\"/></svg>"
 ICON_TASKS = "<svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M9 11l3 3L22 4\"/><path d=\"M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11\"/></svg>"
@@ -272,18 +271,30 @@ function html.page_shell(title, active, body, nonce, show_sql, show_admin, theme
         root_css = ":root { " .. table.concat(root_vars, " ") .. " }"
     end
 
-    -- Icon-rail order: Home, New Page, Notebook, Data, Tasks, (System
-    -- if Setup/Admin) -- matches this deployment's own earlier design.
-    -- Chat has no rail icon of its own; it's the floating widget below.
+    -- Icon-rail order: Home, Notebook, Data, Tasks, (System if Setup/
+    -- Admin). No separate New Page icon -- the Notebook page's own
+    -- "+ New page" button already covers that entry point. Chat has no
+    -- rail icon of its own either; it's the floating widget below.
     nav_items = {
         {key = "home", href = "/", label = "Home", icon = ICON_HOME},
-        {key = "new-page", href = "document-edit", label = "New Page", icon = ICON_NEW_PAGE},
         {key = "documents", href = "documents", label = "Notebook", icon = ICON_NOTEBOOK},
         {key = "data", href = "data", label = "Data", icon = ICON_DATA},
         {key = "tasks", href = "view?view_name=prioritized_tasks", label = "Tasks", icon = ICON_TASKS},
     }
     if show_sql or show_admin then
         table.insert(nav_items, {key = "system", href = "system", label = "System", icon = ICON_SYSTEM})
+    end
+
+    -- Only rendered when the deployment's own theme.json sets
+    -- has_logo = true (a real logo.png is seeded at theme-assets/) --
+    -- generic/unconfigured deployments get no logo slot at all rather
+    -- than a broken-image icon.
+    brand_html = ""
+    if theme.has_logo == true then
+        brand_html = string.format(
+            '<a class="fossci-nav-brand" href="/" title="%s"><img src="theme-asset?name=logo.png" alt="%s"></a>',
+            html.html_escape(theme.site_name), html.html_escape(theme.site_name)
+        )
     end
 
     nav_links = {}
@@ -314,6 +325,7 @@ function html.page_shell(title, active, body, nonce, show_sql, show_admin, theme
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>%s</title>
+<link rel="icon" type="image/png" href="theme-asset?name=favicon.png">
 <style>
 %s
 * { box-sizing: border-box; }
@@ -384,12 +396,15 @@ body {
 }
 .fossci-nav-user a { font-size: 0.75rem; color: var(--fossci-accent, #4f46e5); text-decoration: none; font-weight: 600; }
 .fossci-nav-user a:hover { text-decoration: underline; }
+.fossci-nav-brand { display: block; padding: 4px; margin-bottom: 8px; text-align: center; }
+.fossci-nav-brand img { width: 100%%; max-width: 40px; height: auto; display: block; margin: 0 auto; }
 .fossci-main { flex: 1; min-width: 0; }
 %s
 </style>
 </head>
 <body>
 <nav class="fossci-nav">
+%s
 %s
 <div class="fossci-nav-spacer"></div>
 %s
@@ -400,7 +415,7 @@ body {
 %s
 </body>
 </html>
-""", html.html_escape(title), root_css, fossci_chat_widget_css(), table.concat(nav_links, ""), user_box, body,
+""", html.html_escape(title), root_css, fossci_chat_widget_css(), brand_html, table.concat(nav_links, ""), user_box, body,
      html.render_chat_widget(nonce))
 end
 
@@ -1982,12 +1997,26 @@ end
 -- the query is a normal, bookmarkable/shareable URL. `column_names`/
 -- `rows` are nil until a query has been run; `err` is set instead if
 -- it failed (not select-only, invalid sql, etc.).
-function html.render_sql(db_path, sql_text, column_names, rows, err, ref_columns, nonce)
+function html.render_sql(db_path, sql_text, column_names, rows, err, ref_columns, nonce, embed)
     if ref_columns == nil then
         ref_columns = {}
     end
     if nonce == nil then
         nonce = ""
+    end
+    -- /data's own SQL widget renders this page inside a same-origin
+    -- iframe (see render_index's fossci-sql-widget) -- the .fossci-
+    -- container "card" look (padding/shadow/border/radius) is right
+    -- for a standalone page, but reads as a window nested inside a
+    -- window once it's already sitting inside that iframe's own
+    -- bordered box. cgi.lua knows server-side that this is the
+    -- embedded case (its own ?embed=1), so this flattens the card
+    -- directly rather than needing a client-side "am I in an iframe"
+    -- detection script the way a skin with no such server-side signal
+    -- would have to.
+    embed_css = ""
+    if embed == true then
+        embed_css = ".fossci-container { padding: 0; margin: 0; max-width: none; box-shadow: none; border: none; border-radius: 0; }"
     end
     sql_text_or_empty = sql_text
     if sql_text_or_empty == nil then
@@ -2088,6 +2117,7 @@ function html.render_sql(db_path, sql_text, column_names, rows, err, ref_columns
             font-size: 0.9rem;
         }
         .fossci-nlsql-status { font-size: 0.8rem; color: var(--fossci-muted, #64748b); white-space: nowrap; }
+        %s
     </style>
     %s
     <div class="fossci-container">
@@ -2108,7 +2138,7 @@ function html.render_sql(db_path, sql_text, column_names, rows, err, ref_columns
     </div>
 </div>
 %s
-""", fossci_container_css(1100), fossci_button_css(), html.popover_css(), escaped_sql, result_html, html.popover_js(nonce))
+""", fossci_container_css(1100), fossci_button_css(), html.popover_css(), embed_css, escaped_sql, result_html, html.popover_js(nonce))
 end
 
 --------------------------------------------------------------------------

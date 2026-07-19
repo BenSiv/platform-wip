@@ -107,6 +107,16 @@ function config.theme_path(root)
     return paths.joinpath(root, THEME_FILE)
 end
 
+-- Optional binary assets (favicon/logo) a deployment's theme.json can
+-- reference -- same "generic hook, real files seeded by whoever wants
+-- them" split as theme.json itself.
+function config.theme_assets_dir(root)
+    if root == nil then
+        root = config.find_root()
+    end
+    return paths.joinpath(root, "theme-assets")
+end
+
 -- Deliberately generic here: platform itself ships no brand identity,
 -- just a hook. A deployment that wants one drops an optional
 -- theme.json at the store root (e.g. seeded by its own deploy tooling,
@@ -115,7 +125,7 @@ end
 -- <fallback>) defaults (its current indigo/slate palette) untouched.
 -- site_name similarly defaults to a generic label, never a company name.
 function config.load_theme(root)
-    theme = {site_name = "Platform", colors = {}}
+    theme = {site_name = "Platform", colors = {}, has_logo = false}
     path = config.theme_path(root)
     file = io.open(path, "r")
     if file == nil then
@@ -142,6 +152,9 @@ function config.load_theme(root)
 
     if type(parsed.site_name) == "string" and parsed.site_name != "" then
         theme.site_name = parsed.site_name
+    end
+    if parsed.has_logo == true then
+        theme.has_logo = true
     end
     if type(parsed.colors) == "table" then
         for _, key in ipairs(THEME_COLOR_KEYS) do

@@ -406,6 +406,26 @@ function cgi.handle_request()
 
     nonce = auth.generate_nonce()
 
+    -- No auth required -- browsers request the favicon (and page_shell
+    -- requests the sidebar logo) on every page load, including /login,
+    -- before any session exists. `name` is checked against a fixed
+    -- allowlist, not used to build the path directly, so this can't be
+    -- turned into a path-traversal read of arbitrary files on disk.
+    if path_info == "/theme-asset" then
+        allowed_names = {["favicon.png"] = true, ["logo.png"] = true}
+        if allowed_names[params.name] != true then
+            return print_response("404 Not Found", "text/plain", "")
+        end
+        asset_path = paths.joinpath(config.theme_assets_dir(root), params.name)
+        asset_file = io.open(asset_path, "rb")
+        if asset_file == nil then
+            return print_response("404 Not Found", "text/plain", "")
+        end
+        asset_bytes = io.read(asset_file, "*all")
+        io.close(asset_file)
+        return print_response("200 OK", "image/png", asset_bytes, {"Cache-Control: public, max-age=86400"})
+    end
+
     if path_info == "/login" then
         return handle_login(root, db_path, method, nonce)
     end
@@ -716,7 +736,7 @@ function cgi.handle_request()
                 ref_columns["id"] = from_table
             end
         end
-        body = html.render_sql(db_path, sql_text, column_names, rows, sql_err, ref_columns, nonce)
+        body = html.render_sql(db_path, sql_text, column_names, rows, sql_err, ref_columns, nonce, params.embed == "1")
         -- ?embed=1 is the home page's own SQL widget iframe (see
         -- render_index) -- it's already inside a page shell, so
         -- nesting a second full <html>/<nav> shell inside a 520px
