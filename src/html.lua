@@ -218,6 +218,130 @@ function html.popover_js(nonce)
 """, nonce)
 end
 
+-- The CSS custom-property names a theme may override, in a fixed
+-- display order -- matches config.lua's own THEME_COLOR_KEYS exactly.
+THEME_COLOR_KEYS = {
+    "accent", "accent_2", "bg", "bg_2", "border", "border_2",
+    "heading", "input_text", "muted", "muted_2", "text", "th_text",
+}
+
+-- Wraps a rendered page body in the outer HTML document (<!doctype>,
+-- <head>, top nav) that nothing in this codebase supplies on its own --
+-- every render_* function below returns a bare content fragment (the
+-- "fossil-doc"/data-title convention, a leftover from once being
+-- embedded inside a Fossil skin that supplied the real shell and read
+-- data-title for its own <title>). Now that platform is served
+-- standalone, something has to supply that shell -- this is it, called
+-- once per request from cgi.lua rather than duplicated into every
+-- render_* call site.
+--
+-- theme is config.load_theme(root)'s return value: {site_name=...,
+-- colors={...}}. This is deliberately the *only* place branding enters
+-- a page -- platform itself ships no colors or company name of its
+-- own beyond the existing var(--fossci-*, <fallback>) defaults already
+-- used throughout this file, which are left completely untouched when
+-- theme.colors is empty (the out-of-the-box, unconfigured case).
+function html.page_shell(title, active, body, nonce, show_sql, show_admin, theme)
+    if theme == nil then
+        theme = {site_name = "Platform", colors = {}}
+    end
+
+    root_vars = {}
+    for _, key in ipairs(THEME_COLOR_KEYS) do
+        value = theme.colors[key]
+        if value != nil then
+            css_name = string.gsub(key, "_", "-")
+            table.insert(root_vars, "--fossci-" .. css_name .. ": " .. value .. ";")
+        end
+    end
+    root_css = ""
+    if #root_vars > 0 then
+        root_css = ":root { " .. table.concat(root_vars, " ") .. " }"
+    end
+
+    nav_items = {
+        {key = "home", href = "/", label = "Data"},
+        {key = "documents", href = "documents", label = "Pages"},
+        {key = "chat", href = "chat", label = "Chat"},
+        {key = "templates", href = "templates", label = "Templates"},
+    }
+    if show_sql then
+        table.insert(nav_items, {key = "sql", href = "sql", label = "SQL"})
+    end
+    if show_admin then
+        table.insert(nav_items, {key = "admin-users", href = "admin-users", label = "Users"})
+    end
+
+    nav_links = {}
+    for _, item in ipairs(nav_items) do
+        link_class = "fossci-nav-link"
+        if item.key == active then
+            link_class = link_class .. " fossci-nav-link-active"
+        end
+        table.insert(nav_links, string.format(
+            '<a class="%s" href="%s">%s</a>', link_class, item.href, html_escape(item.label)
+        ))
+    end
+
+    return string.format("""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>%s</title>
+<style>
+%s
+* { box-sizing: border-box; }
+body {
+    margin: 0;
+    font-family: 'Outfit', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--fossci-bg-2, #f1f5f9);
+}
+.fossci-nav {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0 20px;
+    height: 56px;
+    background: var(--fossci-bg, #ffffff);
+    border-bottom: 1px solid var(--fossci-border, #e2e8f0);
+}
+.fossci-nav-brand {
+    font-weight: 700;
+    font-size: 1.1rem;
+    color: var(--fossci-heading, #0f172a);
+    margin-right: 20px;
+    text-decoration: none;
+    white-space: nowrap;
+}
+.fossci-nav-links { display: flex; gap: 4px; flex-wrap: wrap; }
+.fossci-nav-link {
+    padding: 8px 14px;
+    border-radius: var(--fossci-radius-sm, 8px);
+    color: var(--fossci-th-text, #475569);
+    text-decoration: none;
+    font-size: 0.92rem;
+    font-weight: 500;
+    transition: var(--fossci-transition, all 0.15s ease);
+}
+.fossci-nav-link:hover { background: var(--fossci-bg-2, #f1f5f9); color: var(--fossci-heading, #0f172a); }
+.fossci-nav-link-active { background: var(--fossci-bg-2, #f1f5f9); color: var(--fossci-accent, #4f46e5); }
+.fossci-nav-spacer { flex: 1; }
+</style>
+</head>
+<body>
+<nav class="fossci-nav">
+<a class="fossci-nav-brand" href="/">%s</a>
+<div class="fossci-nav-links">%s</div>
+<div class="fossci-nav-spacer"></div>
+<a class="fossci-nav-link" href="logout">Log out</a>
+</nav>
+%s
+</body>
+</html>
+""", html_escape(title), root_css, html_escape(theme.site_name), table.concat(nav_links, ""), body)
+end
+
 -- `nonce` must be Fossil's own per-request CSP nonce (the FOSSIL_NONCE
 -- CGI env var Fossil already injects, see doc/architecture.md) --
 -- Fossil's page wrapper sets a strict `script-src 'self' 'nonce-...'`

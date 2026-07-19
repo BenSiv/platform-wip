@@ -358,6 +358,7 @@ function cgi.handle_request()
 
     root = config.find_root()
     db_path = config.db_path(root)
+    theme = config.load_theme(root)
 
     -- Auto-initialize or sync database schemas on request. Directory
     -- creation is naturally tied to "does this deployment look
@@ -411,6 +412,8 @@ function cgi.handle_request()
 
     capabilities = user.cap
     author = user.login
+    show_sql_nav = cgi.has_capability(capabilities, "s") or cgi.has_capability(capabilities, "a")
+    show_admin_nav = cgi.has_capability(capabilities, "a")
 
     if path_info == "/logout" then
         return print_response("302 Found", "text/plain", "", {
@@ -441,7 +444,8 @@ function cgi.handle_request()
         layout_json = json.encode(layout)
 
         body = html.render(entity_type, layout_json, nonce)
-        return print_response("200 OK", "text/html", body)
+        return print_response("200 OK", "text/html",
+            html.page_shell(entity_type .. " · Register", "home", body, nonce, show_sql_nav, show_admin_nav, theme))
     end
 
     if path_info == "/browse" then
@@ -466,7 +470,8 @@ function cgi.handle_request()
         offset = (page - 1) * BROWSE_PAGE_SIZE
         rows = entity.list(db_path, entity_type, BROWSE_PAGE_SIZE, offset)
         body = html.render_browse(db_path, entity_type, layout, rows, page, BROWSE_PAGE_SIZE, total, nonce)
-        return print_response("200 OK", "text/html", body)
+        return print_response("200 OK", "text/html",
+            html.page_shell(entity_type .. " · Browse", "home", body, nonce, show_sql_nav, show_admin_nav, theme))
     end
 
     if path_info == "/" or path_info == "" then
@@ -483,7 +488,8 @@ function cgi.handle_request()
         edges = schema.relationships(db_path)
         show_sql_widget = cgi.has_capability(capabilities, "s") or cgi.has_capability(capabilities, "a")
         body = html.render_index(entity_types, edges, show_sql_widget, nonce)
-        return print_response("200 OK", "text/html", body)
+        return print_response("200 OK", "text/html",
+            html.page_shell(theme.site_name, "home", body, nonce, show_sql_nav, show_admin_nav, theme))
     end
 
     if path_info == "/detail" then
@@ -508,7 +514,8 @@ function cgi.handle_request()
 
         history = ledger.history(db_path, entity_id)
         body = html.render_detail(db_path, entity_type, layout, row, history, nonce)
-        return print_response("200 OK", "text/html", body)
+        return print_response("200 OK", "text/html",
+            html.page_shell(entity_type .. " #" .. tostring(entity_id), "home", body, nonce, show_sql_nav, show_admin_nav, theme))
     end
 
     if path_info == "/view" then
@@ -536,7 +543,8 @@ function cgi.handle_request()
             return print_response("500 Internal Server Error", "text/html", "<h3>Error: " .. tostring(err) .. "</h3>")
         end
         body = html.render_view(view_def, rows, param_value)
-        return print_response("200 OK", "text/html", body)
+        return print_response("200 OK", "text/html",
+            html.page_shell(view_name, "home", body, nonce, show_sql_nav, show_admin_nav, theme))
     end
 
     -- Documents (src/document.lua): a real parent_id tree, not a
@@ -551,7 +559,8 @@ function cgi.handle_request()
     if path_info == "/documents" then
         rows = document.all_active(db_path)
         body = html.render_document_tree(rows, true, nonce)
-        return print_response("200 OK", "text/html", body)
+        return print_response("200 OK", "text/html",
+            html.page_shell("Pages", "documents", body, nonce, show_sql_nav, show_admin_nav, theme))
     end
 
     if path_info == "/document" then
@@ -568,7 +577,8 @@ function cgi.handle_request()
         children = document.children(db_path, entity_id)
         backlinks = document.backlinks(db_path, entity_id)
         body = html.render_document(doc, rendered_html, breadcrumbs, children, backlinks, true, nonce)
-        return print_response("200 OK", "text/html", body)
+        return print_response("200 OK", "text/html",
+            html.page_shell(doc.title, "documents", body, nonce, show_sql_nav, show_admin_nav, theme))
     end
 
     if path_info == "/document-edit" then
@@ -586,7 +596,8 @@ function cgi.handle_request()
         end
         parent_options_html = html.document_parent_options(document.all_active(db_path), parent_id, entity_id)
         body = html.render_document_edit(doc, parent_options_html, default_value(cookies.csrf, ""), nil, nonce)
-        return print_response("200 OK", "text/html", body)
+        return print_response("200 OK", "text/html",
+            html.page_shell("Edit page", "documents", body, nonce, show_sql_nav, show_admin_nav, theme))
     end
 
     if path_info == "/document-save" and method == "POST" then
@@ -606,7 +617,8 @@ function cgi.handle_request()
             parent_options_html = html.document_parent_options(document.all_active(db_path), parent_id, entity_id)
             body = html.render_document_edit(doc, parent_options_html, default_value(cookies.csrf, ""),
                 "Can't move a page underneath its own sub-page.", nonce)
-            return print_response("200 OK", "text/html", body)
+            return print_response("200 OK", "text/html",
+                html.page_shell("Edit page", "documents", body, nonce, show_sql_nav, show_admin_nav, theme))
         end
 
         saved_id = nil
@@ -627,7 +639,8 @@ function cgi.handle_request()
             parent_options_html = html.document_parent_options(document.all_active(db_path), parent_id, entity_id)
             body = html.render_document_edit(doc, parent_options_html, default_value(cookies.csrf, ""),
                 issues_to_message(issues), nonce)
-            return print_response("200 OK", "text/html", body)
+            return print_response("200 OK", "text/html",
+                html.page_shell("Edit page", "documents", body, nonce, show_sql_nav, show_admin_nav, theme))
         end
 
         return print_response("302 Found", "text/plain", "", {"Location: document?entity_id=" .. tostring(saved_id)})
@@ -658,7 +671,8 @@ function cgi.handle_request()
             end
         end
         body = html.render_sql(db_path, sql_text, column_names, rows, sql_err, ref_columns, nonce)
-        return print_response("200 OK", "text/html", body)
+        return print_response("200 OK", "text/html",
+            html.page_shell("SQL", "sql", body, nonce, show_sql_nav, show_admin_nav, theme))
     end
 
     if path_info == "/admin-users" then
@@ -667,7 +681,8 @@ function cgi.handle_request()
         end
         users = auth.list_users(db_path, true)
         body = html.render_admin_users(users, default_value(cookies.csrf, ""), nil, false)
-        return print_response("200 OK", "text/html", body)
+        return print_response("200 OK", "text/html",
+            html.page_shell("Users", "admin-users", body, nonce, show_sql_nav, show_admin_nav, theme))
     end
 
     -- Flat, single-segment names (not "/admin/users/create" etc) --
@@ -693,7 +708,8 @@ function cgi.handle_request()
         if not require_csrf(cookies, form.csrf_token) then
             users = auth.list_users(db_path, true)
             body = html.render_admin_users(users, default_value(cookies.csrf, ""), "CSRF check failed.", true)
-            return print_response("403 Forbidden", "text/html", body)
+            return print_response("403 Forbidden", "text/html",
+                html.page_shell("Users", "admin-users", body, nonce, show_sql_nav, show_admin_nav, theme))
         end
 
         ok = nil
@@ -714,7 +730,8 @@ function cgi.handle_request()
         if ok == nil then
             users = auth.list_users(db_path, true)
             body = html.render_admin_users(users, default_value(cookies.csrf, ""), tostring(err), true)
-            return print_response("200 OK", "text/html", body)
+            return print_response("200 OK", "text/html",
+                html.page_shell("Users", "admin-users", body, nonce, show_sql_nav, show_admin_nav, theme))
         end
         return print_response("302 Found", "text/plain", "", {"Location: admin-users"})
     end
@@ -740,7 +757,8 @@ function cgi.handle_request()
             pending = agent.latest_pending(db_path, session_id)
         end
         body = html.render_chat(sessions, session, messages, pending, default_value(cookies.csrf, ""), nonce)
-        return print_response("200 OK", "text/html", body)
+        return print_response("200 OK", "text/html",
+            html.page_shell("Chat", "chat", body, nonce, show_sql_nav, show_admin_nav, theme))
     end
 
     if path_info == "/chat-start" and method == "POST" then
@@ -792,7 +810,8 @@ function cgi.handle_request()
     if path_info == "/templates" then
         templates_dir = config.templates_dir(root)
         body = html.render_templates_list(template.all(templates_dir))
-        return print_response("200 OK", "text/html", body)
+        return print_response("200 OK", "text/html",
+            html.page_shell("Templates", "templates", body, nonce, show_sql_nav, show_admin_nav, theme))
     end
 
     if path_info == "/template" then
@@ -809,7 +828,8 @@ function cgi.handle_request()
 
         rendered = template.render(template_def)
         body = html.render_template(template_def, rendered, nonce)
-        return print_response("200 OK", "text/html", body)
+        return print_response("200 OK", "text/html",
+            html.page_shell(template_name, "templates", body, nonce, show_sql_nav, show_admin_nav, theme))
     end
 
     if path_info == "/api/autocomplete" then

@@ -12,6 +12,18 @@
 -- now, matching the single-SQLite-file storage consolidation this
 -- migration is also doing.
 
+-- No `json = require("dkjson")` here, unlike most other modules in
+-- this codebase -- config.load_theme below is only ever reached via
+-- cgi.lua's own request handling, which already requires dkjson as
+-- `json` before dispatching to any handler; adding a second top-level
+-- require of the same module here (this file loads earlier in the
+-- build's bundle order than dkjson.lua itself) was confirmed, via a
+-- real failing test (tst/integration/entity.bats "ledger records full
+-- history"), to leave `json` broken for unrelated code later in the
+-- same process -- CLI invocations of `ledger history` decoded
+-- field_changes to nil instead of a table. Removing the duplicate
+-- require fixed it; config.lua has no JSON needs of its own that
+-- aren't already covered by relying on the shared global.
 paths = require("paths")
 
 config = {}
@@ -19,6 +31,16 @@ config = {}
 STORE_DIR = ".store"
 DB_FILE = "store.db"
 SESSION_SECRET_FILE = "session_secret"
+THEME_FILE = "theme.json"
+
+-- The CSS custom-property names a theme.json may override -- matches
+-- html.lua's own var(--fossci-*, <fallback>) usage sites exactly, so a
+-- deployment can only override colors/tokens the app already exposes
+-- as a hook, never introduce a new one by typo.
+THEME_COLOR_KEYS = {
+    "accent", "accent_2", "bg", "bg_2", "border", "border_2",
+    "heading", "input_text", "muted", "muted_2", "text", "th_text",
+}
 
 function config.find_root()
     root = os.getenv("DOCUMENT_ROOT")
@@ -76,6 +98,60 @@ end
 
 function config.is_initialized(root)
     return paths.file_exists(config.db_path(root))
+end
+
+function config.theme_path(root)
+    if root == nil then
+        root = config.find_root()
+    end
+    return paths.joinpath(root, THEME_FILE)
+end
+
+-- Deliberately generic here: platform itself ships no brand identity,
+-- just a hook. A deployment that wants one drops an optional
+-- theme.json at the store root (e.g. seeded by its own deploy tooling,
+-- outside this repo) -- absent or malformed, every value below falls
+-- back to nil, which leaves html.lua's existing var(--fossci-*,
+-- <fallback>) defaults (its current indigo/slate palette) untouched.
+-- site_name similarly defaults to a generic label, never a company name.
+function config.load_theme(root)
+    theme = {site_name = "Platform", colors = {}}
+    path = config.theme_path(root)
+    file = io.open(path, "r")
+    if file == nil then
+        return theme
+    end
+    contents = io.read(file, "*all")
+    io.close(file)
+
+    -- Required here, not at module top level -- matches html.lua/
+    -- schema.lua/agent.lua's own per-function require("dkjson") calls
+    -- rather than ledger.lua/cgi.lua's top-level ones. A top-level
+    -- `json = require("dkjson")` added here once broke an unrelated
+    -- CLI code path (tst/integration/entity.bats "ledger records full
+    -- history" started failing: field_changes decoded to nil) --
+    -- this file loads earlier than dkjson.lua in the build's bundle
+    -- order, and re-requiring it there evidently isn't safe the way
+    -- it is inside a function called well after the whole bundle has
+    -- finished loading.
+    json = require("dkjson")
+    parsed, _, err = json.decode(contents)
+    if err != nil or type(parsed) != "table" then
+        return theme
+    end
+
+    if type(parsed.site_name) == "string" and parsed.site_name != "" then
+        theme.site_name = parsed.site_name
+    end
+    if type(parsed.colors) == "table" then
+        for _, key in ipairs(THEME_COLOR_KEYS) do
+            value = parsed.colors[key]
+            if type(value) == "string" and value != "" then
+                theme.colors[key] = value
+            end
+        end
+    end
+    return theme
 end
 
 return config
