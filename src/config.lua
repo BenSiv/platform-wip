@@ -57,7 +57,55 @@ function config.store_dir(root)
     return paths.joinpath(root, STORE_DIR)
 end
 
+-- "sqlite" (default) or "mariadb" -- see doc/mariadb-migration.md.
+-- Read fresh on every call rather than cached: cheap (one os.getenv),
+-- and CGI-per-request means each process only ever asks once anyway,
+-- so there's no real cost to keeping this stateless like every other
+-- config.* resolver here.
+function config.db_backend()
+    backend = os.getenv("PLATFORM_DB_BACKEND")
+    if backend == "mariadb" then
+        return "mariadb"
+    end
+    return "sqlite"
+end
+
+-- Connection descriptor for the mariadb backend, resolved from env
+-- vars -- same convention as PLATFORM_VENDOR_DIR. host/port default to
+-- MariaDB's own usual localhost/3306; user/database have no sensible
+-- guess and are left nil if unset rather than silently defaulting to
+-- something that would connect to the wrong place.
+function config.mariadb_descriptor()
+    port = tonumber(os.getenv("PLATFORM_MARIADB_PORT"))
+    if port == nil then
+        port = 3306
+    end
+    host = os.getenv("PLATFORM_MARIADB_HOST")
+    if host == nil or host == "" then
+        host = "127.0.0.1"
+    end
+    password = os.getenv("PLATFORM_MARIADB_PASSWORD")
+    if password == nil then
+        password = ""
+    end
+    return {
+        host = host,
+        port = port,
+        user = os.getenv("PLATFORM_MARIADB_USER"),
+        password = password,
+        database = os.getenv("PLATFORM_MARIADB_DATABASE"),
+    }
+end
+
+-- Returns whatever db.lua's db_path parameter expects for the active
+-- backend: a SQLite file path (a string) or a MariaDB connection
+-- descriptor (a table) -- opaque to every caller either way, only
+-- db.lua itself ever inspects the shape (see that file's own header
+-- comment).
 function config.db_path(root)
+    if config.db_backend() == "mariadb" then
+        return config.mariadb_descriptor()
+    end
     return paths.joinpath(config.store_dir(root), DB_FILE)
 end
 
@@ -96,7 +144,24 @@ function config.session_secret_path(root)
     return paths.joinpath(config.store_dir(root), SESSION_SECRET_FILE)
 end
 
+-- "Initialized" means `platform init` has already created the schema --
+-- for sqlite that's a file-exists check; for mariadb there's no file to
+-- check, so this looks for entity_event (ledger.lua's own core table,
+-- always created first during init) existing in the target database
+-- instead. Requires "database" (the same luam module db.lua itself
+-- wraps) directly rather than requiring db.lua -- db.lua already
+-- requires config for nothing today and never should (see its own
+-- header comment on why dispatch is by db_path's shape, not a config
+-- lookup), so this file must not create that cycle from the other
+-- direction either.
 function config.is_initialized(root)
+    if config.db_backend() == "mariadb" then
+        database = require("database")
+        descriptor = config.mariadb_descriptor()
+        ok, rows = pcall(database.mariadb_query, descriptor,
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'entity_event';")
+        return ok == true and rows != nil
+    end
     return paths.file_exists(config.db_path(root))
 end
 

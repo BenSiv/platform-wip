@@ -13,12 +13,23 @@ agent = require("agent")
 
 init = {}
 
+-- config.db_path returns either a SQLite file path (a string) or a
+-- MariaDB connection descriptor (a table) -- this is the one place
+-- that needs a human-readable label for either shape, since ".." can't
+-- concatenate a table the way it can a path string.
+function describe_db_target(target)
+    if type(target) == "table" then
+        return target.host .. ":" .. tostring(target.port) .. "/" .. tostring(target.database)
+    end
+    return target
+end
+
 function init.do_init(cmd_args, root)
     if root == nil then
         root = "."
     end
     if config.is_initialized(root) then
-        print("Already initialized: " .. config.db_path(root))
+        print("Already initialized: " .. describe_db_target(config.db_path(root)))
         return
     end
 

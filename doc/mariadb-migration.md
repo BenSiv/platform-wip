@@ -179,15 +179,61 @@ exist for the MariaDB work (task #57 territory again).
   hasn't landed yet, this phase should include at least a
   request-scoped (not query-scoped) connection as a minimum bar.
 
-### Phase 2 -- platform-wip: `src/db.lua` adapter swap
-- `src/db.lua` gains a MariaDB-backed implementation behind the same
-  `db.query`/`db.exec`/`db.quote`/`db.literal`/`db.table_exists`/
-  `db.get_tables`/`db.get_columns` surface -- per the file's own design
-  intent, this should be the only platform-wip file whose *internals*
-  change; every caller elsewhere keeps calling the same functions.
-- Config: `config.lua` gains connection-config resolution (env vars,
-  matching the existing `PLATFORM_VENDOR_DIR`-style convention) instead
-  of `config.db_path`'s filesystem-path resolution.
+### Phase 2 -- platform-wip: `src/db.lua` adapter swap (DONE)
+
+- `src/db.lua` dispatches `db.query`/`db.exec`/`db.get_tables`/
+  `db.get_columns`/`db.table_exists` by `db_path`'s own shape
+  (`type(db_path) == "table"` -> MariaDB, a plain string -> SQLite) --
+  not a `config.db_backend()` lookup from inside this file, since
+  `config.lua` needing `db.lua`'s own bootstrap check (`is_initialized`)
+  would make that a circular require. Every caller elsewhere is
+  unaffected: `db_path` was already a fully opaque value threaded
+  through ~150 call sites; it just has two possible shapes now.
+- `db.quote`/`db.literal` stayed a **pure, backend-agnostic** function
+  (plain quote-doubling, no `db_path` parameter) rather than threading
+  `db_path` through their own ~65 call sites across 12 files. This only
+  works because every MariaDB connection now sets `NO_BACKSLASH_ESCAPES`
+  (see luam's `get_mariadb_connection`) -- without it, MariaDB's default
+  backslash-escaping and SQLite's complete lack of it are genuinely
+  different grammars, and quote-doubling alone would be safe from
+  injection but not from silent data corruption (a stored value
+  containing `\n` coming back as an actual newline). Verified directly
+  against a live server that a value containing a literal backslash
+  round-trips correctly with plain doubling once that flag is set.
+- `config.lua` gains `config.db_backend()` (`PLATFORM_DB_BACKEND` env
+  var, default `sqlite`) and `config.mariadb_descriptor()` (host/port/
+  user/password/database from `PLATFORM_MARIADB_*` env vars, matching
+  `PLATFORM_VENDOR_DIR`'s convention). `config.db_path(root)` returns
+  either shape depending on the active backend. `config.is_initialized`
+  and `init.lua`'s "already initialized" message needed their own
+  shape-awareness too (a file-exists check and a bare `..` string
+  concat both assumed `db_path` was always a string).
+- Hit one real, Luam-specific language quirk while writing this: a
+  variable assigned only inside an `if`/`else` branch and then read
+  after the block closes fails to compile ("variable ... is no longer
+  in scope") -- a real static-scoping check Luam's own compiler does
+  that vanilla Lua doesn't. Fixed by declaring the variable (a `query`
+  string, in this case) with a default value before the branch, only
+  conditionally overwriting it inside.
+
+**Verified directly** (no automated test added yet -- see below):
+against a real local MariaDB server, with a manually-created,
+already-MariaDB-compatible table (bypassing this codebase's own
+still-SQLite-dialect schema strings, which is exactly Phase 3's job,
+not Phase 2's): `db.exec`/`db.query` round-trip correctly with real
+`insert_id`/`affected` values; `db.quote`'s backslash-containing value
+round-trips exactly; `db.table_exists`/`db.get_tables`/`db.get_columns`
+all report correctly via `information_schema`. Separately confirmed
+that `platform init` against a MariaDB-configured store fails with a
+**real MariaDB syntax error** on the SQLite-dialect `CREATE TABLE`
+DDL (`AUTOINCREMENT`, `datetime('now','localtime')`) -- the expected,
+correct failure mode at this phase boundary, not a Phase 2 regression:
+it proves the connection/routing/error-propagation chain all work
+correctly end-to-end, and that Phase 3's dialect migration is a real
+precondition for `platform init` (and therefore any bats-level,
+full-CLI test) to succeed against MariaDB at all. Full automated
+integration coverage is deferred to Phase 3 landing for that reason,
+not skipped as an oversight.
 
 ### Phase 3 -- platform-wip: dialect migration
 - Mechanical DDL/query replacements per the table above, file by file
