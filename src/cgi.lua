@@ -10,6 +10,7 @@ json = require("dkjson")
 paths = require("paths")
 auth = require("auth")
 document = require("document")
+knowledge = require("knowledge")
 agent = require("agent")
 
 cgi = {}
@@ -397,6 +398,7 @@ function cgi.handle_request()
     ledger.init_schema(db_path)
     auth.init_schema(db_path)
     document.init_schema(db_path)
+    knowledge.init_schema(db_path)
     agent.init_schema(db_path)
     secret_ok, secret_err = auth.ensure_session_secret(root)
     if secret_ok == nil then

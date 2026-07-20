@@ -15,6 +15,7 @@ agent_provider = require("agent_provider")
 document = require("document")
 entity = require("entity")
 schema = require("schema")
+knowledge = require("knowledge")
 
 agent = {}
 
@@ -374,7 +375,7 @@ function agent.execute_tool(db_path, author, session_id, tool_name, method_name,
     source = {notebook_entry_id = "agent-session:" .. tostring(session_id)}
 
     if tool_name == "document" and method_name == "search" then
-        results = document.search(db_path, args.query, 5, true)
+        results = knowledge.search_and_log(db_path, args.query, 5, true, session_id)
         if #results == 0 then
             return "No matching pages found."
         end

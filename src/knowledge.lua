@@ -224,4 +224,203 @@ function knowledge.create_note(db_path, tier, title, body, source_type, source_i
     return tonumber(rows[1].id)
 end
 
+function knowledge.note_for_document(db_path, document_id)
+    rows = db.query(db_path, string.format(
+        "SELECT * FROM knowledge_note WHERE source_type = 'document' AND source_id = %d LIMIT 1;",
+        tonumber(document_id)
+    ))
+    if rows == nil or rows[1] == nil then
+        return nil
+    end
+    return rows[1]
+end
+
+--------------------------------------------------------------------------
+-- Retrieval logging
+--------------------------------------------------------------------------
+
+function knowledge.begin_retrieval(db_path, session_id, query_text, hit_count)
+    db.exec(db_path, string.format(
+        "INSERT INTO knowledge_retrieval (session_id, query_text, hit_count) VALUES (%s, %s, %d);",
+        db.literal(session_id), db.literal(query_text), tonumber(hit_count)
+    ))
+    rows = db.query(db_path, "SELECT MAX(id) AS id FROM knowledge_retrieval;")
+    return tonumber(rows[1].id)
+end
+
+-- Bumps the note's heat/retrieval_count by the ported reinforcement
+-- formula and records the per-hit row audit-style, mirroring
+-- ai_note_record_retrieval exactly (see knowledge.reinforcement_delta).
+function knowledge.record_retrieval_hit(db_path, retrieval_id, note_id, tier, rank, score)
+    delta = knowledge.reinforcement_delta(tier)
+    tier_weight = TIER_WEIGHT[tier]
+    if tier_weight == nil then
+        tier_weight = 0.0
+    end
+    db.exec(db_path, string.format(
+        "UPDATE knowledge_note SET heat = heat + %.17g, retrieval_count = retrieval_count + 1, " ..
+        "last_retrieved_at = datetime('now', 'localtime'), updated_at = datetime('now', 'localtime') WHERE id = %d;",
+        delta, tonumber(note_id)
+    ))
+    db.exec(db_path, string.format(
+        "INSERT OR REPLACE INTO knowledge_retrieval_note (retrieval_id, note_id, rank, score, tier_weight, reinforcement_delta) " ..
+        "VALUES (%d, %d, %d, %.17g, %.17g, %.17g);",
+        tonumber(retrieval_id), tonumber(note_id), tonumber(rank), tonumber(score), tier_weight, delta
+    ))
+    return delta
+end
+
+--------------------------------------------------------------------------
+-- Review gates (DB-touching orchestration; see the pure heuristics above)
+--------------------------------------------------------------------------
+
+-- Canonical = lowest id sharing the same content hash. A non-canonical
+-- note gets its own duplicate_of/merged_into set, mirroring the source
+-- system's dedup bookkeeping.
+function knowledge.duplication_status(db_path, note_id, content_hash)
+    if content_hash == nil or content_hash == "" then
+        return "unique"
+    end
+    rows = db.query(db_path, string.format(
+        "SELECT id FROM knowledge_note WHERE content_hash = %s AND id != %d ORDER BY id ASC LIMIT 1;",
+        db.quote(content_hash), tonumber(note_id)
+    ))
+    if rows == nil or rows[1] == nil then
+        return "unique"
+    end
+    canonical_id = tonumber(rows[1].id)
+    if canonical_id < tonumber(note_id) then
+        db.exec(db_path, string.format(
+            "UPDATE knowledge_note SET duplicate_of = %d, merged_into = %d WHERE id = %d;",
+            canonical_id, canonical_id, tonumber(note_id)
+        ))
+        return "duplicate-of-" .. tostring(canonical_id)
+    end
+    return "unique"
+end
+
+-- Runs once per retrieval, after all hits are logged (mirrors
+-- ai_retrieval_review's invocation point): for every note this
+-- retrieval touched, computes the review gates, applies any resulting
+-- note mutation (retitle, dedup, tier promotion), and records one
+-- knowledge_review row per note for audit.
+function knowledge.review_retrieval(db_path, retrieval_id)
+    rows = db.query(db_path, string.format(
+        "SELECT note_id FROM knowledge_retrieval_note WHERE retrieval_id = %d;", tonumber(retrieval_id)
+    ))
+    if rows == nil then
+        return
+    end
+    peer_count = #rows - 1
+    if peer_count < 0 then
+        peer_count = 0
+    end
+
+    for _, row in ipairs(rows) do
+        note = knowledge.get_note(db_path, row.note_id)
+        if note != nil then
+            atomicity = knowledge.atomicity_status(note.body)
+            duplication = knowledge.duplication_status(db_path, note.id, note.content_hash)
+            connectivity = knowledge.connectivity_status(peer_count)
+            is_duplicate = string.match(duplication, "^duplicate%-of%-") != nil
+
+            title_status = "ok"
+            new_title = note.title
+            if knowledge.title_is_generic(note.title) then
+                new_title = knowledge.guess_title_from_body(note.body)
+                title_status = "retitled"
+            end
+
+            target_tier = knowledge.promotion_target_tier(
+                tonumber(note.tier), tonumber(note.retrieval_count), tonumber(note.heat), is_duplicate, atomicity
+            )
+
+            db.exec(db_path, string.format(
+                "UPDATE knowledge_note SET tier = %d, title = %s, updated_at = datetime('now', 'localtime') WHERE id = %d;",
+                target_tier, db.literal(new_title), note.id
+            ))
+            db.exec(db_path, string.format(
+                "INSERT INTO knowledge_review (retrieval_id, note_id, atomicity_status, connectivity_status, duplication_status, title_status) " ..
+                "VALUES (%d, %d, %s, %s, %s, %s);",
+                tonumber(retrieval_id), note.id, db.quote(atomicity), db.quote(connectivity), db.quote(duplication), db.quote(title_status)
+            ))
+        end
+    end
+end
+
+--------------------------------------------------------------------------
+-- The one integration point every retrieval path goes through
+--------------------------------------------------------------------------
+
+-- Wraps document.search rather than modifying it -- document.search
+-- stays pure/reusable, knowledge.lua depends on document.lua, never
+-- the reverse. A document only gets a knowledge_note the first time
+-- it's actually retrieved (see knowledge.ensure_note_for_document,
+-- Phase 2) -- in isolation, with no notes yet created, this still logs
+-- every query + hit count immediately; heat/tier/review activate
+-- automatically the moment notes start existing, no further wiring.
+function knowledge.search_and_log(db_path, query_text, limit, use_semantic, session_id)
+    results = document.search(db_path, query_text, limit, use_semantic)
+    retrieval_id = knowledge.begin_retrieval(db_path, session_id, query_text, #results)
+    for rank, r in ipairs(results) do
+        note = knowledge.note_for_document(db_path, r.id)
+        if note != nil then
+            knowledge.record_retrieval_hit(db_path, retrieval_id, note.id, tonumber(note.tier), rank, r.score)
+        end
+    end
+    if #results > 0 then
+        knowledge.review_retrieval(db_path, retrieval_id)
+    end
+    return results, retrieval_id
+end
+
+--------------------------------------------------------------------------
+-- Stats -- for the agent's knowledge.stats tool and the /knowledge page
+--------------------------------------------------------------------------
+
+function count_rows(db_path, query)
+    rows = db.query(db_path, query)
+    if rows == nil or rows[1] == nil then
+        return 0
+    end
+    return tonumber(rows[1].n)
+end
+
+-- session_count reads agent_session directly (agent.lua's own table)
+-- rather than requiring agent.lua -- that would be a require cycle,
+-- since agent.lua requires knowledge.lua to route its search tool
+-- through search_and_log. Guarded since a fresh/unusual bootstrap
+-- order could reach here before agent.init_schema has run.
+function knowledge.stats(db_path)
+    tier_counts = {}
+    for tier = 0, 3 do
+        tier_counts[tier] = count_rows(db_path, "SELECT COUNT(*) AS n FROM knowledge_note WHERE tier = " .. tostring(tier) .. ";")
+    end
+    session_count = 0
+    if db.table_exists(db_path, "agent_session") then
+        session_count = count_rows(db_path, "SELECT COUNT(*) AS n FROM agent_session;")
+    end
+    return {
+        tier_counts = tier_counts,
+        note_count = count_rows(db_path, "SELECT COUNT(*) AS n FROM knowledge_note;"),
+        retrieval_count = count_rows(db_path, "SELECT COUNT(*) AS n FROM knowledge_retrieval;"),
+        reviewed_note_count = count_rows(db_path, "SELECT COUNT(DISTINCT note_id) AS n FROM knowledge_review;"),
+        session_count = session_count,
+    }
+end
+
+function knowledge.recent_retrievals(db_path, limit)
+    if limit == nil then
+        limit = 10
+    end
+    rows = db.query(db_path, string.format(
+        "SELECT id, query_text, hit_count, created_at FROM knowledge_retrieval ORDER BY id DESC LIMIT %d;",
+        tonumber(limit)
+    ))
+    if rows == nil then
+        return {}
+    end
+    return rows
+end
+
 return knowledge

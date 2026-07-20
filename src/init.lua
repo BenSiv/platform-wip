@@ -8,6 +8,7 @@ ledger = require("ledger")
 extension = require("extension")
 auth = require("auth")
 document = require("document")
+knowledge = require("knowledge")
 agent = require("agent")
 
 init = {}
@@ -32,6 +33,7 @@ function init.do_init(cmd_args, root)
     extension.init_schema(db_path)
     auth.init_schema(db_path)
     document.init_schema(db_path)
+    knowledge.init_schema(db_path)
     agent.init_schema(db_path)
 
     ok, err = auth.ensure_session_secret(root)
