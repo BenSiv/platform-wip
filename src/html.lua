@@ -2629,6 +2629,10 @@ function html.render_document_edit(doc, parent_options_html, csrf_token, error_m
         .fossci-document-edit-fields input[type=text], .fossci-document-edit-fields select {
             padding: 8px 10px; border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-sm, 8px); font-size: 0.9rem;
         }
+        .fossci-wikilink {
+            color: var(--fossci-accent, #4f46e5); background: var(--fossci-bg-2, #f1f5f9);
+            border-radius: 4px; padding: 0 4px; font-weight: 600;
+        }
     </style>
     <div class="fossci-container">
         <div class="fossci-header"><h2>%s</h2></div>
@@ -2665,7 +2669,23 @@ function html.render_document_edit(doc, parent_options_html, csrf_token, error_m
             initialEditType: 'markdown',
             previewStyle: 'vertical',
             initialValue: "%s",
-            placeholder: 'Write in Markdown. Link to other pages with [[title]] or [[folder/title]].'
+            placeholder: 'Write in Markdown. Link to other pages with [[title]] or [[folder/title]].',
+            // WYSIWYG mode has no built-in notion of this project's own
+            // "[[title]]" link syntax -- without a widget rule it shows
+            // as inert literal text. This only styles it as recognized
+            // syntax while editing; resolved-vs-dangling status is still
+            // computed server-side (document.render_html), same as
+            // before -- getMarkdown() on submit is untouched either way.
+            widgetRules: [{
+                rule: /\[\[([^\]]+)\]\]/,
+                toDOM: function(text) {
+                    var matched = text.match(/\[\[([^\]]+)\]\]/);
+                    var span = document.createElement('span');
+                    span.className = 'fossci-wikilink';
+                    span.textContent = '[[' + matched[1] + ']]';
+                    return span;
+                }
+            }]
         });
         var form = document.getElementById('fossci-document-edit-form');
         var hiddenContent = document.getElementById('fossci-document-content-hidden');
