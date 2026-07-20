@@ -102,13 +102,14 @@ start_chat() {
     # Auto-executed and done -- no pending approval left behind.
     [[ ! "$output" =~ "wants to run" ]]
 
-    # The document.search tool now routes through knowledge.search_and_log
-    # (Phase 1 of the knowledge pool) -- every search gets logged even
-    # though no knowledge_note exists yet (that's Phase 2's job).
+    # The document.search tool routes through knowledge.search_and_log:
+    # every search is logged, and the retrieved document gets its
+    # tier-0 knowledge_note created lazily (see knowledge.bats for the
+    # full tiering/review coverage).
     run sqlite3 "$TEST_DIR/.store/store.db" "SELECT query_text, hit_count FROM knowledge_retrieval;"
     [[ "$output" =~ "bioreactor|1" ]]
     run sqlite3 "$TEST_DIR/.store/store.db" "SELECT COUNT(*) FROM knowledge_note;"
-    [ "$output" -eq 0 ]
+    [ "$output" -eq 1 ]
 }
 
 @test "a destructive tool call (document.create) pauses for approval instead of executing" {

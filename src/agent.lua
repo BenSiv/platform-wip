@@ -317,6 +317,12 @@ AGENT_TOOLS = {
         create = {destructive = true},
         update = {destructive = true},
     },
+    -- Read-only introspection into the knowledge pool's own tiering/
+    -- retrieval activity (see knowledge.lua) -- no destructive knowledge
+    -- tool yet, since note creation is retrieval-driven, not model-invoked.
+    knowledge = {
+        stats = {destructive = false},
+    },
 }
 
 function agent.is_known_tool(tool_name, method_name)
@@ -505,6 +511,15 @@ function agent.execute_tool(db_path, author, session_id, tool_name, method_name,
         return "Updated " .. tostring(args.entity_type) .. " #" .. tostring(updated_id)
     end
 
+    if tool_name == "knowledge" and method_name == "stats" then
+        stats = knowledge.stats(db_path)
+        return string.format(
+            "tier0=%d tier1=%d tier2=%d tier3=%d notes=%d retrievals=%d reviewed=%d sessions=%d",
+            stats.tier_counts[0], stats.tier_counts[1], stats.tier_counts[2], stats.tier_counts[3],
+            stats.note_count, stats.retrieval_count, stats.reviewed_note_count, stats.session_count
+        )
+    end
+
     return nil, "unknown tool: " .. tostring(tool_name) .. "." .. tostring(method_name)
 end
 
@@ -618,6 +633,7 @@ Available tools:
 - entity.get -- fetch one entity row by id. Args: entity_type=<name>, entity_id=<id>
 - entity.create -- create a new entity row. Args: entity_type=<name>, plus one arg per field (e.g. status=open, due_date=2026-08-01)
 - entity.update -- update fields on an existing entity row. Args: entity_type=<name>, entity_id=<id>, plus one arg per field to change
+- knowledge.stats -- summarize the knowledge pool's tier distribution and retrieval activity. No args.
 
 If you don't already know an entity type's fields, call entity.fields first rather than guessing field names.
 

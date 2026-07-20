@@ -18,6 +18,7 @@
 
 db = require("db")
 document = require("document")
+entity = require("entity")
 
 knowledge = {}
 
@@ -235,6 +236,27 @@ function knowledge.note_for_document(db_path, document_id)
     return rows[1]
 end
 
+-- A document gets its tier-0 knowledge_note lazily, the first time
+-- it's actually retrieved -- not an eager bulk sweep over every
+-- document. Idempotent: a second call for the same document returns
+-- the existing note rather than creating a duplicate.
+function knowledge.ensure_note_for_document(db_path, document_id)
+    existing = knowledge.note_for_document(db_path, document_id)
+    if existing != nil then
+        return existing
+    end
+    doc = entity.get(db_path, "document", document_id)
+    if doc == nil then
+        return nil
+    end
+    body = doc.content
+    if body == nil then
+        body = ""
+    end
+    note_id = knowledge.create_note(db_path, 0, doc.title, body, "document", document_id, nil)
+    return knowledge.get_note(db_path, note_id)
+end
+
 --------------------------------------------------------------------------
 -- Retrieval logging
 --------------------------------------------------------------------------
@@ -354,16 +376,14 @@ end
 
 -- Wraps document.search rather than modifying it -- document.search
 -- stays pure/reusable, knowledge.lua depends on document.lua, never
--- the reverse. A document only gets a knowledge_note the first time
--- it's actually retrieved (see knowledge.ensure_note_for_document,
--- Phase 2) -- in isolation, with no notes yet created, this still logs
--- every query + hit count immediately; heat/tier/review activate
--- automatically the moment notes start existing, no further wiring.
+-- the reverse. A document gets its knowledge_note lazily, the first
+-- time it's actually retrieved (knowledge.ensure_note_for_document) --
+-- heat/tier/review then apply to it on every retrieval from here on.
 function knowledge.search_and_log(db_path, query_text, limit, use_semantic, session_id)
     results = document.search(db_path, query_text, limit, use_semantic)
     retrieval_id = knowledge.begin_retrieval(db_path, session_id, query_text, #results)
     for rank, r in ipairs(results) do
-        note = knowledge.note_for_document(db_path, r.id)
+        note = knowledge.ensure_note_for_document(db_path, r.id)
         if note != nil then
             knowledge.record_retrieval_hit(db_path, retrieval_id, note.id, tonumber(note.tier), rank, r.score)
         end
@@ -421,6 +441,90 @@ function knowledge.recent_retrievals(db_path, limit)
         return {}
     end
     return rows
+end
+
+function knowledge.list_notes(db_path, tier)
+    query = "SELECT * FROM knowledge_note"
+    if tier != nil then
+        query = query .. " WHERE tier = " .. tostring(tonumber(tier))
+    end
+    query = query .. " ORDER BY heat DESC, retrieval_count DESC;"
+    rows = db.query(db_path, query)
+    if rows == nil then
+        return {}
+    end
+    return rows
+end
+
+function knowledge.set_tier(db_path, note_id, tier)
+    db.exec(db_path, string.format(
+        "UPDATE knowledge_note SET tier = %d, updated_at = datetime('now', 'localtime') WHERE id = %d;",
+        tonumber(tier), tonumber(note_id)
+    ))
+end
+
+--------------------------------------------------------------------------
+-- CLI: `platform knowledge <stats|list|show|promote>`
+--------------------------------------------------------------------------
+
+function knowledge.do_knowledge(cmd_args, db_path)
+    action = cmd_args[1]
+
+    if action == "stats" then
+        s = knowledge.stats(db_path)
+        print(string.format("tier0=%d tier1=%d tier2=%d tier3=%d",
+            s.tier_counts[0], s.tier_counts[1], s.tier_counts[2], s.tier_counts[3]))
+        print("notes=" .. tostring(s.note_count) .. " retrievals=" .. tostring(s.retrieval_count) ..
+            " reviewed=" .. tostring(s.reviewed_note_count) .. " sessions=" .. tostring(s.session_count))
+        return
+    end
+
+    if action == "list" then
+        tier = tonumber(cmd_args[2])
+        rows = knowledge.list_notes(db_path, tier)
+        for _, row in ipairs(rows) do
+            print(string.format("#%s [tier %s] %s (heat=%s, retrievals=%s)",
+                tostring(row.id), tostring(row.tier), tostring(row.title), tostring(row.heat), tostring(row.retrieval_count)))
+        end
+        return
+    end
+
+    if action == "show" then
+        note_id = tonumber(cmd_args[2])
+        if note_id == nil then
+            print("Usage: platform knowledge show <note_id>")
+            return
+        end
+        note = knowledge.get_note(db_path, note_id)
+        if note == nil then
+            print("Error: no such note #" .. tostring(note_id))
+            return
+        end
+        print("id: " .. tostring(note.id))
+        print("tier: " .. tostring(note.tier))
+        print("title: " .. tostring(note.title))
+        print("heat: " .. tostring(note.heat))
+        print("retrieval_count: " .. tostring(note.retrieval_count))
+        print("source: " .. tostring(note.source_type) .. " #" .. tostring(note.source_id))
+        print("duplicate_of: " .. tostring(note.duplicate_of))
+        print("body:")
+        print(tostring(note.body))
+        return
+    end
+
+    if action == "promote" then
+        note_id = tonumber(cmd_args[2])
+        tier = tonumber(cmd_args[3])
+        if note_id == nil or tier == nil then
+            print("Usage: platform knowledge promote <note_id> <tier>")
+            return
+        end
+        knowledge.set_tier(db_path, note_id, tier)
+        print("Note #" .. tostring(note_id) .. " set to tier " .. tostring(tier))
+        return
+    end
+
+    print("Usage: platform knowledge <stats|list [tier]|show <note_id>|promote <note_id> <tier>>")
 end
 
 return knowledge

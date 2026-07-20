@@ -26,6 +26,9 @@ do_user = auth.do_user
 document = require("document")
 do_document = document.do_document
 
+knowledge = require("knowledge")
+do_knowledge = knowledge.do_knowledge
+
 cgi = require("cgi")
 
 function main()
@@ -53,6 +56,7 @@ function main()
         ["view"] = do_view,
         ["user"] = do_user,
         ["document"] = do_document,
+        ["knowledge"] = do_knowledge,
     }
 
     arg[-1] = "lua"
@@ -65,7 +69,7 @@ function main()
     end
 
     if command == nil or command == "-h" or command == "--help" then
-        print("Usage: platform <init|schema|entity|ledger|extension|view|user|document> ...")
+        print("Usage: platform <init|schema|entity|ledger|extension|view|user|document|knowledge> ...")
         return
     end
 
