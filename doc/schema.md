@@ -49,10 +49,12 @@ from suggesting an obviously-invalid value. Making this a real,
 enforced constraint at the definition level is a bigger change (the
 underlying storage would need new columns) not done yet.
 
-Deferred: multi-select, attachments/files, rich text, computed/formula
-fields, enforced numeric bounds. None of these are ruled out by the
-design -- they're just not needed to prove the core registration
-workflow end to end.
+Deferred: multi-select, attachments/files, computed/formula fields,
+enforced numeric bounds. None of these are ruled out by the design --
+they're just not needed to prove the core registration workflow end
+to end. (Rich text editing exists for the built-in Pages record type --
+see `architecture.md`'s "Pages" section -- but a schema-defined `text`
+field on a custom record type is still a plain string, no markup.)
 
 ## Loading is sandboxed, not just a bare load
 

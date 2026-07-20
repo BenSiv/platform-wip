@@ -12,8 +12,8 @@ the platform's own source.
 
 ```
                      +------------------+
-                     |   web server     |   ordinary web request dispatch
-                     +--------+---------+   (not wired up yet)
+                     |   web server     |   Apache + mod_cgid, PATH_INFO-based
+                     +--------+---------+   (src/cgi.lua is the single CGI entry point)
                               |
                      +--------v---------+
                      |     platform     |
@@ -37,6 +37,37 @@ web surface, accounts and permissions, and its own rendering. Record
 type, extension, and saved-query definitions are plain files, read and
 sandboxed at request time -- nothing external to run alongside it to
 make any of this work.
+
+## Repository layout
+
+```
+bin/        compiled binary (bld/build.sh's output) -- gitignored, never committed
+bld/        build.sh/test.sh
+doc/        this file, schema.md, extensibility.md
+githooks/   tracked pre-push hook (git config core.hooksPath githooks activates it
+            per clone -- not automatic, a local git config isn't itself trackable)
+src/        every *.lua source file -- bld/build.sh globs and bundles all of them
+            into the single compiled binary, so anything dropped here ships in
+            production, including src/agent_provider_test.lua (see "Chat" below)
+static/     vendored, checked-in frontend assets (e.g. the Toast UI Editor bundle)
+            served via cgi.lua's own /static?name=X route -- no CDN dependency,
+            no build step
+tst/        tst/unit/*.lua (plain Luam scripts, no DB) and
+            tst/integration/*.bats (real built binary, real CGI env vars)
+```
+
+`src/agent_provider_test.lua` is the one file in `src/` that looks like
+it belongs in `tst/` instead -- it's the deterministic stub LLM backend
+`AGENT_PROVIDER=test` selects (see "Chat"). It has to live in `src/`
+on purpose: `bld/build.sh` bundles every `src/*.lua` file into the one
+compiled binary tests run against, and the whole point is that tests
+exercise that real binary, not a separate test-only build. The
+tradeoff this creates: nothing today stops `AGENT_PROVIDER=test` from
+being set in a real deployment by mistake (a stray env var, a
+copy-pasted `.env`) -- the app would silently serve canned responses
+with no error and no visible difference except the content itself. Not
+fixed as of this writing; worth a safeguard if it ever becomes a real
+concern.
 
 ## History as the source of truth, not a side effect
 
@@ -166,6 +197,25 @@ collision risk the way a name-is-identity wiki page has to worry about.
   behavior is specific to one record type, not something the generic
   layer should know about), not something every write path gets for
   free.
+- **Editing** is Toast UI Editor (vendored into `static/`, no CDN
+  dependency, no build step), starting in plain Markdown-source mode
+  and offering a WYSIWYG mode (syntax hidden, edit the rendered view
+  directly) one click away via the editor's own built-in mode tab --
+  not two separate features. Either mode still just produces a plain
+  Markdown string on submit (`editor.getMarkdown()`), so
+  `document-save`'s contract, and everything downstream of it
+  (`cmark`, link re-indexing), is unaware the editor ever changed.
+  `[[title]]` links are inert literal text in both modes today --
+  Toast UI has no notion of the syntax, so nothing renders it specially
+  yet (a candidate future addition: a small first-party plugin using
+  Toast UI's own widget-rule API, not a fork of the editor).
+- HTML generation elsewhere in the app can opt into `src/render.lua`,
+  a small `{{ expr }}`-interpolation helper that HTML-escapes by
+  default (`{{{ expr }}}` opts out explicitly) -- makes "forgot to
+  call `html.html_escape`" structurally impossible for whatever calls
+  it, rather than relying on every call site remembering to escape by
+  convention. Adopted incrementally (e.g. `html.render_login`'s error
+  message); most of `html.lua` still escapes by explicit convention.
 
 ## Auth
 
@@ -225,9 +275,24 @@ and a small, explicit tool registry the model can act through.
   dimmed, so what the model can no longer see stays visible to the
   human, not hidden.
 - **Tool use is a small, explicit registry, not an open plugin
-  system** -- the model can only ever call exactly what's listed
-  (searching pages, creating a page, updating a page today), with no
-  escape hatch to anything else.
+  system** -- the model can only ever call exactly what's listed, with
+  no escape hatch to anything else. Today: `document.search/create/
+  update` (pages), `entity.list_types/fields/list/get/create/update`
+  (any registered record type -- `entity.list_types`/`fields` exist so
+  the model discovers real types and field names itself rather than
+  the system prompt hardcoding every schema that might ever exist),
+  and `knowledge.stats` (read-only summary of the knowledge pool, see
+  below).
+- **The chat widget tells the model what page the user is on.**
+  Every page (`html.page_shell`) emits `window.PLATFORM_PAGE_CONTEXT`
+  -- at minimum `{page_type, title}`, richer for entity/document pages
+  (`entity_type`, `entity_id`) or views (`view_name`). The floating
+  widget prepends a `[Current page: ...]` line built from whatever
+  fields are present to every message sent to the model, and the
+  system prompt explains what that annotation means so the model
+  treats it as reliable context rather than guessing. Stripped back
+  out before a human reads the transcript (`agent.display_content`) --
+  it's for the model, not something restated back to the user.
 - **A destructive tool call cannot execute without a human approving
   it first**, and that approval is a real, persisted two-phase state,
   not a blocking prompt: a single web request can't pause mid-call
@@ -256,3 +321,53 @@ and a small, explicit tool registry the model can act through.
   feature; confirmed directly that this project's SQLite binding
   doesn't have it compiled in, so search instead scores every active
   page directly, an acceptable tradeoff at the scale this is built for.
+
+## Knowledge pool
+
+`src/knowledge.lua` -- retrieval logging, note tiering, and rule-based
+review, adapted (not copied verbatim) from a much larger `ai_note`/
+`ai_retrieval`/`ai_review` system in a Fossil SCM fork. Deliberately
+dropped from that source system: per-source-type authority weighting,
+a metadata-quality gate (tied to fields this codebase's notes don't
+have), and heat decay (the source system has none either -- heat only
+ever grows).
+
+- **Every search is logged**, whether or not anything about it ever
+  becomes a note (`knowledge.search_and_log` wraps `document.search`;
+  `document.search` itself stays pure/unmodified). A document only
+  gets a `knowledge_note` lazily, the first time it's actually
+  retrieved (`knowledge.ensure_note_for_document`) -- not an eager bulk
+  sweep over every page at index time.
+- **Tiers 0-3** (Raw Intake / Working Set / Curated Drafts / Atomic
+  Records). A note's `heat` starts at 1.0 and grows by `0.15 +
+  tier_weight` (0/0.10/0.20/0.35 for tiers 0-3) on every retrieval hit
+  -- monotonic, no decay. Promotion is automatic and threshold-based,
+  never a human-review gate: `retrieval_count>=2` reaches tier 1;
+  `>=4` with `heat>=1.60` and non-"needs-split" atomicity reaches tier
+  2; `>=7` with `heat>=2.60` and "ok" atomicity reaches tier 3.
+  Duplicates never advance.
+- **Review is rule-based, never an LLM call.** After every retrieval
+  that hit at least one note: atomicity (heading/paragraph counts --
+  more than one heading or more than six paragraphs is "needs-split";
+  a short single paragraph is "thin"), duplication (a content hash
+  matched against a lower-id note), title quality (a generic title
+  like "Note" gets regenerated from the note's own first real line),
+  and connectivity (how many other notes were retrieved in the same
+  batch).
+- **Hand-rolled tables, not `schema.register()` entities** --
+  `knowledge_note`/`knowledge_retrieval`/`knowledge_retrieval_note`/
+  `knowledge_review` are system/derived records (own `CREATE TABLE` +
+  `init_schema`), the same treatment as `document_link`/
+  `document_embedding`/`agent_session`, not user-authored data with
+  its own field-level audit needs.
+- **Surfaced two ways**: `platform knowledge <stats|list|show|
+  promote>` (CLI, mirrors `document.do_document`'s dispatch shape),
+  and a `/knowledge` page linked from System (gated identically --
+  Setup or Admin capability) with stat tiles, the tier breakdown, and
+  a recent-retrievals list. Deliberately not its own sidebar icon --
+  chat session browsing (`/chat`) is one link away from here instead
+  of a dedicated nav-rail entry.
+- **Deferred, not built**: a `knowledge-browser` filter page and an
+  `ai_note_link`-style co-retrieval graph between notes -- both
+  optional in the original design, neither blocking the core tiering/
+  retrieval/review loop.
