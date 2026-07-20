@@ -73,6 +73,14 @@ start_chat() {
     [[ "$output" =~ "Location: chat?session_id=" ]]
 }
 
+@test "chat session list shows the session's start timestamp next to its title" {
+    start_chat "$COOKIE" "$CSRF" "Timestamped+chat"
+
+    run raw_get "/chat" "" "$COOKIE"
+    [[ "$output" =~ "Timestamped chat" ]]
+    [[ "$output" =~ "fossci-chat-session-started" ]]
+}
+
 @test "chat-message with a plain <done> reply records both turns and returns the message" {
     resp=$(start_chat "$COOKIE" "$CSRF" "Chat")
     session_id=$(extract_query_param "$resp" "session_id")
@@ -83,6 +91,18 @@ start_chat() {
     run raw_get "/chat" "session_id=${session_id}" "$COOKIE"
     [[ "$output" =~ "What is 2+2?" ]]
     [[ "$output" =~ "2+2 is 4." ]]
+}
+
+@test "a session with no explicit title gets one generated from its first real message" {
+    resp=$(start_chat "$COOKIE" "$CSRF" "")
+    session_id=$(extract_query_param "$resp" "session_id")
+
+    run raw_post "/chat-message" "csrf_token=${CSRF}&session_id=${session_id}&message=What+is+the+boiling+point+of+water%3F" "$COOKIE" $'<done>100 degrees C.</done>'
+    [[ "$output" =~ "302 Found" ]]
+
+    run raw_get "/chat" "" "$COOKIE"
+    [[ "$output" =~ "What is the boiling point of water?" ]]
+    [[ ! "$output" =~ "Untitled chat" ]]
 }
 
 @test "current-user/current-page annotations reach the model but are stripped from the human-facing transcript" {

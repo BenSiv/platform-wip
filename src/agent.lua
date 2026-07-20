@@ -123,6 +123,37 @@ function agent.get_session(db_path, session_id, login)
     return rows[1]
 end
 
+-- Derives a short session title from a real user message, once, if the
+-- session doesn't already have one -- avoids leaving chats "Untitled"
+-- in history/knowledge-pool listings just because chat-start's own
+-- optional title field was left blank, which is the common case (see
+-- render_chat_sessions_list's own "Untitled chat" fallback). Only ever
+-- fires on the first message that finds an empty title, so in the
+-- normal case that's the session's actual first message; a title set
+-- explicitly at chat-start is never overwritten. Reuses
+-- knowledge.guess_title_from_body's own text-to-title logic (skip
+-- headings, strip bullet/quote prefixes, ~72-char word-boundary
+-- cutoff) rather than duplicating it -- same underlying problem
+-- (turn a blob of text into a short display title), and
+-- agent.display_content strips the [Current user: ...]/[Current
+-- page: ...] annotations first, or they'd end up as the "title"
+-- instead of the actual question.
+function agent.maybe_set_title_from_message(db_path, session_id, login, user_message)
+    session = agent.get_session(db_path, session_id, login)
+    if session == nil or (session.title != nil and session.title != "") then
+        return
+    end
+    clean_message = agent.display_content(user_message)
+    title = knowledge.guess_title_from_body(clean_message)
+    if title == "Untitled note" then
+        return
+    end
+    db.exec(db_path, string.format(
+        "UPDATE agent_session SET title = %s WHERE id = %s;",
+        db.quote(title), db.quote(session_id)
+    ))
+end
+
 function agent.list_sessions(db_path, login)
     rows = db.query(db_path, string.format(
         "SELECT * FROM agent_session WHERE login = %s ORDER BY updated_at DESC;",
@@ -699,6 +730,7 @@ function agent.run_turn(db_path, session_id, login, system_prompt, model, user_m
 
     if user_message != nil and user_message != "" then
         agent.add_message(db_path, session_id, "user", user_message, true)
+        agent.maybe_set_title_from_message(db_path, session_id, login, user_message)
     end
 
     agent.compact_if_needed(db_path, session_id, system_prompt, model)

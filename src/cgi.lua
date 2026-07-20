@@ -552,9 +552,11 @@ function cgi.handle_request()
     end
 
     -- What "/" used to render, in full, before Home became its own
-    -- separate landing page above -- the entity-type overview, the
-    -- relation diagram, and (Setup/Admin only) the embedded ad hoc SQL
-    -- widget.
+    -- separate landing page above -- the entity-type overview and the
+    -- relation diagram. Used to also embed an ad hoc SQL widget here
+    -- (Setup/Admin only); removed after a persistent styling problem
+    -- that wasn't worth continuing to chase (real callers just use
+    -- /sql directly, linked from /system).
     if path_info == "/data" then
         entity_types = schema.list(db_path)
         for _, row in ipairs(entity_types) do
@@ -567,8 +569,7 @@ function cgi.handle_request()
             return a.name < b.name
         end)
         edges = schema.relationships(db_path)
-        show_sql_widget = cgi.has_capability(capabilities, "s") or cgi.has_capability(capabilities, "a")
-        body = html.render_index(entity_types, edges, show_sql_widget, nonce)
+        body = html.render_index(entity_types, edges, nonce)
         return print_response("200 OK", "text/html",
             html.page_shell("Data", "data", body, nonce, show_sql_nav, show_admin_nav, theme, author))
     end

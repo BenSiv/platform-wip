@@ -1809,9 +1809,7 @@ end
 -- icon, matching this deployment's earlier "System" concept. Callers
 -- (cgi.lua) already gate the route itself on show_sql/show_admin
 -- before rendering this; the links below still only show what the
--- caller says is allowed, so this function has the final say on its
--- own content the same way html.render_index's show_sql_widget already
--- works.
+-- caller says is allowed via its own show_sql/show_admin parameters.
 function html.render_system(show_sql, show_admin)
     items = "<li><a href=\"knowledge\">Knowledge Pool</a><p>Tiered notes, retrieval activity, and chat sessions.</p></li>"
     if show_sql then
@@ -1931,7 +1929,7 @@ function html.render_knowledge_pool(stats, recent_retrievals)
      stats.session_count, tier_tiles, retrieval_rows)
 end
 
-function html.render_index(entity_types, edges, show_sql_widget, nonce)
+function html.render_index(entity_types, edges, nonce)
     items = ""
     for _, row in ipairs(entity_types) do
         escaped_name = html.html_escape(row.name)
@@ -1959,24 +1957,6 @@ function html.render_index(entity_types, edges, show_sql_widget, nonce)
     list_or_empty = "<ul class=\"fossci-index-list\">" .. items .. "</ul>"
     if #entity_types == 0 then
         list_or_empty = "<p class=\"fossci-empty\">No entity types registered yet.</p>"
-    end
-
-    -- Setup/Admin only, matching /sql's own gate -- an iframe is legal
-    -- here (this page isn't wiki content, so none of Fossil's wiki
-    -- sanitizer restrictions on <iframe> apply), unlike the entry
-    -- notebook pages, which had to fall back to plain links instead.
-    -- No title/description here -- the embedded /sql page (title
-    -- "Query" as of this rewrite) already renders its own, and
-    -- html.in-iframe's CSS only flattens the *card* styling
-    -- (padding/border/shadow), not the heading text, so showing both
-    -- was a literal duplicate header, not just visual clutter.
-    sql_widget = ""
-    if show_sql_widget == true then
-        sql_widget = """
-    <div class="fossci-container">
-        <iframe src="sql?embed=1" style="width:100%;height:520px;border:0;border-radius:var(--fossci-radius-md, 12px);"></iframe>
-    </div>
-"""
     end
 
     diagram_html = html.render_relation_diagram(entity_types, edges)
@@ -2025,11 +2005,10 @@ function html.render_index(entity_types, edges, show_sql_widget, nonce)
         <div id="fossci-view-list">%s</div>
         <div id="fossci-view-diagram" style="display:none;">%s</div>
     </div>
-%s
 </div>
 %s
 """, fossci_container_css(800), html.relation_diagram_css(), html.popover_css(), #entity_types,
-     list_or_empty, diagram_html, sql_widget, html.diagram_js(nonce))
+     list_or_empty, diagram_html, html.diagram_js(nonce))
 end
 
 -- Every entry template found (whether it loaded cleanly or not), each
@@ -2162,14 +2141,16 @@ function html.render_sql(db_path, sql_text, column_names, rows, err, ref_columns
     if nonce == nil then
         nonce = ""
     end
-    -- /data's own SQL widget renders this page inside a same-origin
-    -- iframe (see render_index's fossci-sql-widget) -- the .fossci-
-    -- container "card" look (padding/shadow/border/radius) is right
-    -- for a standalone page, but reads as a window nested inside a
-    -- window once it's already sitting inside that iframe's own
-    -- bordered box. cgi.lua knows server-side that this is the
-    -- embedded case (its own ?embed=1), so this flattens the card
-    -- directly rather than needing a client-side "am I in an iframe"
+    -- ?embed=1 renders this page for use inside a same-origin iframe
+    -- (previously used by /data's own SQL widget, removed after a
+    -- persistent styling problem -- see cgi.lua's own comment on
+    -- /data). Kept as a general capability: the .fossci-container
+    -- "card" look (padding/shadow/border/radius) is right for a
+    -- standalone page, but reads as a window nested inside a window
+    -- once sitting inside an iframe's own bordered box. cgi.lua knows
+    -- server-side that this is the embedded case (its own ?embed=1),
+    -- so this flattens the card directly rather than needing a
+    -- client-side "am I in an iframe"
     -- detection script the way a skin with no such server-side signal
     -- would have to.
     embed_css = ""
@@ -2390,8 +2371,8 @@ end
 
 -- `can_create` is a plain boolean (the "+ New page" link's own gate) --
 -- html.lua never checks capabilities itself, same convention
--- render_index's show_sql_widget already uses; cgi.lua decides and
--- passes the answer in.
+-- render_system's show_sql/show_admin params already use; cgi.lua
+-- decides and passes the answer in.
 -- Flat {id, title} pairs for the fuzzy-search box's client-side
 -- matching -- the same `rows` the tree itself is built from
 -- (document.all_active), just the two fields the search actually
@@ -2753,8 +2734,12 @@ function render_chat_sessions_list(sessions, current_session_id)
         if label == nil or label == "" then
             label = "Untitled chat"
         end
+        started_at = ""
+        if s.created_at != nil then
+            started_at = "<span class=\"fossci-chat-session-started\">" .. html.html_escape(s.created_at) .. "</span>"
+        end
         items = items .. "<li" .. css_class .. "><a href=\"chat?session_id=" .. s.id .. "\">" ..
-            html.html_escape(label) .. "</a></li>"
+            html.html_escape(label) .. "</a>" .. started_at .. "</li>"
     end
     if items == "" then
         return "<p class=\"fossci-empty\">No chats yet.</p>"
@@ -2840,9 +2825,10 @@ function html.render_chat(sessions, session, messages, pending, csrf_token, nonc
         .fossci-header { margin-bottom: 20px; border-bottom: 1px solid var(--fossci-bg-2, #f1f5f9); padding-bottom: 16px; }
         .fossci-chat-layout { display: grid; grid-template-columns: 220px 1fr; gap: 20px; }
         .fossci-chat-sessions { list-style: none !important; margin: 0; padding: 0; }
-        .fossci-chat-sessions li { margin: 4px 0; }
+        .fossci-chat-sessions li { margin: 4px 0; display: flex; flex-direction: column; }
         .fossci-chat-sessions a { color: var(--fossci-accent, #4f46e5); text-decoration: none; font-weight: 600; }
         .fossci-chat-session-active a { text-decoration: underline; }
+        .fossci-chat-session-started { font-size: 0.75rem; color: var(--fossci-muted, #64748b); }
         .fossci-chat-new-form { display: flex; gap: 6px; margin-bottom: 16px; }
         .fossci-chat-new-form input[type=text] { flex: 1; padding: 6px 8px; border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-sm, 8px); }
         .fossci-chat-messages { max-height: 55vh; overflow-y: auto; margin-bottom: 16px; padding: 12px; border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-md, 12px); background: var(--fossci-bg, #f8fafc); }
