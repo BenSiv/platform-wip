@@ -656,7 +656,22 @@ end
 -- listing the tools in AGENT_TOOLS -- hand-maintained text, not
 -- generated from the registry, so a new tool needs a line added here
 -- too (see AGENT_TOOLS' own comment).
+--
+-- Appends theme.json's own system_prompt_extra, if a deployment set
+-- one (task #70) -- deployment-specific instructions (domain
+-- vocabulary, house style, use-case reminders) without editing
+-- platform-wip's own source. Every real call site (run_turn's own
+-- fallback, approve_pending, deny_pending) already reaches this
+-- function exactly when no caller-supplied system_prompt was given,
+-- so this is the one place that needs to change for every one of them
+-- to pick it up -- see doc/architecture.md's "Chat" section.
 function agent.default_system_prompt()
+    config = require("config")
+    theme = config.load_theme(config.find_root())
+    extra = ""
+    if theme.system_prompt_extra != nil then
+        extra = "\n\n" .. theme.system_prompt_extra
+    end
     return """
 You are an assistant embedded in a data platform. Answer directly when you can, or use a tool to look up or change data.
 
@@ -705,7 +720,7 @@ When you have a final answer for the user, reply with EXACTLY:
 <done>Your final answer here.</done>
 
 Never mix a tool call and a <done> reply in the same turn.
-"""
+""" .. extra
 end
 
 -- Runs the turn loop starting from the session's current active-message

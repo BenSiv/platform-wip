@@ -206,7 +206,7 @@ end
 -- <fallback>) defaults (its current indigo/slate palette) untouched.
 -- site_name similarly defaults to a generic label, never a company name.
 function config.load_theme(root)
-    theme = {site_name = "Platform", colors = {}, has_logo = false, hide_home_heading = false}
+    theme = {site_name = "Platform", colors = {}, has_logo = false, hide_home_heading = false, system_prompt_extra = nil}
     path = config.theme_path(root)
     file = io.open(path, "r")
     if file == nil then
@@ -244,6 +244,14 @@ function config.load_theme(root)
     -- into html.lua: any deployment can opt into it, none are forced to.
     if parsed.hide_home_heading == true then
         theme.hide_home_heading = true
+    end
+    -- Deployment-specific instructions appended to the chat agent's own
+    -- system prompt (task #70) -- e.g. domain vocabulary, house style,
+    -- or reminders specific to this deployment's use case, without
+    -- editing platform-wip's own source. A generic hook (any deployment
+    -- can set it), same split as every other theme.json field here.
+    if type(parsed.system_prompt_extra) == "string" and parsed.system_prompt_extra != "" then
+        theme.system_prompt_extra = parsed.system_prompt_extra
     end
     if type(parsed.colors) == "table" then
         for _, key in ipairs(THEME_COLOR_KEYS) do

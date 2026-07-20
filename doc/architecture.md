@@ -283,6 +283,15 @@ and a small, explicit tool registry the model can act through.
   the system prompt hardcoding every schema that might ever exist),
   and `knowledge.stats` (read-only summary of the knowledge pool, see
   below).
+- **A deployment can append its own instructions to the system
+  prompt** without editing platform-wip's own source --
+  `theme.json`'s `system_prompt_extra` field (`agent.default_system_
+  prompt`) is appended verbatim, empty by default. For domain
+  vocabulary, house style, or use-case-specific reminders (e.g. "this
+  deployment tracks bioreactor runs -- always ask for the run ID
+  before creating a sample") -- the same generic-hook split as every
+  other `theme.json` field. Prior art: fossil-scm's own `agent-system-
+  prompt-extra` setting.
 - **The chat widget tells the model what page the user is on.**
   Every page (`html.page_shell`) emits `window.PLATFORM_PAGE_CONTEXT`
   -- at minimum `{page_type, title}`, richer for entity/document pages

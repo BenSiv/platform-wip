@@ -105,6 +105,25 @@ start_chat() {
     [[ ! "$output" =~ "Untitled chat" ]]
 }
 
+@test "a deployment's theme.json system_prompt_extra is appended to the agent's system prompt (task #70)" {
+    cat > theme.json <<'EOF'
+{"system_prompt_extra": "This deployment tracks bioreactor runs -- always ask for the run ID before creating a sample."}
+EOF
+    resp=$(start_chat "$COOKIE" "$CSRF" "Prompt extra test")
+    session_id=$(extract_query_param "$resp" "session_id")
+
+    capture_file="$TEST_DIR/captured_system_prompt.txt"
+    printf 'csrf_token=%s&session_id=%s&message=hello' "$CSRF" "$session_id" | \
+        AGENT_PROVIDER=test AGENT_TEST_RESPONSES=$'<done>Hi.</done>' \
+        AGENT_TEST_CAPTURE_SYSTEM_PROMPT="$capture_file" \
+        GATEWAY_INTERFACE="CGI/1.1" REQUEST_METHOD="POST" PATH_INFO="/chat-message" QUERY_STRING="" \
+        HTTP_COOKIE="$COOKIE" "$BIN" > /dev/null
+
+    [ -f "$capture_file" ]
+    run cat "$capture_file"
+    [[ "$output" =~ "always ask for the run ID before creating a sample" ]]
+}
+
 @test "current-user/current-page annotations reach the model but are stripped from the human-facing transcript" {
     resp=$(start_chat "$COOKIE" "$CSRF" "Chat")
     session_id=$(extract_query_param "$resp" "session_id")

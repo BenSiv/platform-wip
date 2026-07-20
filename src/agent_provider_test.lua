@@ -21,6 +21,20 @@ agent_provider_test = {}
 TEST_RESPONSE_INDEX = 0
 
 function agent_provider_test.generate(model, system_prompt, prompt)
+    -- Optional: write the exact system_prompt this call received to a
+    -- file, for tests asserting on it directly (e.g. task #70's
+    -- deployment-configurable system_prompt_extra) rather than
+    -- indirectly through model behavior. Off unless a test opts in --
+    -- never touches the normal (no env var) test path.
+    capture_path = os.getenv("AGENT_TEST_CAPTURE_SYSTEM_PROMPT")
+    if capture_path != nil and capture_path != "" then
+        capture_file = io.open(capture_path, "w")
+        if capture_file != nil then
+            io.write(capture_file, system_prompt)
+            io.close(capture_file)
+        end
+    end
+
     TEST_RESPONSE_INDEX = TEST_RESPONSE_INDEX + 1
     raw = os.getenv("AGENT_TEST_RESPONSES")
     if raw == nil or raw == "" then
