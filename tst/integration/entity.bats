@@ -33,6 +33,40 @@ teardown() {
     [[ "$output" =~ "required field is missing" ]]
 }
 
+@test "concurrent entity creates never collide on entity_id or leave one NULL (task #77)" {
+    # ledger.append_create used to re-derive entity_id via SELECT
+    # MAX(event_id) -- not connection-scoped the way last_insert_rowid()
+    # is, so two simultaneous creates could both read the same MAX and
+    # collide on one entity_id while the other's row kept entity_id NULL
+    # forever. The bug itself is established by that direct reasoning
+    # (see ledger.lua's own comment), not by this test: unsynchronized
+    # process-level concurrency turned out to not reliably reproduce the
+    # actual failure even at 150 parallel processes across several
+    # tries against the unfixed code -- SQLite's own write-lock queue
+    # plus per-process overhead apparently keeps the exploitable window
+    # too narrow to hit by scheduling luck alone. This test instead
+    # stands as an ongoing invariant check under real concurrent load
+    # (every create gets a NULL-free, unique entity_id), which the fix
+    # must satisfy regardless of whether the old bug can be reliably
+    # forced to fail here.
+    pids=()
+    for i in $(seq 1 15); do
+        "$BIN" entity create reagent lot_number="LOT-$i" concentration="$i" &
+        pids+=($!)
+    done
+    for pid in "${pids[@]}"; do
+        wait "$pid"
+    done
+
+    null_count=$(sqlite3 .store/store.db "SELECT COUNT(*) FROM entity_event WHERE event_type = 'create' AND entity_id IS NULL;")
+    [ "$null_count" -eq 0 ]
+
+    total_creates=$(sqlite3 .store/store.db "SELECT COUNT(*) FROM entity_event WHERE event_type = 'create';")
+    distinct_entity_ids=$(sqlite3 .store/store.db "SELECT COUNT(DISTINCT entity_id) FROM entity_event WHERE event_type = 'create';")
+    [ "$total_creates" -eq 15 ]
+    [ "$distinct_entity_ids" -eq 15 ]
+}
+
 @test "entity list shows a created entity's id" {
     "$BIN" entity create reagent lot_number=LOT-1 concentration=5
     # entity list only prints "#<id>" per entity, not field values --

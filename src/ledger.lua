@@ -66,14 +66,17 @@ function ledger.append_create(db_path, entity_type, values, author, source)
         db.literal(source.notebook_entry_id),
         db.literal(source.row_id)
     )
-    db.exec(db_path, statement)
-
-    -- database.lua opens a fresh connection per call (see db.lua), so
-    -- last_insert_rowid() would be scoped to a connection that never
-    -- did the insert. MAX(event_id) is connection-independent and safe
-    -- here: v0 is a single-process CLI, no concurrent writers.
-    rows = db.query(db_path, "SELECT MAX(event_id) AS id FROM entity_event;")
-    entity_id = tonumber(rows[1].id)
+    -- Fixed 2026-07-20 (task #77): this used to re-derive entity_id via
+    -- SELECT MAX(event_id), on the (false, for a real concurrent CGI
+    -- deployment) assumption that nothing else could insert between
+    -- this connection's own insert and that read -- two simultaneous
+    -- creates could both read the same MAX and collide on one entity_id
+    -- while the other's row silently kept entity_id NULL forever.
+    -- db.exec's second return value is last_insert_rowid(), read on the
+    -- very same connection the insert itself just ran on -- inherently
+    -- connection-scoped, so it can't see another connection's insert
+    -- regardless of timing.
+    _, entity_id = db.exec(db_path, statement)
     db.exec(db_path, string.format(
         "UPDATE entity_event SET entity_id = %d WHERE event_id = %d;", entity_id, entity_id
     ))
@@ -97,9 +100,12 @@ function ledger.append_update(db_path, entity_type, entity_id, field_changes, au
         db.literal(source.notebook_entry_id),
         db.literal(source.row_id)
     )
-    db.exec(db_path, statement)
-    rows = db.query(db_path, "SELECT MAX(event_id) AS id FROM entity_event;")
-    return tonumber(rows[1].id)
+    -- Same fix as append_create above (task #77): return the
+    -- connection-scoped insert_id directly instead of a separate
+    -- SELECT MAX(event_id) that another concurrent writer's own insert
+    -- could race ahead of.
+    _, event_id = db.exec(db_path, statement)
+    return event_id
 end
 
 -- Appends an 'archive' event -- never a delete. Returns the new
