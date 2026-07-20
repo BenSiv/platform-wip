@@ -26,7 +26,7 @@ TIER_WEIGHT = {[0] = 0.0, [1] = 0.10, [2] = 0.20, [3] = 0.35}
 
 KNOWLEDGE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS knowledge_note (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id INTEGER PRIMARY KEY %s,
     tier INTEGER NOT NULL DEFAULT 0,
     title TEXT,
     body TEXT NOT NULL,
@@ -39,18 +39,18 @@ CREATE TABLE IF NOT EXISTS knowledge_note (
     heat REAL NOT NULL DEFAULT 1.0,
     retrieval_count INTEGER NOT NULL DEFAULT 0,
     last_retrieved_at TEXT,
-    created_at TEXT DEFAULT (datetime('now', 'localtime')),
-    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+    created_at TEXT DEFAULT (%s),
+    updated_at TEXT DEFAULT (%s)
 );
 CREATE INDEX IF NOT EXISTS knowledge_note_tier_idx ON knowledge_note(tier, heat DESC, retrieval_count DESC);
-CREATE INDEX IF NOT EXISTS knowledge_note_hash_idx ON knowledge_note(content_hash);
+CREATE INDEX IF NOT EXISTS knowledge_note_hash_idx ON knowledge_note(%s);
 
 CREATE TABLE IF NOT EXISTS knowledge_retrieval (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id INTEGER PRIMARY KEY %s,
     session_id TEXT,
     query_text TEXT,
     hit_count INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+    created_at TEXT DEFAULT (%s)
 );
 
 CREATE TABLE IF NOT EXISTS knowledge_retrieval_note (
@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS knowledge_retrieval_note (
 CREATE INDEX IF NOT EXISTS knowledge_retrieval_note_note_idx ON knowledge_retrieval_note(note_id);
 
 CREATE TABLE IF NOT EXISTS knowledge_review (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id INTEGER PRIMARY KEY %s,
     retrieval_id INTEGER NOT NULL,
     note_id INTEGER NOT NULL,
     atomicity_status TEXT,
@@ -73,12 +73,21 @@ CREATE TABLE IF NOT EXISTS knowledge_review (
     duplication_status TEXT,
     title_status TEXT,
     action_summary TEXT,
-    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+    created_at TEXT DEFAULT (%s)
 );
 """
 
+function knowledge_schema_sql(db_path)
+    return string.format(KNOWLEDGE_SCHEMA,
+        db.autoincrement_keyword(db_path), db.now_expr(db_path), db.now_expr(db_path),
+        db.text_index_column(db_path, "content_hash"),
+        db.autoincrement_keyword(db_path), db.now_expr(db_path),
+        db.autoincrement_keyword(db_path), db.now_expr(db_path)
+    )
+end
+
 function knowledge.init_schema(db_path)
-    return db.exec(db_path, KNOWLEDGE_SCHEMA)
+    return db.exec(db_path, knowledge_schema_sql(db_path))
 end
 
 --------------------------------------------------------------------------
@@ -281,12 +290,13 @@ function knowledge.record_retrieval_hit(db_path, retrieval_id, note_id, tier, ra
     end
     db.exec(db_path, string.format(
         "UPDATE knowledge_note SET heat = heat + %.17g, retrieval_count = retrieval_count + 1, " ..
-        "last_retrieved_at = datetime('now', 'localtime'), updated_at = datetime('now', 'localtime') WHERE id = %d;",
-        delta, tonumber(note_id)
+        "last_retrieved_at = %s, updated_at = %s WHERE id = %d;",
+        delta, db.now_expr(db_path), db.now_expr(db_path), tonumber(note_id)
     ))
     db.exec(db_path, string.format(
-        "INSERT OR REPLACE INTO knowledge_retrieval_note (retrieval_id, note_id, rank, score, tier_weight, reinforcement_delta) " ..
+        "%s knowledge_retrieval_note (retrieval_id, note_id, rank, score, tier_weight, reinforcement_delta) " ..
         "VALUES (%d, %d, %d, %.17g, %.17g, %.17g);",
+        db.replace_into(db_path),
         tonumber(retrieval_id), tonumber(note_id), tonumber(rank), tonumber(score), tier_weight, delta
     ))
     return delta
@@ -358,8 +368,8 @@ function knowledge.review_retrieval(db_path, retrieval_id)
             )
 
             db.exec(db_path, string.format(
-                "UPDATE knowledge_note SET tier = %d, title = %s, updated_at = datetime('now', 'localtime') WHERE id = %d;",
-                target_tier, db.literal(new_title), note.id
+                "UPDATE knowledge_note SET tier = %d, title = %s, updated_at = %s WHERE id = %d;",
+                target_tier, db.literal(new_title), db.now_expr(db_path), note.id
             ))
             db.exec(db_path, string.format(
                 "INSERT INTO knowledge_review (retrieval_id, note_id, atomicity_status, connectivity_status, duplication_status, title_status) " ..
@@ -458,8 +468,8 @@ end
 
 function knowledge.set_tier(db_path, note_id, tier)
     db.exec(db_path, string.format(
-        "UPDATE knowledge_note SET tier = %d, updated_at = datetime('now', 'localtime') WHERE id = %d;",
-        tonumber(tier), tonumber(note_id)
+        "UPDATE knowledge_note SET tier = %d, updated_at = %s WHERE id = %d;",
+        tonumber(tier), db.now_expr(db_path), tonumber(note_id)
     ))
 end
 

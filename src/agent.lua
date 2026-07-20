@@ -23,21 +23,24 @@ DEFAULT_COMPACTION_THRESHOLD = 4000
 MAX_TURNS = 10
 
 AGENT_SCHEMA = """
+-- VARCHAR(255), not TEXT -- MariaDB/InnoDB refuses a bare TEXT column
+-- as a key without an explicit length; see ledger.lua's own SCHEMA
+-- comment for the full reasoning.
 CREATE TABLE IF NOT EXISTS agent_session (
-    id TEXT PRIMARY KEY,
+    id VARCHAR(255) PRIMARY KEY,
     login TEXT NOT NULL,
     title TEXT,
-    created_at TEXT DEFAULT (datetime('now', 'localtime')),
-    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+    created_at TEXT DEFAULT (%s),
+    updated_at TEXT DEFAULT (%s)
 );
 
 CREATE TABLE IF NOT EXISTS agent_message (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id INTEGER PRIMARY KEY %s,
     session_id TEXT NOT NULL,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
     in_context INTEGER DEFAULT 1,
-    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+    created_at TEXT DEFAULT (%s)
 );
 
 -- A destructive tool call the model has proposed but not yet run --
@@ -45,19 +48,27 @@ CREATE TABLE IF NOT EXISTS agent_message (
 -- rather than a blocking prompt: a single CGI request can't pause
 -- mid-call waiting on a human's real-world response time.
 CREATE TABLE IF NOT EXISTS agent_pending_action (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id INTEGER PRIMARY KEY %s,
     session_id TEXT NOT NULL,
     tool TEXT NOT NULL,
     method TEXT NOT NULL,
     args_json TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
-    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    created_at TEXT DEFAULT (%s),
     resolved_at TEXT
 );
 """
 
+function agent_schema_sql(db_path)
+    return string.format(AGENT_SCHEMA,
+        db.now_expr(db_path), db.now_expr(db_path),
+        db.autoincrement_keyword(db_path), db.now_expr(db_path),
+        db.autoincrement_keyword(db_path), db.now_expr(db_path)
+    )
+end
+
 function agent.init_schema(db_path)
-    return db.exec(db_path, AGENT_SCHEMA)
+    return db.exec(db_path, agent_schema_sql(db_path))
 end
 
 --------------------------------------------------------------------------
@@ -125,8 +136,8 @@ end
 
 function agent.touch_session(db_path, session_id)
     db.exec(db_path, string.format(
-        "UPDATE agent_session SET updated_at = datetime('now', 'localtime') WHERE id = %s;",
-        db.quote(session_id)
+        "UPDATE agent_session SET updated_at = %s WHERE id = %s;",
+        db.now_expr(db_path), db.quote(session_id)
     ))
 end
 
@@ -551,8 +562,8 @@ end
 
 function agent.resolve_pending_action(db_path, pending_id, status)
     db.exec(db_path, string.format(
-        "UPDATE agent_pending_action SET status = %s, resolved_at = datetime('now', 'localtime') WHERE id = %d;",
-        db.quote(status), tonumber(pending_id)
+        "UPDATE agent_pending_action SET status = %s, resolved_at = %s WHERE id = %d;",
+        db.quote(status), db.now_expr(db_path), tonumber(pending_id)
     ))
 end
 

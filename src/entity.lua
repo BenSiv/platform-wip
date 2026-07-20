@@ -300,8 +300,8 @@ function entity.archive(db_path, entity_type, entity_id, author, source)
     event_id = ledger.append_archive(db_path, entity_type, entity_id, author, source)
 
     db.exec(db_path, string.format(
-        "UPDATE %s SET archived_at = datetime('now', 'localtime'), updated_by = %s, last_event_id = %d WHERE id = %d;",
-        entity_type, db.literal(author), event_id, entity_id
+        "UPDATE %s SET archived_at = %s, updated_by = %s, last_event_id = %d WHERE id = %d;",
+        entity_type, db.now_expr(db_path), db.literal(author), event_id, entity_id
     ))
 
     extension.enqueue_after_hooks(db_path, config.extensions_dir(),

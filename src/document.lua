@@ -53,7 +53,10 @@ DOCUMENT_LINK_SCHEMA = """
 CREATE TABLE IF NOT EXISTS document_link (
     from_document_id INTEGER NOT NULL,
     to_document_id INTEGER,
-    link_text TEXT NOT NULL,
+    -- VARCHAR(255), not TEXT -- MariaDB/InnoDB refuses a bare TEXT
+    -- column as part of a key without an explicit length; see
+    -- ledger.lua's own SCHEMA comment for the full reasoning.
+    link_text VARCHAR(255) NOT NULL,
     PRIMARY KEY (from_document_id, link_text)
 );
 """
@@ -68,7 +71,7 @@ CREATE TABLE IF NOT EXISTS document_embedding (
     document_id INTEGER PRIMARY KEY,
     model TEXT NOT NULL,
     vector_json TEXT NOT NULL,
-    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+    updated_at TEXT DEFAULT (%s)
 );
 """
 
@@ -77,7 +80,7 @@ EMBEDDING_MODEL = "text-embedding-005"
 function document.init_schema(db_path)
     schema.register(db_path, DOCUMENT_SCHEMA)
     db.exec(db_path, DOCUMENT_LINK_SCHEMA)
-    db.exec(db_path, DOCUMENT_EMBEDDING_SCHEMA)
+    db.exec(db_path, string.format(DOCUMENT_EMBEDDING_SCHEMA, db.now_expr(db_path)))
 end
 
 --------------------------------------------------------------------------
@@ -214,8 +217,8 @@ function document.sync_links(db_path, document_id, content)
             subject, title = document.parse_link_ref(raw_link)
             to_id = document.resolve_link(db_path, subject, title)
             db.exec(db_path, string.format(
-                "INSERT OR IGNORE INTO document_link (from_document_id, to_document_id, link_text) VALUES (%d, %s, %s);",
-                tonumber(document_id), db.literal(to_id), db.quote(raw_link)
+                "%s document_link (from_document_id, to_document_id, link_text) VALUES (%d, %s, %s);",
+                db.insert_ignore(db_path), tonumber(document_id), db.literal(to_id), db.quote(raw_link)
             ))
         end
     end
@@ -370,8 +373,9 @@ function document.reindex_embedding(db_path, document_id)
     end
 
     db.exec(db_path, string.format(
-        "INSERT OR REPLACE INTO document_embedding (document_id, model, vector_json, updated_at) VALUES (%d, %s, %s, datetime('now', 'localtime'));",
-        tonumber(document_id), db.quote(EMBEDDING_MODEL), db.quote(json.encode(vector))
+        "%s document_embedding (document_id, model, vector_json, updated_at) VALUES (%d, %s, %s, %s);",
+        db.replace_into(db_path),
+        tonumber(document_id), db.quote(EMBEDDING_MODEL), db.quote(json.encode(vector)), db.now_expr(db_path)
     ))
     return true
 end

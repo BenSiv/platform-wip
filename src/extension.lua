@@ -18,15 +18,18 @@ extension = {}
 MAX_JOB_ATTEMPTS = 5
 
 extension.SCHEMA = """
+-- VARCHAR(255), not TEXT -- MariaDB/InnoDB refuses a bare TEXT column
+-- as a key without an explicit length; see ledger.lua's own SCHEMA
+-- comment for the full reasoning.
 CREATE TABLE IF NOT EXISTS extension_approval (
-    name TEXT PRIMARY KEY,
+    name VARCHAR(255) PRIMARY KEY,
     capabilities_json TEXT NOT NULL,
     approved_by TEXT,
-    approved_at TEXT DEFAULT (datetime('now', 'localtime'))
+    approved_at TEXT DEFAULT (%s)
 );
 
 CREATE TABLE IF NOT EXISTS extension_job (
-    job_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER PRIMARY KEY %s,
     extension_name TEXT NOT NULL,
     event_name TEXT NOT NULL,
     entity_type TEXT NOT NULL,
@@ -36,13 +39,20 @@ CREATE TABLE IF NOT EXISTS extension_job (
     status TEXT NOT NULL DEFAULT 'pending',
     attempts INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
-    created_at TEXT DEFAULT (datetime('now', 'localtime')),
-    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+    created_at TEXT DEFAULT (%s),
+    updated_at TEXT DEFAULT (%s)
 );
 """
 
+function extension_schema_sql(db_path)
+    return string.format(extension.SCHEMA,
+        db.now_expr(db_path), db.autoincrement_keyword(db_path),
+        db.now_expr(db_path), db.now_expr(db_path)
+    )
+end
+
 function extension.init_schema(db_path)
-    return db.exec(db_path, extension.SCHEMA)
+    return db.exec(db_path, extension_schema_sql(db_path))
 end
 
 function read_file(path)
@@ -248,8 +258,9 @@ function extension.approve(db_path, manifest, approved_by)
     if caps == nil then caps = {} end
     caps_json = json.encode(caps)
     db.exec(db_path, string.format(
-        "INSERT OR REPLACE INTO extension_approval (name, capabilities_json, approved_by, approved_at) VALUES (%s, %s, %s, datetime('now', 'localtime'));",
-        db.quote(manifest.name), db.quote(caps_json), db.literal(approved_by)
+        "%s extension_approval (name, capabilities_json, approved_by, approved_at) VALUES (%s, %s, %s, %s);",
+        db.replace_into(db_path),
+        db.quote(manifest.name), db.quote(caps_json), db.literal(approved_by), db.now_expr(db_path)
     ))
 end
 
@@ -327,8 +338,8 @@ end
 
 function extension.mark_job_done(db_path, job)
     db.exec(db_path, string.format(
-        "UPDATE extension_job SET status = 'done', updated_at = datetime('now', 'localtime') WHERE job_id = %d;",
-        tonumber(job.job_id)
+        "UPDATE extension_job SET status = 'done', updated_at = %s WHERE job_id = %d;",
+        db.now_expr(db_path), tonumber(job.job_id)
     ))
 end
 
@@ -343,8 +354,8 @@ function extension.mark_job_failed(db_path, job, message)
         status = "failed"
     end
     db.exec(db_path, string.format(
-        "UPDATE extension_job SET status = %s, attempts = %d, last_error = %s, updated_at = datetime('now', 'localtime') WHERE job_id = %d;",
-        db.quote(status), attempts, db.quote(message), tonumber(job.job_id)
+        "UPDATE extension_job SET status = %s, attempts = %d, last_error = %s, updated_at = %s WHERE job_id = %d;",
+        db.quote(status), attempts, db.quote(message), db.now_expr(db_path), tonumber(job.job_id)
     ))
 end
 

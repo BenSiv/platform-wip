@@ -116,4 +116,70 @@ function db.literal(value)
     return db.quote(value)
 end
 
+-- The remaining four helpers below are for MariaDB migration Phase 3
+-- (see doc/mariadb-migration.md): every other file's SQLite-dialect
+-- DDL/DML tokens (AUTOINCREMENT, datetime('now','localtime'),
+-- INSERT OR REPLACE/IGNORE) route through these instead of being
+-- hardcoded, so db_path's backend decides the actual SQL text at the
+-- one call site that already has db_path in scope -- no change needed
+-- to db_path's own threading anywhere else.
+
+-- SQL expression for "the current timestamp", backend-appropriate.
+-- Embed directly into a query string via string.format's %s.
+function db.now_expr(db_path)
+    if is_mariadb(db_path) then
+        return "NOW()"
+    end
+    return "datetime('now', 'localtime')"
+end
+
+-- The auto-increment keyword for an `INTEGER PRIMARY KEY <this>` column
+-- declaration. Only the keyword differs between engines -- SQLite
+-- requires the type name spelled exactly "INTEGER" for its rowid-alias
+-- behavior, but MariaDB doesn't care whether it's INTEGER or INT, so
+-- the surrounding "INTEGER PRIMARY KEY" text stays the same for both.
+function db.autoincrement_keyword(db_path)
+    if is_mariadb(db_path) then
+        return "AUTO_INCREMENT"
+    end
+    return "AUTOINCREMENT"
+end
+
+-- Upsert-by-replace statement prefix (goes before "<table> (<cols>) VALUES ...").
+-- MariaDB's REPLACE INTO needs no "INSERT OR" prefix; semantics match
+-- SQLite's INSERT OR REPLACE closely enough for this codebase's usage
+-- (no foreign-key constraints exist yet for its delete+insert behavior
+-- to disturb).
+function db.replace_into(db_path)
+    if is_mariadb(db_path) then
+        return "REPLACE INTO"
+    end
+    return "INSERT OR REPLACE INTO"
+end
+
+-- Insert-ignoring-conflicts statement prefix (goes before "<table> (<cols>) VALUES ...").
+function db.insert_ignore(db_path)
+    if is_mariadb(db_path) then
+        return "INSERT IGNORE INTO"
+    end
+    return "INSERT OR IGNORE INTO"
+end
+
+-- Column reference for a `CREATE INDEX ... ON table(<this>)` clause,
+-- safe to use on a TEXT column of unbounded length. MariaDB/InnoDB
+-- refuses a bare TEXT/BLOB column in ANY index (not just a primary
+-- key) without an explicit prefix length ("BLOB/TEXT column ... used
+-- in key specification without a key length") -- confirmed live. A
+-- 255-char prefix is plenty for this codebase's actual indexed TEXT
+-- columns (content hashes, external ids). SQLite has no equivalent
+-- prefix-length syntax at all (it would be a syntax error there), so
+-- this can't be unified into one string the way VARCHAR(255) unified
+-- the primary-key case -- has to branch.
+function db.text_index_column(db_path, column_name)
+    if is_mariadb(db_path) then
+        return column_name .. "(255)"
+    end
+    return column_name
+end
+
 return db

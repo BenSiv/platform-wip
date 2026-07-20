@@ -17,16 +17,19 @@ sandbox = require("sandbox")
 view = {}
 
 view.SCHEMA = """
+-- VARCHAR(255), not TEXT -- MariaDB/InnoDB refuses a bare TEXT column
+-- as a key without an explicit length; see ledger.lua's own SCHEMA
+-- comment for the full reasoning.
 CREATE TABLE IF NOT EXISTS view_approval (
-    name TEXT PRIMARY KEY,
+    name VARCHAR(255) PRIMARY KEY,
     sql_text TEXT NOT NULL,
     approved_by TEXT,
-    approved_at TEXT DEFAULT (datetime('now', 'localtime'))
+    approved_at TEXT DEFAULT (%s)
 );
 """
 
 function view.init_schema(db_path)
-    return db.exec(db_path, view.SCHEMA)
+    return db.exec(db_path, string.format(view.SCHEMA, db.now_expr(db_path)))
 end
 
 function read_file(path)
@@ -201,8 +204,9 @@ end
 function view.approve(db_path, def, approved_by)
     view.init_schema(db_path)
     db.exec(db_path, string.format(
-        "INSERT OR REPLACE INTO view_approval (name, sql_text, approved_by, approved_at) VALUES (%s, %s, %s, datetime('now', 'localtime'));",
-        db.quote(def.name), db.quote(def.sql), db.literal(approved_by)
+        "%s view_approval (name, sql_text, approved_by, approved_at) VALUES (%s, %s, %s, %s);",
+        db.replace_into(db_path),
+        db.quote(def.name), db.quote(def.sql), db.literal(approved_by), db.now_expr(db_path)
     ))
 end
 

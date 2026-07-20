@@ -24,17 +24,20 @@ auth = {}
 SESSION_TTL_SECONDS = 60 * 60 * 24 * 7 -- 7 days
 
 auth.SCHEMA = """
+-- VARCHAR(255), not TEXT -- MariaDB/InnoDB refuses a bare TEXT column
+-- as a key without an explicit length; see ledger.lua's own SCHEMA
+-- comment for the full reasoning.
 CREATE TABLE IF NOT EXISTS user (
-    login TEXT PRIMARY KEY,
+    login VARCHAR(255) PRIMARY KEY,
     password_hash TEXT NOT NULL,
     cap TEXT NOT NULL DEFAULT '',
-    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    created_at TEXT DEFAULT (%s),
     archived_at TEXT
 );
 """
 
 function auth.init_schema(db_path)
-    return db.exec(db_path, auth.SCHEMA)
+    return db.exec(db_path, string.format(auth.SCHEMA, db.now_expr(db_path)))
 end
 
 -- A per-store HMAC secret, generated once from /dev/urandom and never
@@ -207,7 +210,7 @@ function auth.archive_user(db_path, login)
         return nil, "no such user: " .. login
     end
     db.exec(db_path, string.format(
-        "UPDATE user SET archived_at = datetime('now', 'localtime') WHERE login = %s;", db.quote(login)
+        "UPDATE user SET archived_at = %s WHERE login = %s;", db.now_expr(db_path), db.quote(login)
     ))
     return true
 end

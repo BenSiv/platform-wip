@@ -123,7 +123,7 @@ end
 function schema.register(db_path, def)
     ensure_entity_field_display_column(db_path)
     db.exec(db_path, string.format(
-        "INSERT OR IGNORE INTO entity_type (name) VALUES (%s);", db.quote(def.name)
+        "%s entity_type (name) VALUES (%s);", db.insert_ignore(db_path), db.quote(def.name)
     ))
 
     for i, field in ipairs(def.fields) do
@@ -141,7 +141,8 @@ function schema.register(db_path, def)
             display_flag = 1
         end
         db.exec(db_path, string.format(
-            "INSERT OR REPLACE INTO entity_field (entity_type, name, type, required, enum_values, ref_entity_type, field_order, display) VALUES (%s, %s, %s, %d, %s, %s, %d, %d);",
+            "%s entity_field (entity_type, name, type, required, enum_values, ref_entity_type, field_order, display) VALUES (%s, %s, %s, %d, %s, %s, %d, %d);",
+            db.replace_into(db_path),
             db.quote(def.name), db.quote(field.name), db.quote(field.type),
             required_flag,
             db.literal(enum_json),
@@ -173,23 +174,30 @@ end
 -- entity_field.display column) is a reasonable per-type fallback for
 -- data that has no such external source, but shouldn't be the first
 -- choice when a real name already exists.
-BUILTIN_COLUMNS = {
-    {name = "created_by", sql_type = "TEXT"},
-    {name = "created_at", sql_type = "TEXT DEFAULT (datetime('now', 'localtime'))"},
-    {name = "updated_by", sql_type = "TEXT"},
-    {name = "updated_at", sql_type = "TEXT DEFAULT (datetime('now', 'localtime'))"},
-    {name = "last_event_id", sql_type = "INTEGER"},
-    {name = "external_id", sql_type = "TEXT"},
-    {name = "name", sql_type = "TEXT"},
-    -- NULL means active; a real timestamp means archived. Never a
-    -- boolean/plain flag -- recording *when* costs nothing extra and
-    -- means "archived" doesn't need a second column to also answer
-    -- "since when". Nothing ever hard-deletes a row; this plus the
-    -- ledger's own 'archive' event (ledger.append_archive) are the only
-    -- two places "this entity is no longer active" is recorded, and
-    -- both are additive, not destructive.
-    {name = "archived_at", sql_type = "TEXT"},
-}
+-- A function of db_path, not a static table, since created_at/
+-- updated_at's default-value expression is backend-specific
+-- (db.now_expr) -- db_path isn't known at module-load time, only once
+-- schema.sync_table is actually called.
+function builtin_columns(db_path)
+    now_expr = db.now_expr(db_path)
+    return {
+        {name = "created_by", sql_type = "TEXT"},
+        {name = "created_at", sql_type = "TEXT DEFAULT (" .. now_expr .. ")"},
+        {name = "updated_by", sql_type = "TEXT"},
+        {name = "updated_at", sql_type = "TEXT DEFAULT (" .. now_expr .. ")"},
+        {name = "last_event_id", sql_type = "INTEGER"},
+        {name = "external_id", sql_type = "TEXT"},
+        {name = "name", sql_type = "TEXT"},
+        -- NULL means active; a real timestamp means archived. Never a
+        -- boolean/plain flag -- recording *when* costs nothing extra and
+        -- means "archived" doesn't need a second column to also answer
+        -- "since when". Nothing ever hard-deletes a row; this plus the
+        -- ledger's own 'archive' event (ledger.append_archive) are the only
+        -- two places "this entity is no longer active" is recorded, and
+        -- both are additive, not destructive.
+        {name = "archived_at", sql_type = "TEXT"},
+    }
+end
 
 -- Creates the projected table if it doesn't exist, or adds any columns
 -- for fields/builtins that aren't present yet. Never drops or renames a
@@ -197,18 +205,19 @@ BUILTIN_COLUMNS = {
 -- automatic one.
 function schema.sync_table(db_path, def)
     if db.table_exists(db_path, def.name) == false then
-        columns = {"id INTEGER PRIMARY KEY AUTOINCREMENT"}
+        columns = {"id INTEGER PRIMARY KEY " .. db.autoincrement_keyword(db_path)}
         for _, field in ipairs(def.fields) do
             table.insert(columns, field.name .. " " .. SQL_TYPE[field.type])
         end
-        for _, builtin in ipairs(BUILTIN_COLUMNS) do
+        for _, builtin in ipairs(builtin_columns(db_path)) do
             table.insert(columns, builtin.name .. " " .. builtin.sql_type)
         end
         db.exec(db_path, string.format(
             "CREATE TABLE %s (%s);", def.name, table.concat(columns, ", ")
         ))
         db.exec(db_path, string.format(
-            "CREATE INDEX IF NOT EXISTS idx_%s_external_id ON %s (external_id);", def.name, def.name
+            "CREATE INDEX IF NOT EXISTS idx_%s_external_id ON %s (%s);",
+            def.name, def.name, db.text_index_column(db_path, "external_id")
         ))
         return
     end
@@ -225,7 +234,7 @@ function schema.sync_table(db_path, def)
             ))
         end
     end
-    for _, builtin in ipairs(BUILTIN_COLUMNS) do
+    for _, builtin in ipairs(builtin_columns(db_path)) do
         if have[builtin.name] == nil then
             db.exec(db_path, string.format(
                 "ALTER TABLE %s ADD COLUMN %s %s;", def.name, builtin.name, builtin.sql_type
@@ -233,7 +242,8 @@ function schema.sync_table(db_path, def)
         end
     end
     db.exec(db_path, string.format(
-        "CREATE INDEX IF NOT EXISTS idx_%s_external_id ON %s (external_id);", def.name, def.name
+        "CREATE INDEX IF NOT EXISTS idx_%s_external_id ON %s (%s);",
+        def.name, def.name, db.text_index_column(db_path, "external_id")
     ))
 end
 

@@ -14,14 +14,23 @@ json = require("dkjson")
 ledger = {}
 
 ledger.SCHEMA = """
+-- VARCHAR(255), not TEXT, on every column that's a primary or
+-- composite key below -- MariaDB/InnoDB refuses a bare TEXT/BLOB
+-- column in a key without an explicit bounded length ("BLOB/TEXT
+-- column 'name' used in key specification without a key length"),
+-- unlike SQLite, which has no such restriction. VARCHAR(n) behaves
+-- identically to TEXT in SQLite (both get TEXT type affinity, the
+-- length is purely decorative there), so this is safe for both
+-- engines rather than needing a backend branch -- non-key TEXT
+-- columns elsewhere in this file are untouched.
 CREATE TABLE IF NOT EXISTS entity_type (
-    name TEXT PRIMARY KEY,
-    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+    name VARCHAR(255) PRIMARY KEY,
+    created_at TEXT DEFAULT (%s)
 );
 
 CREATE TABLE IF NOT EXISTS entity_field (
-    entity_type TEXT NOT NULL,
-    name TEXT NOT NULL,
+    entity_type VARCHAR(255) NOT NULL,
+    name VARCHAR(255) NOT NULL,
     type TEXT NOT NULL,
     required INTEGER DEFAULT 0,
     enum_values TEXT,
@@ -31,20 +40,22 @@ CREATE TABLE IF NOT EXISTS entity_field (
 );
 
 CREATE TABLE IF NOT EXISTS entity_event (
-    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER PRIMARY KEY %s,
     entity_id INTEGER,
     entity_type TEXT NOT NULL,
     event_type TEXT NOT NULL,
     field_changes TEXT NOT NULL,
     author TEXT,
-    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    created_at TEXT DEFAULT (%s),
     source_notebook_entry_id TEXT,
     source_row_id TEXT
 );
 """
 
 function ledger.init_schema(db_path)
-    return db.exec(db_path, ledger.SCHEMA)
+    return db.exec(db_path, string.format(ledger.SCHEMA,
+        db.now_expr(db_path), db.autoincrement_keyword(db_path), db.now_expr(db_path)
+    ))
 end
 
 -- Appends a 'create' event and returns the new entity_id.

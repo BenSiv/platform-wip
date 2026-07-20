@@ -96,6 +96,40 @@ run_cmd env CC="" "$LUAM_BIN" "$STATIC_TOOL" \
     -I "$LUAM_DIR/src" \
     -lm -ldl -lreadline -lpthread
 
+# MariaDB support (doc/mariadb-migration.md) is compiled in and
+# preload-registered the same way sqlite3/bcrypt/hmac already are --
+# but CONDITIONALLY, unlike those three: libmariadb-dev is a genuinely
+# optional build-time dependency (not yet installed in the production
+# Docker builder image, elab/schema/platform/Dockerfile), so a dev
+# machine or CI runner without it must still get a working, SQLite-only
+# binary rather than a hard build failure. Presence of the header is
+# the same proxy luam's own bld/build_libs.sh uses (a `-d lib/mariadb`
+# directory check there; a header-file check here, since this is a
+# system dependency rather than a vendored source directory).
+MARIADB_HEADER="/usr/include/mariadb/mysql.h"
+MARIADB_OBJS=""
+MARIADB_LIBS=""
+MARIADB_DECL_SED=""
+MARIADB_REGISTER_SED=""
+if [ -f "$MARIADB_HEADER" ]; then
+    echo "libmariadb-dev found -- compiling in MariaDB support"
+    MARIADB_OBJS="lmariadb.o"
+    MARIADB_LIBS="-lmariadb"
+    MARIADB_DECL_SED='
+  int luaopen_mariadb(lua_State *L); \'
+    # Must come AFTER lua_getfield(L, -1, "preload") below, not grouped
+    # with the plain declaration above -- confirmed live: pushing/
+    # setfield-ing before package.preload is even on the stack indexes
+    # whatever garbage happens to be at -2 instead, crashing with
+    # "PANIC: unprotected error in call to Lua API (attempt to index a
+    # nil value)" the first time the binary ran at all.
+    MARIADB_REGISTER_SED='
+  lua_pushcfunction(L, luaopen_mariadb); \
+  lua_setfield(L, -2, "mariadb"); \'
+else
+    echo "libmariadb-dev not found -- building without MariaDB support (SQLite only)"
+fi
+
 # Inject lsqlite3, lfs, bcrypt, and hmac preload -- same reasoning as
 # fossci's own build.sh for the first two (schemas/views/templates are
 # plain Luam table files, no YAML/JSON parser needed; lfs is a native C
@@ -109,23 +143,26 @@ run_cmd env CC="" "$LUAM_BIN" "$STATIC_TOOL" \
 # platform's own crypt_gensalt/crypt_r bcrypt support
 # (glibc/libxcrypt); hmac is a thin wrapper over OpenSSL libcrypto's
 # HMAC-SHA256 -- neither is a vendored implementation, see each file's
-# own header comment.
-run_cmd sed -i '/luaL_openlibs(L);/a \
-  int luaopen_sqlite3(lua_State *L); \
-  int luaopen_lfs(lua_State *L); \
-  int luaopen_bcrypt(lua_State *L); \
-  int luaopen_hmac(lua_State *L); \
-  lua_getglobal(L, "package"); \
-  lua_getfield(L, -1, "preload"); \
-  lua_pushcfunction(L, luaopen_sqlite3); \
-  lua_setfield(L, -2, "sqlite3"); \
-  lua_pushcfunction(L, luaopen_lfs); \
-  lua_setfield(L, -2, "lfs"); \
-  lua_pushcfunction(L, luaopen_bcrypt); \
-  lua_setfield(L, -2, "bcrypt"); \
-  lua_pushcfunction(L, luaopen_hmac); \
-  lua_setfield(L, -2, "hmac"); \
-  lua_pop(L, 2);' "${ENTRY_STEM}.static.c"
+# own header comment. mariadb (luam/lib/mariadb/lmariadb.c) is
+# conditionally injected above, declaration grouped with the other
+# three but its push/setfield pair placed after preload is fetched,
+# same as sqlite3/lfs/bcrypt/hmac's own pairs below.
+run_cmd sed -i "/luaL_openlibs(L);/a \\
+  int luaopen_sqlite3(lua_State *L); \\
+  int luaopen_lfs(lua_State *L); \\
+  int luaopen_bcrypt(lua_State *L); \\
+  int luaopen_hmac(lua_State *L); \\${MARIADB_DECL_SED}
+  lua_getglobal(L, \"package\"); \\
+  lua_getfield(L, -1, \"preload\"); \\
+  lua_pushcfunction(L, luaopen_sqlite3); \\
+  lua_setfield(L, -2, \"sqlite3\"); \\
+  lua_pushcfunction(L, luaopen_lfs); \\
+  lua_setfield(L, -2, \"lfs\"); \\
+  lua_pushcfunction(L, luaopen_bcrypt); \\
+  lua_setfield(L, -2, \"bcrypt\"); \\
+  lua_pushcfunction(L, luaopen_hmac); \\
+  lua_setfield(L, -2, \"hmac\"); \\${MARIADB_REGISTER_SED}
+  lua_pop(L, 2);" "${ENTRY_STEM}.static.c"
 
 # Compile lsqlite3
 run_cmd cc -c -O2 -I"$LUAM_DIR/src" "$LUAM_DIR/lib/sqlite/lsqlite3.c" -o lsqlite3.o
@@ -139,10 +176,16 @@ run_cmd cc -c -O2 -I"$LUAM_DIR/src" "$LUAM_DIR/lib/bcrypt/bcrypt.c" -o lbcrypt.o
 # Compile hmac binding
 run_cmd cc -c -O2 -I"$LUAM_DIR/src" "$LUAM_DIR/lib/hmac/hmac.c" -o lhmac.o
 
+# Compile mariadb binding (only if libmariadb-dev is present -- see above)
+if [ -f "$MARIADB_HEADER" ]; then
+    run_cmd cc -c -O2 -I"$LUAM_DIR/src" -I/usr/include/mariadb -I/usr/include/mariadb/mysql \
+        "$LUAM_DIR/lib/mariadb/lmariadb.c" -o lmariadb.o
+fi
+
 # Compile binary
-run_cmd cc -Os "${ENTRY_STEM}.static.c" lsqlite3.o lfs.o lbcrypt.o lhmac.o "$LUAM_LIB" \
+run_cmd cc -Os "${ENTRY_STEM}.static.c" lsqlite3.o lfs.o lbcrypt.o lhmac.o $MARIADB_OBJS "$LUAM_LIB" \
     -I "$LUAM_DIR/src" \
-    -lm -ldl -lreadline -lpthread -lsqlite3 -lcrypt -lcrypto \
+    -lm -ldl -lreadline -lpthread -lsqlite3 -lcrypt -lcrypto $MARIADB_LIBS \
     -Wl,--export-dynamic \
     -o "$BIN_NAME"
 
