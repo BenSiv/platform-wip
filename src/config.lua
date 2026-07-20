@@ -141,7 +141,7 @@ end
 -- <fallback>) defaults (its current indigo/slate palette) untouched.
 -- site_name similarly defaults to a generic label, never a company name.
 function config.load_theme(root)
-    theme = {site_name = "Platform", colors = {}, has_logo = false}
+    theme = {site_name = "Platform", colors = {}, has_logo = false, hide_home_heading = false}
     path = config.theme_path(root)
     file = io.open(path, "r")
     if file == nil then
@@ -171,6 +171,14 @@ function config.load_theme(root)
     end
     if parsed.has_logo == true then
         theme.has_logo = true
+    end
+    -- For a deployment whose logo image already contains the company
+    -- name (a wordmark, not just a mark) -- repeating it as a second,
+    -- redundant text heading on Home reads as a mistake, not a
+    -- feature. A generic hook, not a Celleste-specific behavior baked
+    -- into html.lua: any deployment can opt into it, none are forced to.
+    if parsed.hide_home_heading == true then
+        theme.hide_home_heading = true
     end
     if type(parsed.colors) == "table" then
         for _, key in ipairs(THEME_COLOR_KEYS) do

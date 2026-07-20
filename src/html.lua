@@ -1738,9 +1738,11 @@ end
 function html.render_home(theme, show_sql, show_admin)
     site_name = "Platform"
     has_logo = false
+    hide_home_heading = false
     if theme != nil then
         site_name = theme.site_name
         has_logo = theme.has_logo == true
+        hide_home_heading = theme.hide_home_heading == true
     end
 
     -- Full wordmark, distinct from the sidebar's small square mark
@@ -1752,6 +1754,16 @@ function html.render_home(theme, show_sql, show_admin)
             '<img class="fossci-home-logo" src="theme-asset?name=logo-full.png" alt="%s">',
             html.html_escape(site_name)
         )
+    end
+
+    -- hide_home_heading is for a deployment whose logo already reads as
+    -- a wordmark (the name is IN the image) -- a plain text <h2> repeating
+    -- the same name right underneath is redundant, not a platform-wide
+    -- default. Ignored (heading always shows) when there's no logo to
+    -- stand in for it -- a page with neither would just look empty.
+    heading_html = ""
+    if not (hide_home_heading and has_logo) then
+        heading_html = "<h2>" .. html.html_escape(site_name) .. "</h2>"
     end
 
     system_link = ""
@@ -1777,7 +1789,7 @@ function html.render_home(theme, show_sql, show_admin)
     <div class="fossci-container">
         <div class="fossci-header">
             %s
-            <h2>%s</h2>
+            %s
             <p>Welcome back. Use the sidebar to get around, or jump in below.</p>
         </div>
         <ul class="fossci-sitemap">
@@ -1789,7 +1801,7 @@ function html.render_home(theme, show_sql, show_admin)
         </ul>
     </div>
 </div>
-""", fossci_container_css(1200), logo_html, html.html_escape(site_name), system_link)
+""", fossci_container_css(1200), logo_html, heading_html, system_link)
 end
 
 -- Landing page for Setup/Admin-only tooling -- a single destination
@@ -2275,7 +2287,6 @@ function html.render_sql(db_path, sql_text, column_names, rows, err, ref_columns
         .fossci-nlsql-status { font-size: 0.8rem; color: var(--fossci-muted, #64748b); white-space: nowrap; }
         %s
     </style>
-    %s
     <div class="fossci-container">
         <div class="fossci-header">
             <h2>Query</h2>
@@ -2294,7 +2305,7 @@ function html.render_sql(db_path, sql_text, column_names, rows, err, ref_columns
     </div>
 </div>
 %s
-""", fossci_container_css(1100), fossci_button_css(), html.popover_css(), embed_css, escaped_sql, result_html, html.popover_js(nonce))
+""", fossci_container_css(1100), fossci_button_css(), html.popover_css() .. embed_css, escaped_sql, result_html, html.popover_js(nonce))
 end
 
 --------------------------------------------------------------------------
@@ -2929,6 +2940,7 @@ function fossci_chat_widget_css()
 }
 .fossci-chat-widget-empty { padding: 20px; text-align: center; color: var(--fossci-muted, #64748b); font-size: 0.85rem; }
 .fossci-chat-widget-thinking { padding: 8px 10px; color: var(--fossci-muted, #64748b); font-size: 0.85rem; font-style: italic; }
+.fossci-chat-widget-error { padding: 8px 10px; color: #991b1b; background: #fef2f2; border: 1px solid #fecaca; border-radius: var(--fossci-radius-sm, 8px); font-size: 0.85rem; margin: 4px 0; }
 """
 end
 
@@ -3096,11 +3108,30 @@ function html.render_chat_widget(nonce)
         return el;
     }
 
+    // A rejected fetch (network drop, a request landing mid-server-
+    // restart, CORS, whatever) previously vanished completely -- the
+    // thinking indicator was removed and nothing else happened, so a
+    // real failure looked identical to "nothing was typed" (confirmed
+    // live: reported as "showed thinking, then nothing, my message
+    // wasn't even in the chat"). This is a different gap than
+    // agent.execute_tool's own errors (agent.lua, server-persisted,
+    // shows as a real transcript row) -- a fetch that never reaches
+    // the server has nothing for the server to persist, so this has
+    // to be a client-side-only message instead.
+    function showFetchError() {
+        var el = document.createElement('div');
+        el.className = 'fossci-chat-widget-error';
+        el.textContent = 'Something went wrong sending that -- please try again.';
+        messagesEl.appendChild(el);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
     form.addEventListener('submit', function(e){
         e.preventDefault();
-        var text = input.value;
-        if (!text) return;
+        var typedText = input.value;
+        if (!typedText) return;
         input.value = '';
+        var text = typedText;
         // Read lazily, at send time, not at widget-init time -- whatever
         // page.PLATFORM_PAGE_CONTEXT is *right now* is what the agent
         // should be told, every message, not just the first -- if the
@@ -3118,7 +3149,7 @@ function html.render_chat_widget(nonce)
         ensureSession().then(function(sessionId){
             return post('api/chat-widget-send', {session_id: sessionId, message: text});
         }).then(function(state){ thinkingEl.remove(); render(state); })
-          .catch(function(){ thinkingEl.remove(); });
+          .catch(function(){ thinkingEl.remove(); showFetchError(); input.value = typedText; });
     });
 
     messagesEl.addEventListener('click', function(e){
@@ -3127,7 +3158,7 @@ function html.render_chat_widget(nonce)
             var thinkingEl = showThinking();
             post('api/chat-widget-approve', {pending_id: e.target.getAttribute('data-approve'), session_id: sessionId})
                 .then(function(state){ thinkingEl.remove(); render(state); })
-                .catch(function(){ thinkingEl.remove(); });
+                .catch(function(){ thinkingEl.remove(); showFetchError(); });
         } else if (e.target.hasAttribute('data-deny')) {
             post('api/chat-widget-deny', {pending_id: e.target.getAttribute('data-deny'), session_id: sessionId}).then(render);
         }
