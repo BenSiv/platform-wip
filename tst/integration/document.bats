@@ -84,6 +84,25 @@ raw_document_preview() {
     [[ "$output" =~ 'href="document?entity_id=1">Home</a> / <a href="document?entity_id=2">Guides</a> / Setup' ]]
 }
 
+@test "/document embeds PLATFORM_PAGE_CONTEXT with entity_type/entity_id/title for the chat widget" {
+    save_document "csrf_token=${CSRF}&title=Home&parent_id=&content=" >/dev/null
+
+    run get_route "/document" "entity_id=1"
+    # dkjson's key order isn't guaranteed -- assert each field individually.
+    [[ "$output" =~ 'window.PLATFORM_PAGE_CONTEXT = {' ]]
+    [[ "$output" =~ '"title":"Home"' ]]
+    [[ "$output" =~ '"entity_type":"document"' ]]
+    [[ "$output" =~ '"entity_id":1' ]]
+    [[ "$output" =~ '"page_type":"document"' ]]
+}
+
+@test "a page with no entity-specific context still gets a baseline PLATFORM_PAGE_CONTEXT" {
+    run get_route "/data" ""
+    [[ "$output" =~ 'window.PLATFORM_PAGE_CONTEXT = {' ]]
+    [[ "$output" =~ '"title":"Data"' ]]
+    [[ "$output" =~ '"page_type":"data"' ]]
+}
+
 @test "a [[title]] link resolves to a real page and renders as a link; an unknown one renders as a dangling marker" {
     save_document "csrf_token=${CSRF}&title=Home&parent_id=&content=" >/dev/null
     save_document "csrf_token=${CSRF}&title=Guides&parent_id=1&content=Back+to+%5B%5BHome%5D%5D+and+%5B%5BNowhere%5D%5D." >/dev/null

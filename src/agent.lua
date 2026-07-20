@@ -174,7 +174,7 @@ function agent.display_content(content)
     if content == nil then
         return content
     end
-    content = string.gsub(content, "^%[Current page: \".-\" %(id=%d+%)%]\n\n", "")
+    content = string.gsub(content, "^%[Current page: .-%]\n\n", "")
     done_message = string.match(content, "^%s*<done>%s*(.-)%s*</done>%s*$")
     if done_message != nil then
         return done_message

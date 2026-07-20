@@ -506,8 +506,9 @@ function cgi.handle_request()
         layout_json = json.encode(layout)
 
         body = html.render(entity_type, layout_json, nonce)
+        page_context = {page_type = "entity_register", entity_type = entity_type, title = entity_type .. " · Register"}
         return print_response("200 OK", "text/html",
-            html.page_shell(entity_type .. " · Register", "data", body, nonce, show_sql_nav, show_admin_nav, theme, author))
+            html.page_shell(entity_type .. " · Register", "data", body, nonce, show_sql_nav, show_admin_nav, theme, author, page_context))
     end
 
     if path_info == "/browse" then
@@ -532,8 +533,9 @@ function cgi.handle_request()
         offset = (page - 1) * BROWSE_PAGE_SIZE
         rows = entity.list(db_path, entity_type, BROWSE_PAGE_SIZE, offset)
         body = html.render_browse(db_path, entity_type, layout, rows, page, BROWSE_PAGE_SIZE, total, nonce)
+        page_context = {page_type = "entity_browse", entity_type = entity_type, title = entity_type .. " · Browse"}
         return print_response("200 OK", "text/html",
-            html.page_shell(entity_type .. " · Browse", "data", body, nonce, show_sql_nav, show_admin_nav, theme, author))
+            html.page_shell(entity_type .. " · Browse", "data", body, nonce, show_sql_nav, show_admin_nav, theme, author, page_context))
     end
 
     -- A simple, mostly-static landing page -- basic information and
@@ -604,8 +606,10 @@ function cgi.handle_request()
 
         history = ledger.history(db_path, entity_id)
         body = html.render_detail(db_path, entity_type, layout, row, history, nonce)
+        page_context = {page_type = "entity_detail", entity_type = entity_type, entity_id = entity_id,
+                         title = entity_type .. " #" .. tostring(entity_id)}
         return print_response("200 OK", "text/html",
-            html.page_shell(entity_type .. " #" .. tostring(entity_id), "data", body, nonce, show_sql_nav, show_admin_nav, theme, author))
+            html.page_shell(entity_type .. " #" .. tostring(entity_id), "data", body, nonce, show_sql_nav, show_admin_nav, theme, author, page_context))
     end
 
     if path_info == "/view" then
@@ -633,8 +637,9 @@ function cgi.handle_request()
             return print_response("500 Internal Server Error", "text/html", "<h3>Error: " .. tostring(err) .. "</h3>")
         end
         body = html.render_view(view_def, rows, param_value)
+        page_context = {page_type = "view", view_name = view_name, title = view_name}
         return print_response("200 OK", "text/html",
-            html.page_shell(view_name, "data", body, nonce, show_sql_nav, show_admin_nav, theme, author))
+            html.page_shell(view_name, "data", body, nonce, show_sql_nav, show_admin_nav, theme, author, page_context))
     end
 
     -- Documents (src/document.lua): a real parent_id tree, not a
@@ -666,9 +671,10 @@ function cgi.handle_request()
         breadcrumbs = document.breadcrumbs(db_path, entity_id)
         children = document.children(db_path, entity_id)
         backlinks = document.backlinks(db_path, entity_id)
-        body = html.render_document(doc, rendered_html, breadcrumbs, children, backlinks, true, nonce)
+        body = html.render_document(doc, rendered_html, breadcrumbs, children, backlinks, true)
+        page_context = {page_type = "document", entity_type = "document", entity_id = doc.id, title = doc.title}
         return print_response("200 OK", "text/html",
-            html.page_shell(doc.title, "documents", body, nonce, show_sql_nav, show_admin_nav, theme, author))
+            html.page_shell(doc.title, "documents", body, nonce, show_sql_nav, show_admin_nav, theme, author, page_context))
     end
 
     if path_info == "/document-edit" then
@@ -686,8 +692,9 @@ function cgi.handle_request()
         end
         parent_options_html = html.document_parent_options(document.all_active(db_path), parent_id, entity_id)
         body = html.render_document_edit(doc, parent_options_html, default_value(cookies.csrf, ""), nil, nonce)
+        page_context = {page_type = "document_edit", entity_type = "document", entity_id = entity_id, title = "Edit page"}
         return print_response("200 OK", "text/html",
-            html.page_shell("Edit page", "documents", body, nonce, show_sql_nav, show_admin_nav, theme, author))
+            html.page_shell("Edit page", "documents", body, nonce, show_sql_nav, show_admin_nav, theme, author, page_context))
     end
 
     if path_info == "/document-save" and method == "POST" then
@@ -707,8 +714,9 @@ function cgi.handle_request()
             parent_options_html = html.document_parent_options(document.all_active(db_path), parent_id, entity_id)
             body = html.render_document_edit(doc, parent_options_html, default_value(cookies.csrf, ""),
                 "Can't move a page underneath its own sub-page.", nonce)
+            page_context = {page_type = "document_edit", entity_type = "document", entity_id = entity_id, title = "Edit page"}
             return print_response("200 OK", "text/html",
-                html.page_shell("Edit page", "documents", body, nonce, show_sql_nav, show_admin_nav, theme, author))
+                html.page_shell("Edit page", "documents", body, nonce, show_sql_nav, show_admin_nav, theme, author, page_context))
         end
 
         saved_id = nil
@@ -729,8 +737,9 @@ function cgi.handle_request()
             parent_options_html = html.document_parent_options(document.all_active(db_path), parent_id, entity_id)
             body = html.render_document_edit(doc, parent_options_html, default_value(cookies.csrf, ""),
                 issues_to_message(issues), nonce)
+            page_context = {page_type = "document_edit", entity_type = "document", entity_id = entity_id, title = "Edit page"}
             return print_response("200 OK", "text/html",
-                html.page_shell("Edit page", "documents", body, nonce, show_sql_nav, show_admin_nav, theme, author))
+                html.page_shell("Edit page", "documents", body, nonce, show_sql_nav, show_admin_nav, theme, author, page_context))
         end
 
         return print_response("302 Found", "text/plain", "", {"Location: document?entity_id=" .. tostring(saved_id)})

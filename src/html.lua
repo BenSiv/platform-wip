@@ -255,10 +255,22 @@ ICON_SYSTEM = "<svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none
 -- the icon rail's own order (see html.render_chat_widget below).
 ICON_CHAT_BUBBLE = "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z\"/></svg>"
 
-function html.page_shell(title, active, body, nonce, show_sql, show_admin, theme, author)
+-- page_context: what the chat widget/agent is told about "where the
+-- user currently is" (see render_chat_widget's script and
+-- agent.default_system_prompt). Callers that know more than the bare
+-- nav section (a document's own id, an entity's type+id, a view's
+-- name) should pass their own richer table; nil falls back to just
+-- {page_type = active, title = title} -- still real signal (which nav
+-- section, what the page is titled), just not entity-specific.
+function html.page_shell(title, active, body, nonce, show_sql, show_admin, theme, author, page_context)
     if theme == nil then
         theme = {site_name = "Platform", colors = {}}
     end
+    if page_context == nil then
+        page_context = {page_type = active, title = title}
+    end
+    json = require("dkjson")
+    page_context_json = json_for_script(json.encode(page_context))
 
     root_vars = {}
     for _, key in ipairs(THEME_COLOR_KEYS) do
@@ -329,6 +341,7 @@ function html.page_shell(title, active, body, nonce, show_sql, show_admin, theme
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>%s</title>
 <link rel="icon" type="image/png" href="theme-asset?name=favicon.png">
+<script nonce="%s">window.PLATFORM_PAGE_CONTEXT = %s;</script>
 <style>
 %s
 * { box-sizing: border-box; }
@@ -418,7 +431,7 @@ body {
 %s
 </body>
 </html>
-""", html.html_escape(title), root_css, fossci_chat_widget_css(), brand_html, table.concat(nav_links, ""), user_box, body,
+""", html.html_escape(title), nonce, page_context_json, root_css, fossci_chat_widget_css(), brand_html, table.concat(nav_links, ""), user_box, body,
      html.render_chat_widget(nonce))
 end
 
@@ -2383,7 +2396,7 @@ end
 -- the *source* Markdown before this ever runs, so what comes back here
 -- is already safe to place directly in the page, not user input that
 -- still needs escaping.
-function html.render_document(doc, rendered_html, breadcrumbs, children, backlinks, can_edit, nonce)
+function html.render_document(doc, rendered_html, breadcrumbs, children, backlinks, can_edit)
     breadcrumb_html = ""
     for i, crumb in ipairs(breadcrumbs) do
         if i > 1 then
@@ -2447,11 +2460,9 @@ function html.render_document(doc, rendered_html, breadcrumbs, children, backlin
         %s
         %s
     </div>
-    <script nonce="%s">window.PLATFORM_PAGE_CONTEXT = {id: %s, title: "%s"};</script>
 </div>
 """, html.html_escape(doc.title), fossci_container_css(900), fossci_button_css(),
-     breadcrumb_html, html.html_escape(doc.title), edit_link, rendered_html, children_block, backlinks_block,
-     nonce, tostring(doc.id), js_string_literal(doc.title))
+     breadcrumb_html, html.html_escape(doc.title), edit_link, rendered_html, children_block, backlinks_block)
 end
 
 -- `doc` is nil for "create a new page", or the current row for editing
@@ -2818,6 +2829,24 @@ function html.render_chat_widget(nonce)
         return match ? match[1] : "";
     }
 
+    // Builds a short, readable description from whatever page_shell
+    // (see its own header comment) put in window.PLATFORM_PAGE_CONTEXT
+    // for the current page -- every page sets at least page_type/title
+    // now, entity pages/documents/views add entity_type+entity_id or
+    // view_name on top.
+    function describeCurrentPage() {
+        var ctx = window.PLATFORM_PAGE_CONTEXT;
+        if (!ctx) { return null; }
+        var parts = [ctx.page_type || 'unknown'];
+        if (ctx.title) { parts.push('"' + ctx.title + '"'); }
+        if (ctx.entity_type && ctx.entity_id != null) {
+            parts.push('(' + ctx.entity_type + ' id=' + ctx.entity_id + ')');
+        } else if (ctx.view_name) {
+            parts.push('(view=' + ctx.view_name + ')');
+        }
+        return parts.join(' ');
+    }
+
     var ROLE_LABELS = {user: 'You', assistant: 'Assistant', tool_result: 'Tool result', compaction_summary: 'Compacted summary'};
     function escapeHtml(s) {
         return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -2940,14 +2969,14 @@ function html.render_chat_widget(nonce)
         if (!text) return;
         input.value = '';
         // Read lazily, at send time, not at widget-init time -- whatever
-        // page.PLATFORM_PAGE_CONTEXT is set to *right now* (only
-        // html.render_document sets it) is what the agent should be
-        // told, every message, not just the first -- if the widget's
-        // conversation carries over as the user browses to a different
-        // page, the agent should track that, not still think it's
-        // editing wherever the chat happened to start.
-        if (window.PLATFORM_PAGE_CONTEXT) {
-            text = '[Current page: "' + window.PLATFORM_PAGE_CONTEXT.title + '" (id=' + window.PLATFORM_PAGE_CONTEXT.id + ')]\n\n' + text;
+        // page.PLATFORM_PAGE_CONTEXT is *right now* is what the agent
+        // should be told, every message, not just the first -- if the
+        // widget's conversation carries over as the user browses to a
+        // different page, the agent should track that, not still think
+        // it's on wherever the chat happened to start.
+        var pageDescription = describeCurrentPage();
+        if (pageDescription) {
+            text = '[Current page: ' + pageDescription + ']\n\n' + text;
         }
         var thinkingEl = showThinking();
         ensureSession().then(function(sessionId){
