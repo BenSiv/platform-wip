@@ -19,6 +19,9 @@ Update this file when tasks are added, completed, or reprioritized.
 | 71 | Auto-generate chat titles from first user prompt | New: derive a session title from the first user message (via a system-prompt-driven step) instead of leaving sessions "Untitled" in chat history/knowledge pool listings. |
 | 72 | Show chat start timestamp next to title in chat history | New: display each session's start time alongside its title in the chat history / knowledge pool listing. |
 | 73 | Add label printing support (ZPL templates per entity schema) | New, larger feature. Port Benchling's workflow: per-schema ZPL label templates, a "Print label" action on any entity, template-embedded SQL to pull entity-specific fields (parameterized/read-only, no injection), printed via the existing Zebra printer software connection. Needs design: where templates live (schemas dir vs. new template type, matching the `views/`/`templates/` convention), safe SQL substitution, and the print hand-off mechanism. |
+| 74 | Enable SQLite WAL mode + continuous off-VM backup (Litestream or cron+gsutil fallback) | Data-durability plan Phase 1 -- see `doc/data-durability.md`. Closes the ~24h RPO gap left by the existing daily disk-snapshot policy; also helps task #57's CGI-concurrency concern (WAL allows concurrent readers alongside a writer). |
+| 75 | Write and drill a real restore runbook for the SQLite store | Data-durability plan Phase 2 -- see `doc/data-durability.md`. Must be run for real against a throwaway instance at least once to get a true RTO number, not just documented steps. |
+| 76 | Move `/opt/platform/data` onto its own attached persistent disk | Data-durability plan Phase 3 (optional/lower priority) -- see `doc/data-durability.md`. Decouples data lifecycle from the boot disk/OS; not blocking Phases 1-2. |
 
 ## Completed (most recent first)
 
