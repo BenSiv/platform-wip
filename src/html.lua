@@ -255,23 +255,16 @@ ICON_SYSTEM = "<svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none
 -- the icon rail's own order (see html.render_chat_widget below).
 ICON_CHAT_BUBBLE = "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z\"/></svg>"
 
--- page_context: what the chat widget/agent is told about "where the
--- user currently is" (see render_chat_widget's script and
--- agent.default_system_prompt). Callers that know more than the bare
--- nav section (a document's own id, an entity's type+id, a view's
--- name) should pass their own richer table; nil falls back to just
--- {page_type = active, title = title} -- still real signal (which nav
--- section, what the page is titled), just not entity-specific.
-function html.page_shell(title, active, body, nonce, show_sql, show_admin, theme, author, page_context)
-    if theme == nil then
-        theme = {site_name = "Platform", colors = {}}
-    end
-    if page_context == nil then
-        page_context = {page_type = active, title = title}
-    end
-    json = require("dkjson")
-    page_context_json = json_for_script(json.encode(page_context))
-
+-- The `:root { --fossci-x: value; ... }` block a deployment's real
+-- theme.json colors compile down to -- shared by html.page_shell (the
+-- normal full-page case) and by /sql?embed=1's iframe fragment (cgi.lua),
+-- which skips page_shell entirely (see its own comment on why) but still
+-- needs these variables defined somewhere in its own document, or every
+-- var(--fossci-*, fallback) in its styles silently resolves to the
+-- generic fallback instead of the deployment's real palette -- confirmed
+-- live: the embedded SQL widget on /data was rendering in the default
+-- indigo/slate colors instead of Celleste's real brown/gold theme.
+function html.theme_root_css(theme)
     root_vars = {}
     for _, key in ipairs(THEME_COLOR_KEYS) do
         value = theme.colors[key]
@@ -280,10 +273,40 @@ function html.page_shell(title, active, body, nonce, show_sql, show_admin, theme
             table.insert(root_vars, "--fossci-" .. css_name .. ": " .. value .. ";")
         end
     end
-    root_css = ""
-    if #root_vars > 0 then
-        root_css = ":root { " .. table.concat(root_vars, " ") .. " }"
+    if #root_vars == 0 then
+        return ""
     end
+    return ":root { " .. table.concat(root_vars, " ") .. " }"
+end
+
+-- page_context: what the chat widget/agent is told about "where the
+-- user currently is" (see render_chat_widget's script and
+-- agent.default_system_prompt). Callers that know more than the bare
+-- nav section (a document's own id, an entity's type+id, a view's
+-- name) should pass their own richer table; nil falls back to just
+-- {page_type = active, title = title} -- still real signal (which nav
+-- section, what the page is titled), just not entity-specific.
+--
+-- current_user is merged in here unconditionally (every caller gets
+-- it for free, not just the ones that already pass a rich context) --
+-- found missing live: the model had no way to know who it was talking
+-- to, so it left owner/assignee-style fields blank instead of
+-- defaulting to the current user the way a human filling out the same
+-- form naturally would.
+function html.page_shell(title, active, body, nonce, show_sql, show_admin, theme, author, page_context)
+    if theme == nil then
+        theme = {site_name = "Platform", colors = {}}
+    end
+    if page_context == nil then
+        page_context = {page_type = active, title = title}
+    end
+    if author != nil then
+        page_context.current_user = author
+    end
+    json = require("dkjson")
+    page_context_json = json_for_script(json.encode(page_context))
+
+    root_css = html.theme_root_css(theme)
 
     -- Icon-rail order: Home, Notebook, Data, Tasks, (System if Setup/
     -- Admin). No separate New Page icon -- the Notebook page's own
@@ -2120,7 +2143,7 @@ end
 -- the query is a normal, bookmarkable/shareable URL. `column_names`/
 -- `rows` are nil until a query has been run; `err` is set instead if
 -- it failed (not select-only, invalid sql, etc.).
-function html.render_sql(db_path, sql_text, column_names, rows, err, ref_columns, nonce, embed)
+function html.render_sql(db_path, sql_text, column_names, rows, err, ref_columns, nonce, embed, theme)
     if ref_columns == nil then
         ref_columns = {}
     end
@@ -2140,6 +2163,16 @@ function html.render_sql(db_path, sql_text, column_names, rows, err, ref_columns
     embed_css = ""
     if embed == true then
         embed_css = ".fossci-container { padding: 0; margin: 0; max-width: none; box-shadow: none; border: none; border-radius: 0; }"
+        -- The embedded case skips html.page_shell entirely (see above),
+        -- so it never otherwise gets the :root { --fossci-x: ...; }
+        -- block a real theme compiles to -- without it, every
+        -- var(--fossci-*, fallback) below silently resolves to the
+        -- generic fallback color instead of the deployment's real
+        -- palette. Confirmed live: the embedded widget on /data was
+        -- rendering in the default indigo/slate, not Celleste's brown/gold.
+        if theme != nil then
+            embed_css = html.theme_root_css(theme) .. " " .. embed_css
+        end
     end
     sql_text_or_empty = sql_text
     if sql_text_or_empty == nil then
@@ -2591,7 +2624,7 @@ function html.render_document_edit(doc, parent_options_html, csrf_token, error_m
 
     return string.format("""
 <div class="fossil-doc" data-title="%s">
-    <link rel="stylesheet" href="static?name=toastui-editor.min.css">
+    <link rel="stylesheet" href="vendor?name=toastui-editor.min.css">
     <style>
 %s
 %s
@@ -2619,7 +2652,7 @@ function html.render_document_edit(doc, parent_options_html, csrf_token, error_m
             <div id="fossci-toastui-editor"></div>
         </form>
     </div>
-    <script src="static?name=toastui-editor-all.min.js" nonce="%s"></script>
+    <script src="vendor?name=toastui-editor-all.min.js" nonce="%s"></script>
     <script nonce="%s">
     (function(){
         // Starts in 'markdown' mode -- the familiar plain-text +
@@ -3077,6 +3110,9 @@ function html.render_chat_widget(nonce)
         var pageDescription = describeCurrentPage();
         if (pageDescription) {
             text = '[Current page: ' + pageDescription + ']\n\n' + text;
+        }
+        if (window.PLATFORM_PAGE_CONTEXT && window.PLATFORM_PAGE_CONTEXT.current_user) {
+            text = '[Current user: ' + window.PLATFORM_PAGE_CONTEXT.current_user + ']\n' + text;
         }
         var thinkingEl = showThinking();
         ensureSession().then(function(sessionId){

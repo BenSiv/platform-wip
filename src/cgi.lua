@@ -428,21 +428,21 @@ function cgi.handle_request()
         return print_response("200 OK", "image/png", asset_bytes, {"Cache-Control: public, max-age=86400"})
     end
 
-    -- Vendored static assets (e.g. the Toast UI Editor bundle) --
+    -- Vendored third-party assets (e.g. the Toast UI Editor bundle) --
     -- allowlisted by exact name + content-type, same "never path-build
     -- from user input" reasoning as /theme-asset above, just a
-    -- platform-owned static/ directory rather than a deployment's
-    -- own DOCUMENT_ROOT-relative theme-assets/.
-    if path_info == "/static" then
-        allowed_static_assets = {
+    -- platform-owned vnd/ directory rather than a deployment's own
+    -- DOCUMENT_ROOT-relative theme-assets/.
+    if path_info == "/vendor" then
+        allowed_vendor_assets = {
             ["toastui-editor-all.min.js"] = {path = "toastui/toastui-editor-all.min.js", content_type = "application/javascript"},
             ["toastui-editor.min.css"] = {path = "toastui/toastui-editor.min.css", content_type = "text/css"},
         }
-        asset = allowed_static_assets[params.name]
+        asset = allowed_vendor_assets[params.name]
         if asset == nil then
             return print_response("404 Not Found", "text/plain", "")
         end
-        asset_path = paths.joinpath(config.static_assets_dir(), asset.path)
+        asset_path = paths.joinpath(config.vendor_assets_dir(), asset.path)
         asset_file = io.open(asset_path, "rb")
         if asset_file == nil then
             return print_response("404 Not Found", "text/plain", "")
@@ -782,7 +782,7 @@ function cgi.handle_request()
                 ref_columns["id"] = from_table
             end
         end
-        body = html.render_sql(db_path, sql_text, column_names, rows, sql_err, ref_columns, nonce, params.embed == "1")
+        body = html.render_sql(db_path, sql_text, column_names, rows, sql_err, ref_columns, nonce, params.embed == "1", theme)
         -- ?embed=1 is the home page's own SQL widget iframe (see
         -- render_index) -- it's already inside a page shell, so
         -- nesting a second full <html>/<nav> shell inside a 520px

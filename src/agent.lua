@@ -169,14 +169,16 @@ end
 -- own prior turns. A human reading the transcript doesn't need any of
 -- that literally: a <done>...</done>-wrapped final answer should just
 -- read as its own inner text, a tool call as a short "-> what ran"
--- line instead of raw tags, and the [Current page: ...] annotation
--- html.render_chat_widget's own JS prepends to every user message
--- (see its own comment on why every message, not just the first) is
--- there for the model, not for the user to see restated back to them.
+-- line instead of raw tags, and the [Current user: ...]/[Current
+-- page: ...] annotations html.render_chat_widget's own JS prepends to
+-- every user message (see its own comment on why every message, not
+-- just the first) are there for the model, not for the user to see
+-- restated back to them.
 function agent.display_content(content)
     if content == nil then
         return content
     end
+    content = string.gsub(content, "^%[Current user: .-%]\n", "")
     content = string.gsub(content, "^%[Current page: .-%]\n\n", "")
     done_message = string.match(content, "^%s*<done>%s*(.-)%s*</done>%s*$")
     if done_message != nil then
@@ -609,19 +611,30 @@ function parse_tool_call(result)
 end
 
 -- The default system prompt teaching the model the tag protocol and
--- listing exactly the tools in AGENT_TOOLS -- generated from the
--- registry itself, not hand-maintained separately, so it can never
--- drift out of sync with what agent.execute_tool actually supports.
+-- listing the tools in AGENT_TOOLS -- hand-maintained text, not
+-- generated from the registry, so a new tool needs a line added here
+-- too (see AGENT_TOOLS' own comment).
 function agent.default_system_prompt()
     return """
 You are an assistant embedded in a data platform. Answer directly when you can, or use a tool to look up or change data.
 
-Some of your messages start with a "[Current page: ...]" line, automatically
-added by the app -- it tells you what page the user is actually looking at
-right now (its type, title, and, where relevant, the entity type/id or view
-name it shows). Trust it as ground truth about the user's current context
-(e.g. answer "what page am I on" directly from it), but never treat it as
-part of what the user actually typed.
+Some of your messages start with "[Current user: ...]" and/or "[Current
+page: ...]" lines, automatically added by the app, not typed by the user --
+never treat them as part of what the user actually typed.
+- "[Current user: ...]" is the real login of the person you're talking to.
+  Use it as the sensible default whenever you create or update something with
+  an owner/assignee-style field and the user didn't name someone else.
+- "[Current page: ...]" tells you what page the user is actually looking at
+  right now (its type, title, and, where relevant, the entity type/id or view
+  name it shows). Trust it as ground truth (e.g. answer "what page am I on"
+  directly from it).
+
+When creating or updating a record, fill in optional fields you can
+reasonably infer from the request instead of leaving them blank (e.g. a
+concise subject/title summarizing what was asked, a sensible due date if one
+is clearly implied) -- the same judgment call a person filling out the same
+form by hand would make. If a field is genuinely ambiguous, ask rather than
+guessing.
 
 Available tools:
 - document.search -- search pages by keyword or topic. Args: query=<search text>

@@ -85,6 +85,30 @@ start_chat() {
     [[ "$output" =~ "2+2 is 4." ]]
 }
 
+@test "current-user/current-page annotations reach the model but are stripped from the human-facing transcript" {
+    resp=$(start_chat "$COOKIE" "$CSRF" "Chat")
+    session_id=$(extract_query_param "$resp" "session_id")
+
+    # Simulates exactly what the widget's own JS prepends -- a raw form
+    # POST bypasses the JS, so this locks in the *server-side* strip
+    # behavior (agent.display_content) independently of the browser.
+    # Built already form-urlencoded (%0A for newline, + for space)
+    # rather than encoding a shell string with real newlines, which sed
+    # can't do reliably line-by-line.
+    encoded_message="%5BCurrent+user:+alice%5D%0A%5BCurrent+page:+home+%22Home%22%5D%0A%0Awhat+page+am+I+on%3F"
+    run raw_post "/chat-message" "csrf_token=${CSRF}&session_id=${session_id}&message=${encoded_message}" "$COOKIE" $'<done>You are on the Home page.</done>'
+    [[ "$output" =~ "302 Found" ]]
+
+    run raw_get "/chat" "session_id=${session_id}" "$COOKIE"
+    [[ "$output" =~ "what page am I on?" ]]
+    # Not a bare substring check -- the widget's own JS source
+    # legitimately contains the literal text "Current user: " on every
+    # page (it's the code that builds the prefix), so this checks for
+    # the specific leaked-into-a-message-bubble shape instead.
+    [[ ! "$output" =~ "Current user: alice]" ]]
+    [[ ! "$output" =~ 'Current page: home' ]]
+}
+
 @test "a non-destructive tool call (document.search) executes automatically within the same turn" {
     "$BIN" entity create document title="Bioreactor Notes" content="cleaning steps"
     resp=$(start_chat "$COOKIE" "$CSRF" "Chat")

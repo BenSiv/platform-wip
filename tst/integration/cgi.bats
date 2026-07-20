@@ -154,6 +154,22 @@ teardown() {
     [[ "$output" =~ "max-width: 100%" ]]
 }
 
+@test "/sql?embed=1 still gets the real theme colors, not the generic fallback" {
+    # Reported live: the embedded SQL widget on /data rendered in the
+    # default indigo/slate instead of the deployment's real theme --
+    # ?embed=1 skips html.page_shell entirely (to avoid nesting a
+    # second full page inside the iframe), which also meant it never
+    # got the :root { --fossci-x: ...; } block a real theme.json
+    # compiles to, so every var(--fossci-*, fallback) silently fell
+    # back to the generic default.
+    cat > theme.json <<'EOF'
+{"site_name": "Celleste", "colors": {"accent": "#C97F1E"}}
+EOF
+    run_cgi_admin "/sql" "embed=1"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "--fossci-accent: #C97F1E;" ]]
+}
+
 @test "/sql resolves a reference column on the FROM table" {
     # /sql requires Setup or Admin capability (not just baseline "i").
     run_cgi_admin "/sql" "q=SELECT+id%2C+lot_number%2C+experiment+FROM+sample%3B"

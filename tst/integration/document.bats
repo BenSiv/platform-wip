@@ -94,6 +94,7 @@ raw_document_preview() {
     [[ "$output" =~ '"entity_type":"document"' ]]
     [[ "$output" =~ '"entity_id":1' ]]
     [[ "$output" =~ '"page_type":"document"' ]]
+    [[ "$output" =~ '"current_user":"alice"' ]]
 }
 
 @test "a page with no entity-specific context still gets a baseline PLATFORM_PAGE_CONTEXT" {
@@ -101,6 +102,7 @@ raw_document_preview() {
     [[ "$output" =~ 'window.PLATFORM_PAGE_CONTEXT = {' ]]
     [[ "$output" =~ '"title":"Data"' ]]
     [[ "$output" =~ '"page_type":"data"' ]]
+    [[ "$output" =~ '"current_user":"alice"' ]]
 }
 
 @test "a [[title]] link resolves to a real page and renders as a link; an unknown one renders as a dangling marker" {

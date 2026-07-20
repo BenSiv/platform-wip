@@ -49,9 +49,9 @@ githooks/   tracked pre-push hook (git config core.hooksPath githooks activates 
 src/        every *.lua source file -- bld/build.sh globs and bundles all of them
             into the single compiled binary, so anything dropped here ships in
             production, including src/agent_provider_test.lua (see "Chat" below)
-static/     vendored, checked-in frontend assets (e.g. the Toast UI Editor bundle)
-            served via cgi.lua's own /static?name=X route -- no CDN dependency,
-            no build step
+vnd/        vendored, checked-in third-party frontend assets (e.g. the Toast UI
+            Editor bundle) -- served via cgi.lua's own /vendor?name=X route,
+            no CDN dependency, no build step
 tst/        tst/unit/*.lua (plain Luam scripts, no DB) and
             tst/integration/*.bats (real built binary, real CGI env vars)
 ```
@@ -197,7 +197,7 @@ collision risk the way a name-is-identity wiki page has to worry about.
   behavior is specific to one record type, not something the generic
   layer should know about), not something every write path gets for
   free.
-- **Editing** is Toast UI Editor (vendored into `static/`, no CDN
+- **Editing** is Toast UI Editor (vendored into `vnd/`, no CDN
   dependency, no build step), starting in plain Markdown-source mode
   and offering a WYSIWYG mode (syntax hidden, edit the rendered view
   directly) one click away via the editor's own built-in mode tab --
