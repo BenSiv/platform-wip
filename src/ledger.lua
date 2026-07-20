@@ -48,14 +48,32 @@ CREATE TABLE IF NOT EXISTS entity_event (
     author TEXT,
     created_at TEXT DEFAULT (%s),
     source_notebook_entry_id TEXT,
-    source_row_id TEXT
+    source_row_id TEXT,
+    reason TEXT
 );
 """
 
+-- CREATE TABLE IF NOT EXISTS never retrofits an existing table (task
+-- #93) -- same reasoning/pattern as schema.lua's own
+-- ensure_entity_field_display_column. A brand-new store gets `reason`
+-- straight from ledger.SCHEMA above; an existing one needs this to
+-- pick it up.
+function ensure_entity_event_reason_column(db_path)
+    existing = db.get_columns(db_path, "entity_event")
+    have = {}
+    for _, name in ipairs(existing) do
+        have[name] = true
+    end
+    if have["reason"] == nil then
+        db.exec(db_path, "ALTER TABLE entity_event ADD COLUMN reason TEXT;")
+    end
+end
+
 function ledger.init_schema(db_path)
-    return db.exec(db_path, string.format(ledger.SCHEMA,
+    db.exec(db_path, string.format(ledger.SCHEMA,
         db.now_expr(db_path), db.autoincrement_keyword(db_path), db.now_expr(db_path)
     ))
+    ensure_entity_event_reason_column(db_path)
 end
 
 -- Appends a 'create' event and returns the new entity_id.
@@ -97,19 +115,22 @@ end
 -- Appends an 'update' event for an existing entity_id. `field_changes`
 -- is a plain {field_name = {old = ..., new = ...}} table -- callers
 -- compute the diff themselves, since only they know the entity's
--- current projected values.
-function ledger.append_update(db_path, entity_type, entity_id, field_changes, author, source)
+-- current projected values. `reason` (task #93) is optional -- nil
+-- for the common case, a schema can require entity.update supply one
+-- via its own require_reason_on_update flag before ever reaching here.
+function ledger.append_update(db_path, entity_type, entity_id, field_changes, author, source, reason)
     if source == nil then
         source = {}
     end
     statement = string.format(
-        "INSERT INTO entity_event (entity_id, entity_type, event_type, field_changes, author, source_notebook_entry_id, source_row_id) VALUES (%d, %s, 'update', %s, %s, %s, %s);",
+        "INSERT INTO entity_event (entity_id, entity_type, event_type, field_changes, author, source_notebook_entry_id, source_row_id, reason) VALUES (%d, %s, 'update', %s, %s, %s, %s, %s);",
         entity_id,
         db.quote(entity_type),
         db.quote(json.encode(field_changes)),
         db.literal(author),
         db.literal(source.notebook_entry_id),
-        db.literal(source.row_id)
+        db.literal(source.row_id),
+        db.literal(reason)
     )
     -- Same fix as append_create above (task #77): return the
     -- connection-scoped insert_id directly instead of a separate
@@ -122,8 +143,12 @@ end
 -- Appends an 'archive' event -- never a delete. Returns the new
 -- event_id, same as append_update, so callers can stamp
 -- last_event_id on the projected table consistently either way.
-function ledger.append_archive(db_path, entity_type, entity_id, author, source)
-    event_id = ledger.append_update(db_path, entity_type, entity_id, {}, author, source)
+-- `reason` (task #93) is optional, same as append_update's own --
+-- archiving is the stronger candidate for a schema to actually
+-- require one (see entity.archive), but the ledger itself doesn't
+-- enforce that; validation happens one layer up.
+function ledger.append_archive(db_path, entity_type, entity_id, author, source, reason)
+    event_id = ledger.append_update(db_path, entity_type, entity_id, {}, author, source, reason)
     db.exec(db_path, string.format(
         "UPDATE entity_event SET event_type = 'archive' WHERE event_id = %d;", event_id
     ))
@@ -168,6 +193,9 @@ function ledger.do_ledger(cmd_args, db_path)
         print(string.format("event #%d  %s  %s  by %s  at %s",
             event.event_id, event.event_type, event.entity_type,
             tostring(event.author), event.created_at))
+        if event.reason != nil and event.reason != "" then
+            print("    reason: " .. event.reason)
+        end
         for field, change in pairs(event.field_changes) do
             print(string.format("    %s: %s -> %s", field, tostring(change.old), tostring(change.new)))
         end

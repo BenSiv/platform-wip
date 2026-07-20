@@ -258,6 +258,73 @@ EOF
     [[ "$output" =~ "LOT-42" ]]
 }
 
+@test "/api/archive requires a reason when the schema opts in via require_reason_on_archive (task #93)" {
+    cat > schemas/reagent_regulated.lua <<'EOF'
+return {
+  name = "reagent_regulated",
+  require_reason_on_archive = true,
+  fields = {
+    {name = "lot_number", type = "text", required = true},
+  },
+}
+EOF
+    "$BIN" schema add schemas/reagent_regulated.lua
+    "$BIN" entity create reagent_regulated lot_number="LOT-R1"
+    # entity ids are a single global sequence, not per-type -- setup()
+    # already created person=1/experiment=2/sample=3, so this row is #4.
+
+    run_cgi "/api/archive" "type=reagent_regulated&entity_id=4" "POST"
+    [[ "$output" =~ '"success":false' ]]
+    [[ "$output" =~ "reason for archiving is required" ]]
+
+    run_cgi "/browse" "type=reagent_regulated"
+    [[ "$output" =~ "LOT-R1" ]]
+
+    run_cgi "/api/archive" "type=reagent_regulated&entity_id=4&reason=Contaminated" "POST"
+    [[ "$output" =~ '"success":true' ]]
+
+    run_cgi "/detail" "type=reagent_regulated&entity_id=4"
+    [[ "$output" =~ "Reason: Contaminated" ]]
+}
+
+@test "/api/update requires a reason when the schema opts in via require_reason_on_update (task #93)" {
+    cat > schemas/reagent_regulated_upd.lua <<'EOF'
+return {
+  name = "reagent_regulated_upd",
+  require_reason_on_update = true,
+  fields = {
+    {name = "lot_number", type = "text", required = true},
+  },
+}
+EOF
+    "$BIN" schema add schemas/reagent_regulated_upd.lua
+    "$BIN" entity create reagent_regulated_upd lot_number="LOT-R1"
+    # entity ids are a single global sequence, not per-type -- setup()
+    # already created person=1/experiment=2/sample=3, so this row is #4.
+
+    run bash -c "printf '%s' '{\"lot_number\":\"LOT-R2\"}' | \
+        GATEWAY_INTERFACE=CGI/1.1 REQUEST_METHOD=POST PATH_INFO=/api/update \
+        QUERY_STRING='type=reagent_regulated_upd&entity_id=4' \
+        HTTP_COOKIE='session=${TEST_SESSION_COOKIE}; csrf=${TEST_CSRF_TOKEN}' \
+        HTTP_X_CSRF_TOKEN='${TEST_CSRF_TOKEN}' '$BIN'"
+    [[ "$output" =~ '"success":false' ]]
+    [[ "$output" =~ "reason for this change is required" ]]
+
+    run_cgi "/detail" "type=reagent_regulated_upd&entity_id=4"
+    [[ "$output" =~ "LOT-R1" ]]
+
+    run bash -c "printf '%s' '{\"lot_number\":\"LOT-R2\"}' | \
+        GATEWAY_INTERFACE=CGI/1.1 REQUEST_METHOD=POST PATH_INFO=/api/update \
+        QUERY_STRING='type=reagent_regulated_upd&entity_id=4&reason=Recount' \
+        HTTP_COOKIE='session=${TEST_SESSION_COOKIE}; csrf=${TEST_CSRF_TOKEN}' \
+        HTTP_X_CSRF_TOKEN='${TEST_CSRF_TOKEN}' '$BIN'"
+    [[ "$output" =~ '"success":true' ]]
+
+    run_cgi "/detail" "type=reagent_regulated_upd&entity_id=4"
+    [[ "$output" =~ "LOT-R2" ]]
+    [[ "$output" =~ "Reason: Recount" ]]
+}
+
 @test "/api/unarchive restores an entity to /browse" {
     run_cgi "/api/archive" "type=sample&entity_id=3" "POST"
     run_cgi "/api/unarchive" "type=sample&entity_id=3" "POST"

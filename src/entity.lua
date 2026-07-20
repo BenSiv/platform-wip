@@ -233,11 +233,18 @@ function entity.create(db_path, entity_type, values, author, source)
 end
 
 -- Updates an entity. Computes the old/new diff itself (from the current
--- projected row).
-function entity.update(db_path, entity_type, entity_id, values, author, source)
+-- projected row). `reason` (task #93) is optional unless this type's
+-- schema set require_reason_on_update -- checked here, not in
+-- ledger.lua, since the ledger itself has no opinion on any particular
+-- type's own policy.
+function entity.update(db_path, entity_type, entity_id, values, author, source, reason)
     current = entity.get(db_path, entity_type, entity_id)
     if current == nil then
         return nil, {{field = nil, severity = "error", message = "no such entity"}}
+    end
+    reason_flags = schema.reason_flags(db_path, entity_type)
+    if reason_flags.require_on_update and (reason == nil or reason == "") then
+        return nil, {{field = "reason", severity = "error", message = "a reason for this change is required"}}
     end
 
     merged = {}
@@ -267,7 +274,7 @@ function entity.update(db_path, entity_type, entity_id, values, author, source)
         return entity_id, issues
     end
 
-    event_id = ledger.append_update(db_path, entity_type, entity_id, field_changes, author, source)
+    event_id = ledger.append_update(db_path, entity_type, entity_id, field_changes, author, source, reason)
 
     table.insert(assignments, "updated_by = " .. db.literal(author))
     table.insert(assignments, "last_event_id = " .. tostring(event_id))
@@ -287,8 +294,11 @@ end
 -- default (pass include_archived=true to see it). Full ledger history
 -- (ledger.history) is untouched either way -- this only ever adds an
 -- 'archive' event, on top of whatever create/update events already
--- exist for this entity.
-function entity.archive(db_path, entity_type, entity_id, author, source)
+-- exist for this entity. `reason` (task #93) is optional unless this
+-- type's schema set require_reason_on_archive -- archiving is the
+-- stronger candidate for a schema to actually require one (rarer,
+-- more consequential than a routine field edit).
+function entity.archive(db_path, entity_type, entity_id, author, source, reason)
     current = entity.get(db_path, entity_type, entity_id)
     if current == nil then
         return nil, {{field = nil, severity = "error", message = "no such entity"}}
@@ -296,8 +306,12 @@ function entity.archive(db_path, entity_type, entity_id, author, source)
     if current.archived_at != nil and current.archived_at != "" then
         return entity_id, {}
     end
+    reason_flags = schema.reason_flags(db_path, entity_type)
+    if reason_flags.require_on_archive and (reason == nil or reason == "") then
+        return nil, {{field = "reason", severity = "error", message = "a reason for archiving is required"}}
+    end
 
-    event_id = ledger.append_archive(db_path, entity_type, entity_id, author, source)
+    event_id = ledger.append_archive(db_path, entity_type, entity_id, author, source, reason)
 
     db.exec(db_path, string.format(
         "UPDATE %s SET archived_at = %s, updated_by = %s, last_event_id = %d WHERE id = %d;",

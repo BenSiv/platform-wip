@@ -542,13 +542,17 @@ function agent.execute_tool(db_path, author, session_id, tool_name, method_name,
         if args.entity_type == nil or target_id == nil then
             return nil, "update requires entity_type and entity_id"
         end
+        -- reason (task #93) is metadata about the change, not a field
+        -- being changed on the entity itself -- pulled out the same way
+        -- entity_type/entity_id already are, so it never ends up as a
+        -- literal column update.
         values = {}
         for k, v in pairs(args) do
-            if k != "entity_type" and k != "entity_id" then
+            if k != "entity_type" and k != "entity_id" and k != "reason" then
                 values[k] = v
             end
         end
-        updated_id, issues = entity.update(db_path, args.entity_type, target_id, values, author, source)
+        updated_id, issues = entity.update(db_path, args.entity_type, target_id, values, author, source, args.reason)
         if updated_id == nil then
             return nil, issues_summary(issues)
         end
@@ -702,7 +706,7 @@ Available tools:
 - entity.list -- list rows of an entity type. Args: entity_type=<name>, limit=<optional, default 20>
 - entity.get -- fetch one entity row by id. Args: entity_type=<name>, entity_id=<id>
 - entity.create -- create a new entity row. Args: entity_type=<name>, plus one arg per field (e.g. status=open, due_date=2026-08-01)
-- entity.update -- update fields on an existing entity row. Args: entity_type=<name>, entity_id=<id>, plus one arg per field to change
+- entity.update -- update fields on an existing entity row. Args: entity_type=<name>, entity_id=<id>, reason=<optional: why this change is being made>, plus one arg per field to change. Some entity types require a reason -- if the tool result says one is required, ask the user why before retrying.
 - knowledge.stats -- summarize the knowledge pool's tier distribution and retrieval activity. No args.
 
 If you don't already know an entity type's fields, call entity.fields first rather than guessing field names.

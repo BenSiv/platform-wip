@@ -67,6 +67,22 @@ function schema.validate(def)
     if type(def.fields) != "table" then
         return "schema '" .. tostring(def.name) .. "' must have a 'fields' list"
     end
+    -- Type-level (not per-field) opt-in flags, task #93: a schema can
+    -- require entity.update/entity.archive be given a non-empty
+    -- `reason` before either is allowed to proceed for this type.
+    -- Optional, default false either way -- most schemas set neither.
+    -- Checked via direct true/false comparison, not type(x) ==
+    -- "boolean" -- confirmed directly that this Luam dialect's type()
+    -- reports a real boolean as "flag", not "boolean" (matches how
+    -- every other boolean-ish field in this file -- required, display
+    -- -- is already checked elsewhere: == true/== false, never by type
+    -- name).
+    if def.require_reason_on_update != nil and def.require_reason_on_update != true and def.require_reason_on_update != false then
+        return string.format("schema '%s': 'require_reason_on_update' must be true or false", def.name)
+    end
+    if def.require_reason_on_archive != nil and def.require_reason_on_archive != true and def.require_reason_on_archive != false then
+        return string.format("schema '%s': 'require_reason_on_archive' must be true or false", def.name)
+    end
     for i, field in ipairs(def.fields) do
         if type(field.name) != "string" or field.name == "" then
             return string.format("schema '%s' field #%d: missing 'name'", def.name, i)
@@ -120,10 +136,46 @@ function ensure_entity_field_display_column(db_path)
     end
 end
 
+-- entity_type predates the require_reason_on_update/require_reason_on_
+-- archive flags (task #93) -- same reasoning/pattern as
+-- ensure_entity_field_display_column just above.
+function ensure_entity_type_reason_flag_columns(db_path)
+    existing = db.get_columns(db_path, "entity_type")
+    have = {}
+    for _, name in ipairs(existing) do
+        have[name] = true
+    end
+    if have["require_reason_on_update"] == nil then
+        db.exec(db_path, "ALTER TABLE entity_type ADD COLUMN require_reason_on_update INTEGER DEFAULT 0;")
+    end
+    if have["require_reason_on_archive"] == nil then
+        db.exec(db_path, "ALTER TABLE entity_type ADD COLUMN require_reason_on_archive INTEGER DEFAULT 0;")
+    end
+end
+
 function schema.register(db_path, def)
     ensure_entity_field_display_column(db_path)
+    ensure_entity_type_reason_flag_columns(db_path)
     db.exec(db_path, string.format(
         "%s entity_type (name) VALUES (%s);", db.insert_ignore(db_path), db.quote(def.name)
+    ))
+
+    -- A separate UPDATE, not folded into the INSERT OR IGNORE above --
+    -- that statement only ever fires once (first registration; IGNORE
+    -- means a second run touches nothing), but these two flags are
+    -- meant to track whatever the schema file currently says, re-applied
+    -- on every sync the same way field definitions already are.
+    require_reason_on_update_flag = 0
+    if def.require_reason_on_update == true then
+        require_reason_on_update_flag = 1
+    end
+    require_reason_on_archive_flag = 0
+    if def.require_reason_on_archive == true then
+        require_reason_on_archive_flag = 1
+    end
+    db.exec(db_path, string.format(
+        "UPDATE entity_type SET require_reason_on_update = %d, require_reason_on_archive = %d WHERE name = %s;",
+        require_reason_on_update_flag, require_reason_on_archive_flag, db.quote(def.name)
     ))
 
     for i, field in ipairs(def.fields) do
@@ -390,6 +442,25 @@ function schema.is_registered(db_path, entity_type)
         db.quote(entity_type)
     ))
     return rows != nil and #rows > 0
+end
+
+-- Task #93's reason-for-change opt-in flags for one registered entity
+-- type -- what entity.update/entity.archive check before requiring
+-- (or not) a non-empty `reason` argument. Defaults both false for an
+-- unregistered type rather than erroring -- callers already handle
+-- "no such entity" separately.
+function schema.reason_flags(db_path, entity_type)
+    rows = db.query(db_path, string.format(
+        "SELECT require_reason_on_update, require_reason_on_archive FROM entity_type WHERE name = %s;",
+        db.quote(entity_type)
+    ))
+    if rows == nil or rows[1] == nil then
+        return {require_on_update = false, require_on_archive = false}
+    end
+    return {
+        require_on_update = tonumber(rows[1].require_reason_on_update) == 1,
+        require_on_archive = tonumber(rows[1].require_reason_on_archive) == 1,
+    }
 end
 
 -- The registered field list for an entity type, in declaration order --

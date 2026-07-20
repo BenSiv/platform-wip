@@ -1213,6 +1213,10 @@ function html.render_detail(db_path, entity_type, layout, row, history, nonce)
     history_rows = ""
     for _, event in ipairs(history) do
         changes = ""
+        if event.reason != nil and event.reason != "" then
+            changes = changes .. "<div class=\"change-item change-reason\"><em>Reason: " ..
+                html.html_escape(event.reason) .. "</em></div>"
+        end
         for field_name, change in pairs(event.field_changes) do
             changes = changes .. "<div class=\"change-item\"><strong>" .. html.html_escape(field_name) ..
                 "</strong>: " .. display_value(change.old) .. " &rarr; " .. display_value(change.new) .. "</div>"

@@ -1124,7 +1124,11 @@ function cgi.handle_request()
             return print_response("400 Bad Request", "application/json", json.encode({error = "Invalid JSON: " .. tostring(err)}))
         end
 
-        updated_id, issues = entity.update(db_path, entity_type, entity_id, values, author, source_from_params(params))
+        -- Optional (task #93) -- a plain query/form param, not nested
+        -- in the JSON body, so this doesn't change /api/update's own
+        -- existing request-body contract (that body IS the values
+        -- object directly, not a {values=..., reason=...} wrapper).
+        updated_id, issues = entity.update(db_path, entity_type, entity_id, values, author, source_from_params(params), params.reason)
         response = {
             issues = issues
         }
@@ -1150,7 +1154,7 @@ function cgi.handle_request()
             return print_response("400 Bad Request", "application/json", json.encode({error = "Invalid type"}))
         end
 
-        archived_id, issues = entity.archive(db_path, entity_type, entity_id, author, source_from_params(params))
+        archived_id, issues = entity.archive(db_path, entity_type, entity_id, author, source_from_params(params), params.reason)
         response = {issues = issues}
         if archived_id != nil then
             response.archived_id = archived_id
