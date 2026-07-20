@@ -13,6 +13,8 @@
 db = require("db")
 agent_provider = require("agent_provider")
 document = require("document")
+entity = require("entity")
+schema = require("schema")
 
 agent = {}
 
@@ -300,6 +302,20 @@ AGENT_TOOLS = {
         create = {destructive = true},
         update = {destructive = true},
     },
+    -- Generic entity access -- any registered schema, not a curated
+    -- subset (schema.lua/entity.lua's own validation is the safety
+    -- boundary, same as the HTTP/CLI layer already relies on). list_types
+    -- and fields exist so the model can discover real entity types and
+    -- their field names/types itself rather than the system prompt
+    -- needing to hardcode every schema that might ever be registered.
+    entity = {
+        list_types = {destructive = false},
+        fields = {destructive = false},
+        list = {destructive = false},
+        get = {destructive = false},
+        create = {destructive = true},
+        update = {destructive = true},
+    },
 }
 
 function agent.is_known_tool(tool_name, method_name)
@@ -331,6 +347,18 @@ function issues_summary(issues)
     if #parts == 0 then
         return "failed"
     end
+    return table.concat(parts, "; ")
+end
+
+-- Compact "field=value; field=value" text for one entity.get/list row,
+-- for the model to read -- sorted so output is deterministic rather
+-- than depending on pairs()'s unspecified iteration order.
+function row_summary(row)
+    parts = {}
+    for k, v in pairs(row) do
+        table.insert(parts, tostring(k) .. "=" .. tostring(v))
+    end
+    table.sort(parts)
     return table.concat(parts, "; ")
 end
 
@@ -377,6 +405,103 @@ function agent.execute_tool(db_path, author, session_id, tool_name, method_name,
             return nil, issues_summary(issues)
         end
         return "Updated page #" .. tostring(updated_id)
+    end
+
+    if tool_name == "entity" and method_name == "list_types" then
+        types = schema.list(db_path)
+        if #types == 0 then
+            return "No entity types registered."
+        end
+        names = {}
+        for _, t in ipairs(types) do
+            table.insert(names, t.name)
+        end
+        return table.concat(names, ", ")
+    end
+
+    if tool_name == "entity" and method_name == "fields" then
+        if args.entity_type == nil then
+            return nil, "fields requires entity_type"
+        end
+        fields = schema.fields(db_path, args.entity_type)
+        if #fields == 0 then
+            return nil, "unknown entity type, or it has no fields: " .. tostring(args.entity_type)
+        end
+        lines = {}
+        for _, f in ipairs(fields) do
+            required = ""
+            if tonumber(f.required) == 1 then
+                required = ", required"
+            end
+            table.insert(lines, string.format("%s (%s%s)", f.name, f.type, required))
+        end
+        return table.concat(lines, "\n")
+    end
+
+    if tool_name == "entity" and method_name == "list" then
+        if args.entity_type == nil then
+            return nil, "list requires entity_type"
+        end
+        limit = tonumber(args.limit)
+        if limit == nil then
+            limit = 20
+        end
+        rows = entity.list(db_path, args.entity_type, limit, nil, false)
+        if #rows == 0 then
+            return "No " .. tostring(args.entity_type) .. " rows found."
+        end
+        lines = {}
+        for _, row in ipairs(rows) do
+            table.insert(lines, "#" .. tostring(row.id) .. " " .. row_summary(row))
+        end
+        return table.concat(lines, "\n")
+    end
+
+    if tool_name == "entity" and method_name == "get" then
+        target_id = tonumber(args.entity_id)
+        if args.entity_type == nil or target_id == nil then
+            return nil, "get requires entity_type and entity_id"
+        end
+        row = entity.get(db_path, args.entity_type, target_id)
+        if row == nil then
+            return nil, "no such " .. tostring(args.entity_type) .. " #" .. tostring(target_id)
+        end
+        return row_summary(row)
+    end
+
+    if tool_name == "entity" and method_name == "create" then
+        if args.entity_type == nil then
+            return nil, "create requires entity_type"
+        end
+        values = {}
+        for k, v in pairs(args) do
+            if k != "entity_type" then
+                values[k] = v
+            end
+        end
+        created_id, issues = entity.create(db_path, args.entity_type, values, author, source)
+        if created_id == nil then
+            return nil, issues_summary(issues)
+        end
+        return "Created " .. tostring(args.entity_type) .. " #" .. tostring(created_id)
+    end
+
+    if tool_name == "entity" and method_name == "update" then
+        target_id = tonumber(args.entity_id)
+        if args.entity_type == nil or target_id == nil then
+            return nil, "update requires entity_type and entity_id"
+        end
+        values = {}
+        for k, v in pairs(args) do
+            if k != "entity_type" and k != "entity_id" then
+                values[k] = v
+            end
+        end
+        updated_id, issues = entity.update(db_path, args.entity_type, target_id, values, author, source)
+        if updated_id == nil then
+            return nil, issues_summary(issues)
+        end
+        return "Updated " .. tostring(args.entity_type) .. " #" .. tostring(updated_id)
     end
 
     return nil, "unknown tool: " .. tostring(tool_name) .. "." .. tostring(method_name)
@@ -475,10 +600,25 @@ function agent.default_system_prompt()
     return """
 You are an assistant embedded in a data platform. Answer directly when you can, or use a tool to look up or change data.
 
+Some of your messages start with a "[Current page: ...]" line, automatically
+added by the app -- it tells you what page the user is actually looking at
+right now (its type, title, and, where relevant, the entity type/id or view
+name it shows). Trust it as ground truth about the user's current context
+(e.g. answer "what page am I on" directly from it), but never treat it as
+part of what the user actually typed.
+
 Available tools:
 - document.search -- search pages by keyword or topic. Args: query=<search text>
 - document.create -- create a new page. Args: title=<title>, parent_id=<optional parent page id>, content=<markdown content>
 - document.update -- update an existing page. Args: entity_id=<page id>, title=<optional new title>, parent_id=<optional new parent id>, content=<optional new content>
+- entity.list_types -- list every registered entity type (samples, tasks, experiments, whatever this deployment has). No args.
+- entity.fields -- list an entity type's fields and their types, so you know what's valid before creating/updating one. Args: entity_type=<name>
+- entity.list -- list rows of an entity type. Args: entity_type=<name>, limit=<optional, default 20>
+- entity.get -- fetch one entity row by id. Args: entity_type=<name>, entity_id=<id>
+- entity.create -- create a new entity row. Args: entity_type=<name>, plus one arg per field (e.g. status=open, due_date=2026-08-01)
+- entity.update -- update fields on an existing entity row. Args: entity_type=<name>, entity_id=<id>, plus one arg per field to change
+
+If you don't already know an entity type's fields, call entity.fields first rather than guessing field names.
 
 To call a tool, reply with EXACTLY this shape and nothing else:
 <tool>document</tool>

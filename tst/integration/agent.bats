@@ -163,6 +163,108 @@ start_chat() {
     [[ "$output" =~ "denied" ]]
 }
 
+write_task_schema() {
+    mkdir -p schemas
+    cat > schemas/task.lua <<'EOF'
+return {
+  name = "task",
+  fields = {
+    {name = "title", type = "text", required = true},
+    {name = "status", type = "select", required = true, values = {"open", "done"}},
+  },
+}
+EOF
+    "$BIN" schema add schemas/task.lua >/dev/null
+}
+
+@test "entity.list_types lists every registered entity type" {
+    write_task_schema
+    resp=$(start_chat "$COOKIE" "$CSRF" "Chat")
+    session_id=$(extract_query_param "$resp" "session_id")
+
+    scripted=$'<tool>entity</tool>\n<method>list_types</method>\n<args>\n</args>\1<done>Listed.</done>'
+    raw_post "/chat-message" "csrf_token=${CSRF}&session_id=${session_id}&message=what+entity+types+exist" "$COOKIE" "$scripted" >/dev/null
+
+    run raw_get "/chat" "session_id=${session_id}" "$COOKIE"
+    [[ "$output" =~ "document" ]]
+    [[ "$output" =~ "task" ]]
+}
+
+@test "entity.fields lists a type's field names and types, for discovery before create/update" {
+    write_task_schema
+    resp=$(start_chat "$COOKIE" "$CSRF" "Chat")
+    session_id=$(extract_query_param "$resp" "session_id")
+
+    scripted=$'<tool>entity</tool>\n<method>fields</method>\n<args>\nentity_type=task\n</args>\1<done>Listed.</done>'
+    raw_post "/chat-message" "csrf_token=${CSRF}&session_id=${session_id}&message=what+fields+does+task+have" "$COOKIE" "$scripted" >/dev/null
+
+    run raw_get "/chat" "session_id=${session_id}" "$COOKIE"
+    [[ "$output" =~ "title (text, required)" ]]
+    [[ "$output" =~ "status (select, required)" ]]
+}
+
+@test "entity.list and entity.get read real rows (non-destructive, auto-executes)" {
+    write_task_schema
+    "$BIN" entity create task title="Ship it" status=open >/dev/null
+    resp=$(start_chat "$COOKIE" "$CSRF" "Chat")
+    session_id=$(extract_query_param "$resp" "session_id")
+
+    scripted=$'<tool>entity</tool>\n<method>list</method>\n<args>\nentity_type=task\n</args>\1<done>Found tasks.</done>'
+    raw_post "/chat-message" "csrf_token=${CSRF}&session_id=${session_id}&message=list+tasks" "$COOKIE" "$scripted" >/dev/null
+    run raw_get "/chat" "session_id=${session_id}" "$COOKIE"
+    [[ "$output" =~ "Ship it" ]]
+    [[ ! "$output" =~ "wants to run" ]]
+
+    scripted2=$'<tool>entity</tool>\n<method>get</method>\n<args>\nentity_type=task\nentity_id=1\n</args>\1<done>Here it is.</done>'
+    raw_post "/chat-message" "csrf_token=${CSRF}&session_id=${session_id}&message=show+task+1" "$COOKIE" "$scripted2" >/dev/null
+    run raw_get "/chat" "session_id=${session_id}" "$COOKIE"
+    [[ "$output" =~ "status=open" ]]
+}
+
+@test "entity.create is destructive: pauses for approval, then really creates the row once approved" {
+    write_task_schema
+    resp=$(start_chat "$COOKIE" "$CSRF" "Chat")
+    session_id=$(extract_query_param "$resp" "session_id")
+
+    scripted=$'<tool>entity</tool>\n<method>create</method>\n<args>\nentity_type=task\ntitle=New task\nstatus=open\n</args>'
+    raw_post "/chat-message" "csrf_token=${CSRF}&session_id=${session_id}&message=create+a+task" "$COOKIE" "$scripted" >/dev/null
+
+    run "$BIN" entity list task
+    [[ "$output" == "" ]]
+
+    page_html=$(raw_get "/chat" "session_id=${session_id}" "$COOKIE")
+    [[ "$page_html" =~ "wants to run" ]]
+    pending_id=$(printf '%s' "$page_html" | grep -o 'pending_id" value="[0-9]*"' | grep -o '[0-9]*' | head -1)
+
+    run raw_post "/chat-approve" "csrf_token=${CSRF}&pending_id=${pending_id}&session_id=${session_id}" "$COOKIE" $'<done>Created it.</done>'
+    [[ "$output" =~ "302 Found" ]]
+
+    run "$BIN" entity show task 1
+    [[ "$output" =~ "New task" ]]
+    [[ "$output" =~ created_by[[:space:]]+alice ]]
+}
+
+@test "entity.update is destructive: pauses for approval, then really updates the row once approved" {
+    write_task_schema
+    "$BIN" entity create task title="Old title" status=open >/dev/null
+    resp=$(start_chat "$COOKIE" "$CSRF" "Chat")
+    session_id=$(extract_query_param "$resp" "session_id")
+
+    scripted=$'<tool>entity</tool>\n<method>update</method>\n<args>\nentity_type=task\nentity_id=1\nstatus=done\n</args>'
+    raw_post "/chat-message" "csrf_token=${CSRF}&session_id=${session_id}&message=mark+task+1+done" "$COOKIE" "$scripted" >/dev/null
+
+    run "$BIN" entity show task 1
+    [[ "$output" =~ status[[:space:]]+open ]]
+
+    page_html=$(raw_get "/chat" "session_id=${session_id}" "$COOKIE")
+    pending_id=$(printf '%s' "$page_html" | grep -o 'pending_id" value="[0-9]*"' | grep -o '[0-9]*' | head -1)
+
+    raw_post "/chat-approve" "csrf_token=${CSRF}&pending_id=${pending_id}&session_id=${session_id}" "$COOKIE" $'<done>Done.</done>' >/dev/null
+
+    run "$BIN" entity show task 1
+    [[ "$output" =~ status[[:space:]]+done ]]
+}
+
 @test "one user cannot see, message, or approve/deny another user's session" {
     resp=$(start_chat "$COOKIE" "$CSRF" "Alice private chat")
     session_id=$(extract_query_param "$resp" "session_id")
