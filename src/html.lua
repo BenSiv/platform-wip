@@ -1715,8 +1715,21 @@ end
 -- split from platform-wip).
 function html.render_home(theme, show_sql, show_admin)
     site_name = "Platform"
+    has_logo = false
     if theme != nil then
         site_name = theme.site_name
+        has_logo = theme.has_logo == true
+    end
+
+    -- Full wordmark, distinct from the sidebar's small square mark
+    -- (theme-assets/logo.png) -- same has_logo gate, so a generic/
+    -- unconfigured deployment gets neither rather than a broken image.
+    logo_html = ""
+    if has_logo then
+        logo_html = string.format(
+            '<img class="fossci-home-logo" src="theme-asset?name=logo-full.png" alt="%s">',
+            html.html_escape(site_name)
+        )
     end
 
     system_link = ""
@@ -1731,6 +1744,7 @@ function html.render_home(theme, show_sql, show_admin)
         .fossci-header { margin-bottom: 20px; border-bottom: 1px solid var(--fossci-bg-2, #f1f5f9); padding-bottom: 16px; }
         .fossci-header h2 { margin: 0 0 6px 0; font-size: 1.6rem; font-weight: 700; color: var(--fossci-heading, #0f172a); letter-spacing: -0.02em; }
         .fossci-header p { color: var(--fossci-muted, #64748b); margin: 0; font-size: 0.95rem; }
+        .fossci-home-logo { display: block; max-width: 240px; height: auto; margin-bottom: 16px; }
         .fossci-sitemap { list-style: none !important; margin: 16px 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; }
         .fossci-sitemap li { list-style: none !important; background: var(--fossci-bg, #f8fafc); border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-item, 10px); padding: 16px 18px; transition: var(--fossci-transition, all 0.2s cubic-bezier(0.4, 0, 0.2, 1)); }
         .fossci-sitemap li:hover { border-color: var(--fossci-accent, #4f46e5); box-shadow: 0 4px 12px rgba(0,0,0,0.06); }
@@ -1740,6 +1754,7 @@ function html.render_home(theme, show_sql, show_admin)
     </style>
     <div class="fossci-container">
         <div class="fossci-header">
+            %s
             <h2>%s</h2>
             <p>Welcome back. Use the sidebar to get around, or jump in below.</p>
         </div>
@@ -1752,7 +1767,7 @@ function html.render_home(theme, show_sql, show_admin)
         </ul>
     </div>
 </div>
-""", fossci_container_css(1200), html.html_escape(site_name), system_link)
+""", fossci_container_css(1200), logo_html, html.html_escape(site_name), system_link)
 end
 
 -- Landing page for Setup/Admin-only tooling -- a single destination

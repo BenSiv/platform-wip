@@ -412,7 +412,7 @@ function cgi.handle_request()
     -- allowlist, not used to build the path directly, so this can't be
     -- turned into a path-traversal read of arbitrary files on disk.
     if path_info == "/theme-asset" then
-        allowed_names = {["favicon.png"] = true, ["logo.png"] = true}
+        allowed_names = {["favicon.png"] = true, ["logo.png"] = true, ["logo-full.png"] = true}
         if allowed_names[params.name] != true then
             return print_response("404 Not Found", "text/plain", "")
         end
