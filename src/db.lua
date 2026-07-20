@@ -11,19 +11,19 @@ database = require("database")
 db = {}
 
 function db.query(db_path, query, ...)
-    return database.local_query(db_path, query, ...)
+    return database.sqlite_query(db_path, query, ...)
 end
 
 function db.exec(db_path, statement, ...)
-    return database.local_update(db_path, statement, ...)
+    return database.sqlite_update(db_path, statement, ...)
 end
 
 -- database.get_tables/get_columns go through a different sqlite binding
 -- entry point (sqlite.rows(db, query), a db-level convenience call) than
--- local_query's sqlite.prepare + stmt.rows/nrows -- and that path returns
+-- sqlite_query's sqlite.prepare + stmt.rows/nrows -- and that path returns
 -- no rows even when the query is correct (confirmed: entity_field/entity
 -- tables are visibly populated via sqlite3 directly, but database.get_tables
--- reports none). Reimplemented here against the local_query path, which
+-- reports none). Reimplemented here against the sqlite_query path, which
 -- is the one actually verified working throughout this codebase.
 
 function db.get_tables(db_path)

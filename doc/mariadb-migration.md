@@ -210,13 +210,70 @@ exist for the MariaDB work (task #57 territory again).
   config; keep the SQLite file + its existing snapshot policy around,
   untouched, as a rollback path for one full deploy cycle.
 
+## Feature-parity check: does anything here actually need Postgres?
+
+Went through the codebase's real usage, not a generic feature matrix,
+since that's the only comparison that matters for this migration:
+
+- **Embeddings/vector retrieval** -- `document.lua`'s `document_embedding`
+  table stores `vector_json` as a plain `TEXT` column; `document.search`
+  decodes it with `json.decode` and computes `cosine_similarity` in
+  **pure Lua**, row by row (`document.lua:411,471`). No SQLite-specific
+  vector extension (no `sqlite-vss`, no virtual table) is in use today --
+  this was evaluated for FTS5 and dropped, and the same "just use plain
+  columns + application code" choice was made for vectors too. Nothing
+  here relies on a feature MariaDB lacks.
+  - Bonus, worth knowing either way: **MariaDB gained a native `VECTOR(N)`
+    type + `VECTOR INDEX`** (modified HNSW, cosine/euclidean distance,
+    up to 16,383 dimensions), GA in the 11.7/11.8 LTS line (2025) --
+    already stable well before now. If the Lua-side `cosine_similarity`
+    scan ever becomes a real bottleneck (large document/knowledge-pool
+    counts), there's a legitimate first-party path to move that
+    similarity search into the database itself, comparable to Postgres's
+    `pgvector` -- not something to build now, just good to know it's not
+    a dead end.
+- **Document tree hierarchy** (`html.lua`'s `build_document_tree_index`)
+  -- built with one flat query + a Lua-side parent-child index, not a
+  recursive CTE. Both engines support recursive CTEs anyway (MariaDB
+  since 10.2, 2016), so this wouldn't have been a blocker either way.
+- **JSON fields** (`ledger.lua`'s `field_changes`, `agent.lua`'s tool-call
+  payloads, `knowledge.lua`, etc.) -- always stored as an opaque `TEXT`
+  blob, `json.encode`/`json.decode`d in Lua, **never queried inside the
+  JSON at the SQL level** anywhere in this codebase. Postgres's JSONB
+  (richer indexing, path queries) genuinely outclasses MariaDB's JSON
+  support here -- but since nothing here uses SQL-level JSON querying
+  either way, that gap doesn't touch this project.
+- **The one real, if speculative, gap**: Postgres's `LISTEN`/`NOTIFY`
+  (async cross-connection pub/sub) has no MariaDB equivalent. Not used
+  today (no persistent process yet), but if task #57's persistent-process
+  work ever wants "notify other workers a schema/theme changed" without
+  polling, Postgres would give that for free and MariaDB would need
+  polling or an external broker (Redis, etc.) instead. Worth remembering
+  if #57 gets designed, not a reason to reconsider now.
+- **Row-level security** is Postgres-only (not in MariaDB) but irrelevant
+  here -- every access check in this codebase is application-level
+  (`auth.lua` capabilities), never a database-enforced policy.
+
+**Bottom line**: nothing currently built or concretely planned needs a
+Postgres-only capability. The MariaDB choice holds up under scrutiny of
+actual usage, not just in the abstract.
+
 ## Not recommended as part of this
 
 - **Postgres instead of MariaDB**: same cross-repo binding-writing cost
-  either way (Postgres has no existing luam binding either); worth a
-  quick gut-check on *why* MariaDB specifically before Phase 0 starts
-  (existing familiarity, other internal infra already on MariaDB, etc.),
-  but not re-litigating here since you've already chosen MariaDB.
+  either way (Postgres has no existing luam binding either). Your stated
+  reasoning -- wanting a purely relational engine specifically to avoid
+  the feature-creep/data-mess risk Postgres's flexibility (JSONB,
+  extensions, procedural languages, etc.) invites -- holds up: everything
+  audited above is deliberately plain relational + application code
+  already, so MariaDB's narrower feature set isn't a constraint you'd be
+  fighting, it's already the shape this codebase is written in. Postgres
+  usage *could* be limited to an equivalent relational-only subset by
+  convention (no JSONB columns, no extensions, no stored
+  procedures/triggers, no `LISTEN`/`NOTIFY`) -- but that's a policy the
+  team has to keep enforcing by discipline/code review; MariaDB removes
+  the temptation structurally by not offering those features at all,
+  which is the actual guarantee you're after, not just a preference.
 - **Skipping Phase 1's persistent-connection work**: technically
   possible to ship Phase 0+2+3 with open-per-query connections, but per
   "current state" above, this would likely make every page load
