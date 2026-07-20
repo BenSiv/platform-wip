@@ -294,7 +294,6 @@ function html.page_shell(title, active, body, nonce, show_sql, show_admin, theme
         {key = "documents", href = "documents", label = "Notebook", icon = ICON_NOTEBOOK},
         {key = "data", href = "data", label = "Data", icon = ICON_DATA},
         {key = "tasks", href = "view?view_name=prioritized_tasks", label = "Tasks", icon = ICON_TASKS},
-        {key = "chat", href = "chat", label = "Chats", icon = ICON_CHAT_BUBBLE},
     }
     if show_sql or show_admin then
         table.insert(nav_items, {key = "system", href = "system", label = "System", icon = ICON_SYSTEM})
@@ -1779,7 +1778,7 @@ end
 -- own content the same way html.render_index's show_sql_widget already
 -- works.
 function html.render_system(show_sql, show_admin)
-    items = ""
+    items = "<li><a href=\"knowledge\">Knowledge Pool</a><p>Tiered notes, retrieval activity, and chat sessions.</p></li>"
     if show_sql then
         items = items .. "<li><a href=\"sql\">SQL console</a><p>Run ad hoc, read-only queries.</p></li>"
     end
@@ -1809,6 +1808,92 @@ function html.render_system(show_sql, show_admin)
     </div>
 </div>
 """, fossci_container_css(1200), items)
+end
+
+KNOWLEDGE_TIER_LABELS = {
+    [0] = "Tier 0: Raw Intake",
+    [1] = "Tier 1: Working Set",
+    [2] = "Tier 2: Curated Drafts",
+    [3] = "Tier 3: Atomic Records",
+}
+
+-- Landing page for src/knowledge.lua's tiering/retrieval-logging
+-- system (see that module's own header) -- linked from System, not
+-- given its own sidebar icon; chat session browsing lives at /chat,
+-- linked from here rather than a dedicated nav-rail entry.
+function html.render_knowledge_pool(stats, recent_retrievals)
+    tier_tiles = ""
+    for tier = 0, 3 do
+        tier_tiles = tier_tiles .. string.format(
+            '<div class="fossci-knowledge-tier"><strong>%s</strong><span class="dimmed">%d note(s)</span></div>',
+            html.html_escape(KNOWLEDGE_TIER_LABELS[tier]), stats.tier_counts[tier]
+        )
+    end
+
+    retrieval_rows = ""
+    for _, r in ipairs(recent_retrievals) do
+        retrieval_rows = retrieval_rows .. string.format(
+            '<div class="fossci-knowledge-retrieval"><strong>#%s</strong> %s <span class="dimmed">[%s, %s hit(s)]</span></div>',
+            tostring(r.id), html.html_escape(r.query_text), html.html_escape(r.created_at), tostring(r.hit_count)
+        )
+    end
+    if retrieval_rows == "" then
+        retrieval_rows = '<p class="dimmed">No retrievals yet.</p>'
+    end
+
+    return string.format("""
+<div class="fossil-doc" data-title="Knowledge Pool">
+    <style>
+%s
+        .fossci-header { margin-bottom: 20px; border-bottom: 1px solid var(--fossci-bg-2, #f1f5f9); padding-bottom: 16px; }
+        .fossci-header h2 { margin: 0 0 6px 0; font-size: 1.6rem; font-weight: 700; color: var(--fossci-heading, #0f172a); letter-spacing: -0.02em; }
+        .fossci-header p { color: var(--fossci-muted, #64748b); margin: 0; font-size: 0.95rem; }
+        .fossci-knowledge-stats { display: grid; grid-template-columns: repeat(4, minmax(10em, 1fr)); gap: 14px; margin-bottom: 20px; }
+        .fossci-knowledge-stats div { border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-item, 10px); padding: 14px 16px; background: var(--fossci-bg, #f8fafc); }
+        .fossci-knowledge-stats strong { display: block; font-size: 1.4rem; color: var(--fossci-heading, #0f172a); }
+        .fossci-knowledge-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 20px; }
+        .fossci-knowledge-tiers { display: grid; grid-template-columns: repeat(2, minmax(14em, 1fr)); gap: 12px; }
+        .fossci-knowledge-tier { border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-item, 10px); padding: 12px 14px; background: var(--fossci-bg, #f8fafc); }
+        .fossci-knowledge-tier strong { display: block; margin-bottom: 4px; }
+        .fossci-knowledge-panel { border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-item, 10px); padding: 14px 16px; background: var(--fossci-bg, #f8fafc); margin-bottom: 14px; }
+        .fossci-knowledge-panel h4 { margin: 0 0 10px 0; font-size: 0.95rem; color: var(--fossci-muted, #64748b); }
+        .fossci-knowledge-retrieval { margin: 6px 0; font-size: 0.9rem; }
+        .dimmed { color: var(--fossci-muted, #64748b); font-size: 0.85rem; }
+    </style>
+    <div class="fossci-container">
+        <div class="fossci-header">
+            <h2>Knowledge Pool</h2>
+            <p>Notes promote through processing tiers as they're retrieved and reinforced; every retrieval is logged.</p>
+        </div>
+        <div class="fossci-knowledge-stats">
+            <div><strong>%d</strong><span class="dimmed">pool records</span></div>
+            <div><strong>%d</strong><span class="dimmed">retrieval runs</span></div>
+            <div><strong>%d</strong><span class="dimmed">reviewed notes</span></div>
+            <div><strong>%d</strong><span class="dimmed">chat sessions</span></div>
+        </div>
+        <div class="fossci-knowledge-grid">
+            <div>
+                <div class="fossci-knowledge-panel">
+                    <h4>Processing Tiers</h4>
+                    <div class="fossci-knowledge-tiers">
+%s
+                    </div>
+                </div>
+            </div>
+            <div>
+                <div class="fossci-knowledge-panel">
+                    <h4>Recent Retrievals</h4>
+%s
+                </div>
+                <div class="fossci-knowledge-panel">
+                    <a href="chat">Browse chat sessions &rarr;</a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+""", fossci_container_css(1200), stats.note_count, stats.retrieval_count, stats.reviewed_note_count,
+     stats.session_count, tier_tiles, retrieval_rows)
 end
 
 function html.render_index(entity_types, edges, show_sql_widget, nonce)

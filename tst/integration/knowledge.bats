@@ -124,3 +124,37 @@ search_for_bioreactor() {
     [[ "$output" =~ "notes=1" ]]
     [[ "$output" =~ "retrievals=1" ]]
 }
+
+@test "/knowledge renders the landing page for a Setup/Admin user" {
+    "$BIN" user add carol carolpass123 isa
+    raw_carol=$(printf 'login=carol&password=carolpass123' | \
+        GATEWAY_INTERFACE="CGI/1.1" REQUEST_METHOD="POST" PATH_INFO="/login" QUERY_STRING="" "$BIN")
+    carol_session=$(printf '%s' "$raw_carol" | grep -o 'Set-Cookie: session=[^;]*' | sed 's/Set-Cookie: session=//')
+    carol_csrf=$(printf '%s' "$raw_carol" | grep -o 'Set-Cookie: csrf=[^;]*' | sed 's/Set-Cookie: csrf=//')
+
+    run bash -c "GATEWAY_INTERFACE=CGI/1.1 REQUEST_METHOD=GET PATH_INFO=/knowledge QUERY_STRING= HTTP_COOKIE='session=${carol_session}; csrf=${carol_csrf}' '$BIN'"
+    [[ "$output" =~ "200 OK" ]]
+    [[ "$output" =~ "Knowledge Pool" ]]
+    [[ "$output" =~ "Tier 0: Raw Intake" ]]
+    [[ "$output" =~ "Tier 3: Atomic Records" ]]
+}
+
+@test "/knowledge is forbidden for a plain (non Setup/Admin) user" {
+    run raw_get "/knowledge" ""
+    [[ "$output" =~ "403 Forbidden" ]]
+}
+
+@test "the icon rail no longer has a dedicated Chats entry; System links to Knowledge Pool instead" {
+    "$BIN" user add carol carolpass123 isa
+    raw_carol=$(printf 'login=carol&password=carolpass123' | \
+        GATEWAY_INTERFACE="CGI/1.1" REQUEST_METHOD="POST" PATH_INFO="/login" QUERY_STRING="" "$BIN")
+    carol_session=$(printf '%s' "$raw_carol" | grep -o 'Set-Cookie: session=[^;]*' | sed 's/Set-Cookie: session=//')
+    carol_csrf=$(printf '%s' "$raw_carol" | grep -o 'Set-Cookie: csrf=[^;]*' | sed 's/Set-Cookie: csrf=//')
+
+    run bash -c "GATEWAY_INTERFACE=CGI/1.1 REQUEST_METHOD=GET PATH_INFO=/ QUERY_STRING= HTTP_COOKIE='session=${carol_session}; csrf=${carol_csrf}' '$BIN'"
+    [[ ! "$output" =~ 'title="Chats"' ]]
+
+    run bash -c "GATEWAY_INTERFACE=CGI/1.1 REQUEST_METHOD=GET PATH_INFO=/system QUERY_STRING= HTTP_COOKIE='session=${carol_session}; csrf=${carol_csrf}' '$BIN'"
+    [[ "$output" =~ 'href="knowledge"' ]]
+    [[ "$output" =~ "Knowledge Pool" ]]
+}

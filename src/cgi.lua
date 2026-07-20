@@ -586,6 +586,17 @@ function cgi.handle_request()
             html.page_shell("System", "system", body, nonce, show_sql_nav, show_admin_nav, theme, author))
     end
 
+    if path_info == "/knowledge" then
+        if show_sql_nav == false and show_admin_nav == false then
+            return print_response("403 Forbidden", "text/html", "<h3>Forbidden: requires Setup or Admin capability</h3>")
+        end
+        stats = knowledge.stats(db_path)
+        recent = knowledge.recent_retrievals(db_path, 10)
+        body = html.render_knowledge_pool(stats, recent)
+        return print_response("200 OK", "text/html",
+            html.page_shell("Knowledge Pool", "system", body, nonce, show_sql_nav, show_admin_nav, theme, author))
+    end
+
     if path_info == "/detail" then
         entity_type = params.type
         entity_id = tonumber(params.entity_id)
