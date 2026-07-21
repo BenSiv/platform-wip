@@ -76,6 +76,40 @@ raw_admin_action() {
     [[ "$output" =~ '<link rel="icon"' ]]
 }
 
+@test "the login page has no nav links and no chat widget for an unauthenticated visitor" {
+    # Found live 2026-07-22, right after the page-shell fix above
+    # landed: page_shell's nav rail and chat widget were unconditional,
+    # so /login (author == nil) rendered a fully clickable nav (every
+    # link just bounces back to /login) and a chat widget someone could
+    # actually try to type into. The backend already rejects an
+    # unauthenticated /chat-start or /chat-message before it ever
+    # reaches the agent (cgi.handle_request's own session check runs
+    # first -- no billing/security exposure by itself), but showing
+    # controls nobody can use is confusing UX and worth not doing.
+    GATEWAY_INTERFACE="CGI/1.1" REQUEST_METHOD="GET" PATH_INFO="/login" QUERY_STRING="" run "$BIN"
+    [[ ! "$output" =~ '<a class="fossci-nav-link' ]]
+    [[ ! "$output" =~ 'id="fossci-chat-widget"' ]]
+
+    "$BIN" user add alice secret123 i
+    raw=$(raw_login alice secret123)
+    session=$(printf '%s' "$raw" | grep -o 'Set-Cookie: session=[^;]*' | sed 's/Set-Cookie: session=//')
+    csrf=$(printf '%s' "$raw" | grep -o 'Set-Cookie: csrf=[^;]*' | sed 's/Set-Cookie: csrf=//')
+    GATEWAY_INTERFACE="CGI/1.1" REQUEST_METHOD="GET" PATH_INFO="/" QUERY_STRING="" \
+        HTTP_COOKIE="session=${session}; csrf=${csrf}" run "$BIN"
+    [[ "$output" =~ '<a class="fossci-nav-link' ]]
+    [[ "$output" =~ 'id="fossci-chat-widget"' ]]
+}
+
+@test "an unauthenticated /chat-start or /chat-message never reaches the agent" {
+    GATEWAY_INTERFACE="CGI/1.1" REQUEST_METHOD="POST" PATH_INFO="/chat-start" QUERY_STRING="" run "$BIN"
+    [[ "$output" =~ "302 Found" ]]
+    [[ "$output" =~ "Location: /login" ]]
+
+    GATEWAY_INTERFACE="CGI/1.1" REQUEST_METHOD="POST" PATH_INFO="/chat-message" QUERY_STRING="" run "$BIN"
+    [[ "$output" =~ "302 Found" ]]
+    [[ "$output" =~ "Location: /login" ]]
+}
+
 @test "an archived user can no longer log in" {
     "$BIN" user add alice secret123 i
     "$BIN" user archive alice

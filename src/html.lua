@@ -312,19 +312,28 @@ function html.page_shell(title, active, body, nonce, show_sql, show_admin, has_t
     -- Admin). No separate New Page icon -- the Notebook page's own
     -- "+ New page" button already covers that entry point. Chat has no
     -- rail icon of its own either; it's the floating widget below.
-    nav_items = {
-        {key = "home", href = "/", label = "Home", icon = ICON_HOME},
-        {key = "documents", href = "documents", label = "Notebook", icon = ICON_NOTEBOOK},
-        {key = "data", href = "data", label = "Data", icon = ICON_DATA},
-    }
-    -- Only a real rail icon when a deployment actually seeded a
-    -- "prioritized_tasks" view -- see the matching comment in
-    -- render_home (task #101).
-    if has_tasks_view == true then
-        table.insert(nav_items, {key = "tasks", href = "view?view_name=prioritized_tasks", label = "Tasks", icon = ICON_TASKS})
-    end
-    if show_sql or show_admin then
-        table.insert(nav_items, {key = "system", href = "system", label = "System", icon = ICON_SYSTEM})
+    --
+    -- No real nav items at all when nobody's authenticated (author ==
+    -- nil, e.g. /login) -- every one of them just bounces back to
+    -- /login anyway (found live: the nav rail was fully visible and
+    -- clickable on the login page itself after task #89's /login fix
+    -- started wrapping it in this same page_shell).
+    nav_items = {}
+    if author != nil then
+        nav_items = {
+            {key = "home", href = "/", label = "Home", icon = ICON_HOME},
+            {key = "documents", href = "documents", label = "Notebook", icon = ICON_NOTEBOOK},
+            {key = "data", href = "data", label = "Data", icon = ICON_DATA},
+        }
+        -- Only a real rail icon when a deployment actually seeded a
+        -- "prioritized_tasks" view -- see the matching comment in
+        -- render_home (task #101).
+        if has_tasks_view == true then
+            table.insert(nav_items, {key = "tasks", href = "view?view_name=prioritized_tasks", label = "Tasks", icon = ICON_TASKS})
+        end
+        if show_sql or show_admin then
+            table.insert(nav_items, {key = "system", href = "system", label = "System", icon = ICON_SYSTEM})
+        end
     end
 
     -- Only rendered when the deployment's own theme.json sets
@@ -359,6 +368,20 @@ function html.page_shell(title, active, body, nonce, show_sql, show_admin, has_t
     <a href="logout">Log out</a>
 </div>
 """, html.html_escape(author))
+    end
+
+    -- No chat widget for an unauthenticated page either -- same
+    -- reasoning as nav_items above. The backend already rejects an
+    -- unauthenticated /chat-start or /chat-message before it ever
+    -- reaches the agent/Vertex AI call (cgi.handle_request's own
+    -- session check runs first, confirmed live), so this isn't a
+    -- billing/security gap by itself -- but showing a chat box nobody
+    -- can actually use is confusing UX, and only ever produces a
+    -- confusing "error" in the widget (a 302 redirect response its own
+    -- JS isn't expecting), not a real conversation.
+    chat_widget_html = ""
+    if author != nil then
+        chat_widget_html = html.render_chat_widget(nonce)
     end
 
     return string.format("""<!doctype html>
@@ -459,7 +482,7 @@ body {
 </body>
 </html>
 """, html.html_escape(title), nonce, page_context_json, root_css, fossci_chat_widget_css(), brand_html, table.concat(nav_links, ""), user_box, body,
-     html.render_chat_widget(nonce))
+     chat_widget_html)
 end
 
 -- `nonce` must be Fossil's own per-request CSP nonce (the FOSSIL_NONCE
