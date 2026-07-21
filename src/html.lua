@@ -1738,6 +1738,129 @@ function html.render_admin_users(users, csrf_token, message, is_error)
 """, fossci_container_css(1000), fossci_button_css(), message_html, escaped_csrf, rows_html)
 end
 
+-- Settings (task #89): a real UI for theme.json's own fields, instead
+-- of hand-editing the file and redeploying. Covers every field
+-- config.load_theme/save_theme round-trip -- site_name, the color
+-- overrides, hide_home_heading, system_prompt_extra, and logo/favicon
+-- uploads. Deliberately NOT env-var-driven config (DB backend, agent
+-- provider/model, Vertex project/region): those are process-bootstrap
+-- values read once at CGI-process start, not something safe to change
+-- from inside a running request.
+function html.render_settings(theme, csrf_token, message, is_error)
+    escaped_csrf = html.html_escape(csrf_token)
+
+    message_html = ""
+    if message != nil and message != "" then
+        css_class = "fossci-admin-message"
+        if is_error == true then
+            css_class = "fossci-admin-message fossci-admin-message-error"
+        end
+        message_html = "<div class=\"" .. css_class .. "\">" .. html.html_escape(message) .. "</div>"
+    end
+
+    hide_heading_checked = ""
+    if theme.hide_home_heading == true then
+        hide_heading_checked = " checked"
+    end
+
+    system_prompt_extra_value = ""
+    if theme.system_prompt_extra != nil then
+        system_prompt_extra_value = theme.system_prompt_extra
+    end
+
+    color_rows = ""
+    for _, key in ipairs(THEME_COLOR_KEYS) do
+        value = ""
+        if theme.colors != nil and theme.colors[key] != nil then
+            value = theme.colors[key]
+        end
+        label = string.gsub(key, "_", " ")
+        color_rows = color_rows .. string.format("""
+            <div class="fossci-settings-color">
+                <label for="color_%s">%s</label>
+                <input type="text" id="color_%s" name="color_%s" value="%s" placeholder="e.g. #4f46e5" size="12">
+            </div>
+""", key, html.html_escape(label), key, key, html.html_escape(value))
+    end
+
+    logo_status = "No logo uploaded -- the sidebar shows the default icon and \"Platform\" as plain text."
+    if theme.has_logo == true then
+        logo_status = "A logo is set. Uploading a new file below replaces it; there is no separate \"remove\" action today -- redeploy tooling or a direct theme-assets/ edit still handles removal."
+    end
+
+    return string.format("""
+<div class="fossil-doc" data-title="Settings">
+    <style>
+%s
+%s
+        .fossci-header { margin-bottom: 20px; border-bottom: 1px solid var(--fossci-bg-2, #f1f5f9); padding-bottom: 16px; }
+        .fossci-header h2 { margin: 0 0 6px 0; font-size: 1.6rem; font-weight: 700; color: var(--fossci-heading, #0f172a); letter-spacing: -0.02em; }
+        .fossci-admin-message { padding: 10px 12px; margin-bottom: 16px; border-radius: var(--fossci-radius-item, 10px); background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; font-size: 0.9rem; }
+        .fossci-admin-message-error { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+        .fossci-settings-section { margin-bottom: 28px; padding: 16px; background: var(--fossci-bg, #f8fafc); border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-md, 12px); }
+        .fossci-settings-section h3 { margin: 0 0 12px 0; font-size: 1.05rem; }
+        .fossci-settings-section label { display: block; font-size: 0.85rem; color: var(--fossci-muted, #64748b); margin-bottom: 4px; }
+        .fossci-settings-section input[type=text], .fossci-settings-section textarea, .fossci-settings-section input[type=file] {
+            width: 100%%; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-sm, 8px); font-size: 0.9rem; margin-bottom: 14px;
+        }
+        .fossci-settings-section textarea { min-height: 90px; font-family: inherit; }
+        .fossci-settings-checkbox { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
+        .fossci-settings-checkbox label { margin-bottom: 0; }
+        .fossci-settings-colors { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px 16px; }
+        .fossci-settings-color label { text-transform: capitalize; }
+        .fossci-settings-color input { margin-bottom: 0; }
+    </style>
+    <div class="fossci-container">
+        <div class="fossci-header"><h2>Settings</h2></div>
+        %s
+        <form method="POST" action="settings-save" enctype="multipart/form-data">
+            <input type="hidden" name="csrf_token" value="%s">
+
+            <div class="fossci-settings-section">
+                <h3>Site</h3>
+                <label for="site_name">Site name</label>
+                <input type="text" id="site_name" name="site_name" value="%s" placeholder="Platform">
+
+                <div class="fossci-settings-checkbox">
+                    <input type="checkbox" id="hide_home_heading" name="hide_home_heading" value="1"%s>
+                    <label for="hide_home_heading">Hide the site name heading on Home (use when the logo already reads as a wordmark)</label>
+                </div>
+            </div>
+
+            <div class="fossci-settings-section">
+                <h3>Branding</h3>
+                <p style="margin-top:0;color:var(--fossci-muted,#64748b);font-size:0.9rem;">%s</p>
+                <label for="logo_file">Sidebar mark (square, theme-assets/logo.png)</label>
+                <input type="file" id="logo_file" name="logo_file" accept="image/png">
+                <label for="logo_full_file">Full wordmark shown on Home (theme-assets/logo-full.png)</label>
+                <input type="file" id="logo_full_file" name="logo_full_file" accept="image/png">
+                <label for="favicon_file">Favicon (theme-assets/favicon.png)</label>
+                <input type="file" id="favicon_file" name="favicon_file" accept="image/png">
+            </div>
+
+            <div class="fossci-settings-section">
+                <h3>Colors</h3>
+                <p style="margin-top:0;color:var(--fossci-muted,#64748b);font-size:0.9rem;">Leave any field blank to use the default indigo/slate palette for that color.</p>
+                <div class="fossci-settings-colors">
+%s
+                </div>
+            </div>
+
+            <div class="fossci-settings-section">
+                <h3>Chat assistant</h3>
+                <label for="system_prompt_extra">Extra system prompt instructions</label>
+                <textarea id="system_prompt_extra" name="system_prompt_extra" placeholder="e.g. This deployment tracks bioreactor runs -- always ask for the run ID before creating a sample.">%s</textarea>
+            </div>
+
+            <button type="submit" class="btn btn-primary">Save settings</button>
+        </form>
+    </div>
+</div>
+""", fossci_container_css(900), fossci_button_css(), message_html, escaped_csrf,
+     html.html_escape(theme.site_name), hide_heading_checked, html.html_escape(logo_status),
+     color_rows, html.html_escape(system_prompt_extra_value))
+end
+
 -- v1 landing page: basic information and quick links, deliberately
 -- not an activity dashboard (working lists, a calendar, recent-entries
 -- feed) yet -- a real starting point, not the end state. `theme` is
@@ -1835,6 +1958,7 @@ function html.render_system(show_sql, show_admin)
     end
     if show_admin then
         items = items .. "<li><a href=\"admin-users\">Users</a><p>Manage accounts and capabilities.</p></li>"
+        items = items .. "<li><a href=\"settings\">Settings</a><p>Site name, branding, colors, and chat prompt.</p></li>"
     end
     items = items .. "<li><a href=\"templates\">Templates</a><p>Reusable entry templates for new pages.</p></li>"
 

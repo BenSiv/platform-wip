@@ -12,6 +12,30 @@ schema = {}
 
 FIELD_TYPES = {"text", "number", "date", "select", "reference"}
 
+-- Every generated entity table's own columns (builtin_columns below,
+-- plus "id" itself) -- a field sharing one of these names fails at
+-- `schema add` time with a raw "duplicate column name" SQL error
+-- instead of a clear message (found directly while writing an example
+-- schema for task #89: a field named "name" collided with the builtin
+-- "name" column). Listed here, not derived from builtin_columns()
+-- itself, since that function needs a live db_path (for
+-- db.now_expr's backend-specific default) that schema.validate itself
+-- is never given, and every name in it is a plain string literal
+-- anyway.
+RESERVED_FIELD_NAMES = {
+    "id", "created_by", "created_at", "updated_by", "updated_at",
+    "last_event_id", "external_id", "name", "archived_at",
+}
+
+function is_reserved_field_name(name)
+    for _, reserved in ipairs(RESERVED_FIELD_NAMES) do
+        if name == reserved then
+            return true
+        end
+    end
+    return false
+end
+
 SQL_TYPE = {
     text = "TEXT",
     number = "REAL",
@@ -86,6 +110,9 @@ function schema.validate(def)
     for i, field in ipairs(def.fields) do
         if type(field.name) != "string" or field.name == "" then
             return string.format("schema '%s' field #%d: missing 'name'", def.name, i)
+        end
+        if is_reserved_field_name(field.name) then
+            return string.format("schema '%s' field '%s': collides with a builtin column of the same name -- choose a different field name", def.name, field.name)
         end
         if is_valid_field_type(field.type) == false then
             return string.format("schema '%s' field '%s': invalid type '%s'", def.name, field.name, tostring(field.type))

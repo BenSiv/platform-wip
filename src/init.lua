@@ -10,6 +10,7 @@ auth = require("auth")
 document = require("document")
 knowledge = require("knowledge")
 agent = require("agent")
+examples = require("examples")
 
 init = {}
 
@@ -24,12 +25,47 @@ function describe_db_target(target)
     return target
 end
 
+-- --with-examples (task #89): a plain `platform init` deliberately
+-- stays the truly empty, generic install task #101 verified and
+-- fixed -- no seed content forced on every deployment. This is the
+-- opt-in alternative: one small, realistic, working example of each
+-- config-as-code kind (schemas/extensions/views/templates) plus an
+-- example theme.json, so a new user has something real to read and
+-- copy instead of an empty directory. Safe to pass again later, even
+-- against an already-initialized store (e.g. after deleting one
+-- example to see it regenerate) -- examples.write_all skips any
+-- destination that already exists rather than overwriting it.
+function has_with_examples_flag(cmd_args)
+    for _, arg in ipairs(cmd_args) do
+        if arg == "--with-examples" then
+            return true
+        end
+    end
+    return false
+end
+
+function report_examples_written(written)
+    if #written == 0 then
+        print("No example files written -- every example destination already exists.")
+        return
+    end
+    print("Wrote " .. #written .. " example file(s):")
+    for _, path in ipairs(written) do
+        print("  " .. path)
+    end
+end
+
 function init.do_init(cmd_args, root)
     if root == nil then
         root = "."
     end
+    with_examples = has_with_examples_flag(cmd_args)
+
     if config.is_initialized(root) then
         print("Already initialized: " .. describe_db_target(config.db_path(root)))
+        if with_examples then
+            report_examples_written(examples.write_all(root))
+        end
         return
     end
 
@@ -50,6 +86,10 @@ function init.do_init(cmd_args, root)
     ok, err = auth.ensure_session_secret(root)
     if ok == nil then
         print("Warning: could not create session secret: " .. tostring(err))
+    end
+
+    if with_examples then
+        report_examples_written(examples.write_all(root))
     end
 
     print("Initialized store at " .. config.store_dir(root))

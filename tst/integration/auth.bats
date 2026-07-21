@@ -59,6 +59,23 @@ raw_admin_action() {
     [[ "$output" =~ "Invalid login or password" ]]
 }
 
+@test "the login page itself is wrapped in the real page shell, not a bare content fragment" {
+    # task #89 regression: /login used to print html.render_login's raw
+    # fragment directly, with no <head>/favicon <link>/theme :root{}
+    # block at all -- a deployment's theme.json colors/site name never
+    # applied to the one page every user sees before authenticating,
+    # and the browser tab fell back to whatever favicon it had cached
+    # from a previous origin.
+    GATEWAY_INTERFACE="CGI/1.1" REQUEST_METHOD="GET" PATH_INFO="/login" QUERY_STRING="" run "$BIN"
+    [[ "$output" =~ "<!doctype html>" ]]
+    [[ "$output" =~ '<link rel="icon" type="image/png" href="theme-asset?name=favicon.png">' ]]
+    [[ "$output" =~ "<title>Log in</title>" ]]
+
+    run raw_login someone wrongpass
+    [[ "$output" =~ "<!doctype html>" ]]
+    [[ "$output" =~ '<link rel="icon"' ]]
+}
+
 @test "an archived user can no longer log in" {
     "$BIN" user add alice secret123 i
     "$BIN" user archive alice

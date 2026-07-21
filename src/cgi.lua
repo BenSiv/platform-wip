@@ -12,8 +12,18 @@ auth = require("auth")
 document = require("document")
 knowledge = require("knowledge")
 agent = require("agent")
+multipart = require("multipart")
 
 cgi = {}
+
+-- Duplicated from config.lua/html.lua (both already keep their own
+-- copy for the same reason) -- Luam's per-module isolation means a
+-- bare top-level global in one file isn't visible from another, only
+-- what a module explicitly returns on its own table.
+THEME_COLOR_KEYS = {
+    "accent", "accent_2", "bg", "bg_2", "border", "border_2",
+    "heading", "input_text", "muted", "muted_2", "text", "th_text",
+}
 
 -- The baseline capability every gated route (other than /login,
 -- /logout, and the login form's own POST) requires. Real session/login
@@ -340,13 +350,28 @@ end
 -- not gated behind the session-verification block below (it runs
 -- before that block in handle_request) since an unauthenticated caller
 -- reaching /login is the expected case, not an error.
-function handle_login(root, db_path, method, nonce)
+-- Wraps render_login in the real page_shell -- until this fix, /login
+-- printed html.render_login's bare content fragment directly, with no
+-- <head>/<title>/favicon <link>/theme :root{} block at all (every
+-- other route already went through page_shell for exactly this).
+-- Visible live: the login page never picked up a deployment's
+-- theme.json colors/site name, and the browser tab fell back to
+-- whatever favicon it had cached from a previous origin instead of
+-- this deployment's own theme-assets/favicon.png. show_sql/show_admin
+-- are always false here (nobody is authenticated yet, so no
+-- capabilities apply); has_tasks_view is still real, not hardcoded --
+-- cheap to check directly, same as every other route.
+function handle_login(root, db_path, method, nonce, theme)
+    has_tasks_view = view.load(config.views_dir(root), "prioritized_tasks") != nil
+
     if method == "POST" then
         body = io.read("*all")
         form = parse_query(body)
         cap, login_err = auth.login(db_path, form.login, form.password)
         if cap == nil then
-            return print_response("401 Unauthorized", "text/html", html.render_login("Invalid login or password.", nonce))
+            body_html = html.render_login("Invalid login or password.", nonce)
+            return print_response("401 Unauthorized", "text/html",
+                html.page_shell("Log in", "login", body_html, nonce, false, false, has_tasks_view, theme, nil))
         end
 
         session_cookie, cookie_err = auth.issue_session_cookie(root, form.login)
@@ -365,7 +390,9 @@ function handle_login(root, db_path, method, nonce)
         })
     end
 
-    return print_response("200 OK", "text/html", html.render_login(nil, nonce))
+    body_html = html.render_login(nil, nonce)
+    return print_response("200 OK", "text/html",
+        html.page_shell("Log in", "login", body_html, nonce, false, false, has_tasks_view, theme, nil))
 end
 
 function cgi.handle_request()
@@ -453,7 +480,7 @@ function cgi.handle_request()
     end
 
     if path_info == "/login" then
-        return handle_login(root, db_path, method, nonce)
+        return handle_login(root, db_path, method, nonce, theme)
     end
 
     -- Real session verification, replacing the old Phase 0
@@ -862,6 +889,116 @@ function cgi.handle_request()
                 html.page_shell("Users", "system", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author))
         end
         return print_response("302 Found", "text/plain", "", {"Location: admin-users"})
+    end
+
+    if path_info == "/settings" then
+        if not cgi.has_capability(capabilities, "a") then
+            return print_response("403 Forbidden", "text/html", "<h3>Forbidden: requires Admin capability</h3>")
+        end
+        body = html.render_settings(theme, default_value(cookies.csrf, ""), nil, false)
+        return print_response("200 OK", "text/html",
+            html.page_shell("Settings", "system", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author))
+    end
+
+    if path_info == "/settings-save" and method == "POST" then
+        if not cgi.has_capability(capabilities, "a") then
+            return print_response("403 Forbidden", "text/html", "<h3>Forbidden: requires Admin capability</h3>")
+        end
+
+        -- multipart, not parse_query -- the form's own enctype, needed
+        -- for the logo/favicon file fields to arrive at all (task #89).
+        raw_body = io.read("*all")
+        form = multipart.parse(os.getenv("CONTENT_TYPE"), raw_body)
+
+        if not require_csrf(cookies, form.csrf_token) then
+            body = html.render_settings(theme, default_value(cookies.csrf, ""), "CSRF check failed.", true)
+            return print_response("403 Forbidden", "text/html",
+                html.page_shell("Settings", "system", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author))
+        end
+
+        -- Colors get embedded straight into a <style> block by
+        -- html.theme_root_css (not HTML-escaped -- it isn't HTML
+        -- content), so this is the one place that has to actually
+        -- validate them rather than trust an Admin-only form the way
+        -- everything else here does: a value breaking out of <style>
+        -- would be stored injection against every visitor, not just
+        -- whoever filled in this form. Allowlist covers real CSS color
+        -- syntax (#hex, rgb()/rgba()/hsl()/hsla(), named colors) and
+        -- structurally excludes every HTML/CSS-breakout character.
+        new_colors = {}
+        color_error = nil
+        for _, key in ipairs(THEME_COLOR_KEYS) do
+            value = form["color_" .. key]
+            if value != nil and value != "" then
+                if string.match(value, "^[%w%s#%.,%%()-]+$") == nil then
+                    color_error = "Invalid color value for '" .. key .. "' -- only letters, digits, and #.,%()- are allowed."
+                end
+                new_colors[key] = value
+            end
+        end
+
+        -- Uploaded files are written under fixed destination names
+        -- (logo.png/logo-full.png/favicon.png) -- never the
+        -- client-supplied filename -- same "never path-build from user
+        -- input" reasoning as /theme-asset's own allowlist. Checked
+        -- against the real PNG magic bytes first, since accept=
+        -- "image/png" on the <input> is only ever a client-side hint.
+        upload_specs = {
+            {field = "logo_file", filename = "logo.png", is_logo = true},
+            {field = "logo_full_file", filename = "logo-full.png", is_logo = true},
+            {field = "favicon_file", filename = "favicon.png", is_logo = false},
+        }
+        upload_error = nil
+        for _, spec in ipairs(upload_specs) do
+            uploaded = form[spec.field]
+            if type(uploaded) == "table" and uploaded.data != nil and uploaded.data != "" then
+                if string.sub(uploaded.data, 1, 8) != "\137PNG\r\n\026\n" then
+                    upload_error = "'" .. spec.filename .. "' must be a real PNG file."
+                end
+            end
+        end
+
+        if color_error != nil or upload_error != nil then
+            current = config.load_theme(root)
+            body = html.render_settings(current, default_value(cookies.csrf, ""), default_value(color_error, upload_error), true)
+            return print_response("200 OK", "text/html",
+                html.page_shell("Settings", "system", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author))
+        end
+
+        new_theme = config.load_theme(root)
+        new_theme.site_name = default_value(form.site_name, "Platform")
+        new_theme.hide_home_heading = (form.hide_home_heading == "1")
+        new_theme.system_prompt_extra = nil
+        if form.system_prompt_extra != nil and form.system_prompt_extra != "" then
+            new_theme.system_prompt_extra = form.system_prompt_extra
+        end
+        new_theme.colors = new_colors
+
+        for _, spec in ipairs(upload_specs) do
+            uploaded = form[spec.field]
+            if type(uploaded) == "table" and uploaded.data != nil and uploaded.data != "" then
+                paths.create_dir_if_not_exists(config.theme_assets_dir(root))
+                dest_file, dest_err = io.open(paths.joinpath(config.theme_assets_dir(root), spec.filename), "wb")
+                if dest_file == nil then
+                    body = html.render_settings(new_theme, default_value(cookies.csrf, ""), tostring(dest_err), true)
+                    return print_response("500 Internal Server Error", "text/html",
+                        html.page_shell("Settings", "system", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author))
+                end
+                io.write(dest_file, uploaded.data)
+                io.close(dest_file)
+                if spec.is_logo then
+                    new_theme.has_logo = true
+                end
+            end
+        end
+
+        ok, err = config.save_theme(root, new_theme)
+        if ok == nil then
+            body = html.render_settings(new_theme, default_value(cookies.csrf, ""), tostring(err), true)
+            return print_response("500 Internal Server Error", "text/html",
+                html.page_shell("Settings", "system", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author))
+        end
+        return print_response("302 Found", "text/plain", "", {"Location: settings"})
     end
 
     -- Chat/agent (src/agent.lua). AGENT_MODEL is configurable the same

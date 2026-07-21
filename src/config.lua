@@ -264,4 +264,46 @@ function config.load_theme(root)
     return theme
 end
 
+-- Writes theme.json back out -- the settings UI's save path (task
+-- #89), symmetric to load_theme above rather than a one-off ad hoc
+-- writer. `theme` is the same shape load_theme returns; only
+-- non-empty/non-default values are actually written, so a field left
+-- blank in the settings form round-trips back to "absent from
+-- theme.json" (load_theme's own generic fallback) instead of being
+-- persisted as an explicit empty string.
+function config.save_theme(root, theme)
+    json = require("dkjson")
+    out = {}
+    if theme.site_name != nil and theme.site_name != "" and theme.site_name != "Platform" then
+        out.site_name = theme.site_name
+    end
+    if theme.has_logo == true then
+        out.has_logo = true
+    end
+    if theme.hide_home_heading == true then
+        out.hide_home_heading = true
+    end
+    if theme.system_prompt_extra != nil and theme.system_prompt_extra != "" then
+        out.system_prompt_extra = theme.system_prompt_extra
+    end
+    out.colors = {}
+    if theme.colors != nil then
+        for _, key in ipairs(THEME_COLOR_KEYS) do
+            value = theme.colors[key]
+            if type(value) == "string" and value != "" then
+                out.colors[key] = value
+            end
+        end
+    end
+
+    path = config.theme_path(root)
+    file, err = io.open(path, "w")
+    if file == nil then
+        return nil, err
+    end
+    io.write(file, json.encode(out, {indent = true}))
+    io.close(file)
+    return true
+end
+
 return config
