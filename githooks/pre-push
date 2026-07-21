@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-cd "$(git rev-parse --show-toplevel)"
-echo "pre-push: running platform-wip test suite (bld/test.sh)..."
-./bld/test.sh

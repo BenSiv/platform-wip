@@ -44,8 +44,6 @@ make any of this work.
 bin/        compiled binary (bld/build.sh's output) -- gitignored, never committed
 bld/        build.sh/test.sh
 doc/        this file, schema.md, extensibility.md
-githooks/   tracked pre-push hook (git config core.hooksPath githooks activates it
-            per clone -- not automatic, a local git config isn't itself trackable)
 src/        every *.lua source file -- bld/build.sh globs and bundles all of them
             into the single compiled binary, so anything dropped here ships in
             production, including src/agent_provider_test.lua (see "Chat" below)
