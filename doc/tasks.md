@@ -23,8 +23,7 @@ deprioritized by preference).
 
 | # | Subject | Notes |
 |---|---------|-------|
-| 85 | Migrate platform deployment from Docker to Podman | **Next up**, pending a rootful-vs-rootless decision. From user notes and this session's earlier discussion: rootful Podman is a low-effort drop-in swap (Debian 12 ships it directly, daemonless already closes Docker's biggest attack-surface complaint); fully rootless (matching the user's own dev container) needs a dedicated service account, subuid/subgid ranges, and a `systemctl --user` unit -- decision on which level still open. |
-| 89 | Design a consolidated admin/settings interface | Needs scoping. From user notes: "admin and settings interfaces" -- currently spread across `/admin-users`, `/system`, `theme.json`, and various env vars with no single place to see/manage them. Vague as captured; needs a follow-up conversation to scope exactly what "consolidated" should cover before design work starts. |
+| 89 | Design a consolidated admin/settings interface | **Next up.** Needs scoping. From user notes: "admin and settings interfaces" -- currently spread across `/admin-users`, `/system`, `theme.json`, and various env vars with no single place to see/manage them. Vague as captured; needs a follow-up conversation to scope exactly what "consolidated" should cover before design work starts. |
 
 ### Blocked / contingent on humans (unaffected by the cleanup-first reordering)
 
@@ -48,6 +47,7 @@ deprioritized by preference).
 
 | # | Subject | Notes |
 |---|---------|-------|
+| 85 | Migrate platform deployment from Docker to Podman | Deferred 2026-07-22 after scoping both the rootful-vs-rootless question and the "should this happen at all" question against the real `startup-platform.sh.tpl`. Real, legitimate hardening (removes `dockerd`'s persistent root daemon -- a genuine attack-surface reduction that holds even under rootful Podman), and the build pipeline is unaffected either way (Cloud Build still produces standard OCI images; only the VM runtime would change). Not urgent: no Docker-daemon-related incident has ever occurred here, and several stronger first-order controls already exist (Cloud SQL has zero public network exposure, SSH is IAP-tunnel-only, secrets live in Secret Manager, `deletion_protection` is on) -- this would be a second-order/defense-in-depth control, not a perimeter one. Two real costs found, not hypothetical: (1) `restart: always` durability across a host reboot works today only because `dockerd` is itself a systemd-managed service that restarts containers on its own restart -- Podman has no equivalent persistent process, so this needs an explicit replacement (Podman's own answer is Quadlet, systemd unit files per container/pod), not a CLI swap; (2) the Cloud SQL Auth Proxy sidecar's compose-network setup (`env_file`, service-name resolution, bind-mounted `/opt/platform/data`) has never been run under `podman compose` and needs verifying on a throwaway instance before ever touching `fossci-app-prod`. If picked back up: stage on a disposable VM first, design the Quadlet units up front, and verify the sidecar end-to-end -- the same phased/verify-before-cutover rigor task #82's MariaDB migration used, not a live edit of the production startup script. |
 | 53 | Add attachment support to the chat widget | Deferred, future. |
 | 57 | Investigate persistent-process mode to replace CGI-per-request | Deferred, future; would remove the per-request CGI bootstrap cost. |
 | 65 | Add @mention support to the editor | Deferred, future; user-expressed interest. |
