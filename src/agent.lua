@@ -53,7 +53,9 @@ CREATE TABLE IF NOT EXISTS agent_pending_action (
     tool TEXT NOT NULL,
     method TEXT NOT NULL,
     args_json TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
+    -- VARCHAR(32), not TEXT -- see extension.lua's extension_job.status
+    -- for why: real MySQL 8.0 rejects a literal DEFAULT on TEXT columns.
+    status VARCHAR(32) NOT NULL DEFAULT 'pending',
     created_at TEXT DEFAULT (%s),
     resolved_at TEXT
 );

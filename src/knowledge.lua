@@ -42,8 +42,6 @@ CREATE TABLE IF NOT EXISTS knowledge_note (
     created_at TEXT DEFAULT (%s),
     updated_at TEXT DEFAULT (%s)
 );
-CREATE INDEX IF NOT EXISTS knowledge_note_tier_idx ON knowledge_note(tier, heat DESC, retrieval_count DESC);
-CREATE INDEX IF NOT EXISTS knowledge_note_hash_idx ON knowledge_note(%s);
 
 CREATE TABLE IF NOT EXISTS knowledge_retrieval (
     id INTEGER PRIMARY KEY %s,
@@ -53,16 +51,21 @@ CREATE TABLE IF NOT EXISTS knowledge_retrieval (
     created_at TEXT DEFAULT (%s)
 );
 
+-- `rank` (backtick-quoted, not a bare identifier): a genuine reserved
+-- word in MySQL 8.0 (window functions), though not in MariaDB -- found
+-- running tst/integration/mariadb_backend.bats against a real Cloud SQL
+-- for MySQL instance. Backtick quoting is valid MySQL/MariaDB syntax and
+-- SQLite's own MySQL-compatibility extension, so this is a single,
+-- unified fix needing no per-backend branch.
 CREATE TABLE IF NOT EXISTS knowledge_retrieval_note (
     retrieval_id INTEGER NOT NULL,
     note_id INTEGER NOT NULL,
-    rank INTEGER,
+    `rank` INTEGER,
     score REAL,
     tier_weight REAL,
     reinforcement_delta REAL,
     PRIMARY KEY (retrieval_id, note_id)
 );
-CREATE INDEX IF NOT EXISTS knowledge_retrieval_note_note_idx ON knowledge_retrieval_note(note_id);
 
 CREATE TABLE IF NOT EXISTS knowledge_review (
     id INTEGER PRIMARY KEY %s,
@@ -80,14 +83,39 @@ CREATE TABLE IF NOT EXISTS knowledge_review (
 function knowledge_schema_sql(db_path)
     return string.format(KNOWLEDGE_SCHEMA,
         db.autoincrement_keyword(db_path), db.now_expr(db_path), db.now_expr(db_path),
-        db.text_index_column(db_path, "content_hash"),
         db.autoincrement_keyword(db_path), db.now_expr(db_path),
         db.autoincrement_keyword(db_path), db.now_expr(db_path)
     )
 end
 
+-- Real MySQL has no "CREATE INDEX IF NOT EXISTS" at all (a syntax error,
+-- not a no-op, unlike MariaDB) -- found running tst/integration/
+-- mariadb_backend.bats against a real Cloud SQL for MySQL instance. These
+-- three indexes used to live inside KNOWLEDGE_SCHEMA's own semicolon
+-- batch; pulled out into their own guarded execs (db.index_exists first,
+-- same "check, then conditionally create" shape schema.lua's own
+-- CREATE INDEX call sites now use) since a single bad statement fails the
+-- whole batch on MySQL, not just that one statement.
+function ensure_knowledge_indexes(db_path)
+    indexes = {
+        {name = "knowledge_note_tier_idx", table = "knowledge_note",
+         sql = "CREATE INDEX knowledge_note_tier_idx ON knowledge_note(tier, heat DESC, retrieval_count DESC);"},
+        {name = "knowledge_note_hash_idx", table = "knowledge_note",
+         sql = string.format("CREATE INDEX knowledge_note_hash_idx ON knowledge_note(%s);",
+             db.text_index_column(db_path, "content_hash"))},
+        {name = "knowledge_retrieval_note_note_idx", table = "knowledge_retrieval_note",
+         sql = "CREATE INDEX knowledge_retrieval_note_note_idx ON knowledge_retrieval_note(note_id);"},
+    }
+    for _, idx in ipairs(indexes) do
+        if db.index_exists(db_path, idx.table, idx.name) == false then
+            db.exec(db_path, idx.sql)
+        end
+    end
+end
+
 function knowledge.init_schema(db_path)
-    return db.exec(db_path, knowledge_schema_sql(db_path))
+    db.exec(db_path, knowledge_schema_sql(db_path))
+    ensure_knowledge_indexes(db_path)
 end
 
 --------------------------------------------------------------------------
@@ -294,7 +322,7 @@ function knowledge.record_retrieval_hit(db_path, retrieval_id, note_id, tier, ra
         delta, db.now_expr(db_path), db.now_expr(db_path), tonumber(note_id)
     ))
     db.exec(db_path, string.format(
-        "%s knowledge_retrieval_note (retrieval_id, note_id, rank, score, tier_weight, reinforcement_delta) " ..
+        "%s knowledge_retrieval_note (retrieval_id, note_id, `rank`, score, tier_weight, reinforcement_delta) " ..
         "VALUES (%d, %d, %d, %.17g, %.17g, %.17g);",
         db.replace_into(db_path),
         tonumber(retrieval_id), tonumber(note_id), tonumber(rank), tonumber(score), tier_weight, delta

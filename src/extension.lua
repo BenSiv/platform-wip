@@ -36,7 +36,13 @@ CREATE TABLE IF NOT EXISTS extension_job (
     entity_id INTEGER NOT NULL,
     new_values_json TEXT,
     old_values_json TEXT,
-    status TEXT NOT NULL DEFAULT 'pending',
+    -- VARCHAR(32), not TEXT -- real MySQL 8.0 (unlike MariaDB, which
+    -- allows this as an extension) rejects a literal DEFAULT value on
+    -- a BLOB/TEXT/GEOMETRY/JSON column outright ("can't have a default
+    -- value"). Found running tst/integration/mariadb_backend.bats
+    -- against a real Cloud SQL for MySQL instance, not anticipated
+    -- when the earlier MariaDB-only dialect work was verified.
+    status VARCHAR(32) NOT NULL DEFAULT 'pending',
     attempts INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
     created_at TEXT DEFAULT (%s),

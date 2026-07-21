@@ -267,10 +267,13 @@ function schema.sync_table(db_path, def)
         db.exec(db_path, string.format(
             "CREATE TABLE %s (%s);", def.name, table.concat(columns, ", ")
         ))
-        db.exec(db_path, string.format(
-            "CREATE INDEX IF NOT EXISTS idx_%s_external_id ON %s (%s);",
-            def.name, def.name, db.text_index_column(db_path, "external_id")
-        ))
+        index_name = "idx_" .. def.name .. "_external_id"
+        if db.index_exists(db_path, def.name, index_name) == false then
+            db.exec(db_path, string.format(
+                "CREATE INDEX %s ON %s (%s);",
+                index_name, def.name, db.text_index_column(db_path, "external_id")
+            ))
+        end
         return
     end
 
@@ -293,10 +296,13 @@ function schema.sync_table(db_path, def)
             ))
         end
     end
-    db.exec(db_path, string.format(
-        "CREATE INDEX IF NOT EXISTS idx_%s_external_id ON %s (%s);",
-        def.name, def.name, db.text_index_column(db_path, "external_id")
-    ))
+    index_name = "idx_" .. def.name .. "_external_id"
+    if db.index_exists(db_path, def.name, index_name) == false then
+        db.exec(db_path, string.format(
+            "CREATE INDEX %s ON %s (%s);",
+            index_name, def.name, db.text_index_column(db_path, "external_id")
+        ))
+    end
 end
 
 -- Scans the schemas directory, registers any schema files found,

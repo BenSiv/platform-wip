@@ -30,7 +30,9 @@ auth.SCHEMA = """
 CREATE TABLE IF NOT EXISTS user (
     login VARCHAR(255) PRIMARY KEY,
     password_hash TEXT NOT NULL,
-    cap TEXT NOT NULL DEFAULT '',
+    -- VARCHAR(32), not TEXT -- see extension.lua's extension_job.status
+    -- for why: real MySQL 8.0 rejects a literal DEFAULT on TEXT columns.
+    cap VARCHAR(32) NOT NULL DEFAULT '',
     created_at TEXT DEFAULT (%s),
     archived_at TEXT
 );

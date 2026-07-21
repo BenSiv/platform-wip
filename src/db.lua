@@ -90,6 +90,27 @@ function db.table_exists(db_path, table_name)
     return rows != nil
 end
 
+-- Real MySQL (unlike MariaDB, and unlike MySQL's own CREATE TABLE) has no
+-- "IF NOT EXISTS" clause for CREATE INDEX at all -- a syntax error, not a
+-- no-op. Found running tst/integration/mariadb_backend.bats against a real
+-- Cloud SQL for MySQL instance. Every CREATE INDEX call site now checks
+-- this first instead of relying on IF NOT EXISTS, same "check, then
+-- conditionally create" shape as db.table_exists/schema.sync_table already
+-- use for tables/columns.
+function db.index_exists(db_path, table_name, index_name)
+    query = string.format(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name = %s;", db.quote(index_name)
+    )
+    if is_mariadb(db_path) then
+        query = string.format(
+            "SELECT DISTINCT index_name FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = %s AND index_name = %s;",
+            db.quote(table_name), db.quote(index_name)
+        )
+    end
+    rows = db.query(db_path, query)
+    return rows != nil
+end
+
 -- Quotes a value as a safe SQL string literal: plain quote-doubling,
 -- the same escaping platform.sqlite always used, no db_path/backend
 -- parameter needed here. Correct for MariaDB too now that every
