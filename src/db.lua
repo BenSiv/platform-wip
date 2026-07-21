@@ -90,6 +90,21 @@ function db.table_exists(db_path, table_name)
     return rows != nil
 end
 
+-- Backtick-quotes a raw SQL identifier (column/index name), not a value --
+-- db.quote/db.literal already cover values. Needed anywhere a
+-- schema-defined field name (arbitrary, not controlled by platform-wip's
+-- own code) gets interpolated as a column identifier: MySQL's reserved-
+-- word list is much larger than SQLite's or MariaDB's own extensions
+-- allow around, so a field genuinely named e.g. "usage" (a real
+-- production field, culture_medium.lua) breaks CREATE TABLE/INSERT/UPDATE
+-- outright without this -- found running a real production schema
+-- against a live Cloud SQL for MySQL instance. Backtick quoting is valid
+-- MySQL/MariaDB syntax and SQLite's own MySQL-compatibility extension, so
+-- this is a single, unified fix needing no per-backend branch.
+function db.quote_ident(name)
+    return "`" .. tostring(name) .. "`"
+end
+
 -- Real MySQL (unlike MariaDB, and unlike MySQL's own CREATE TABLE) has no
 -- "IF NOT EXISTS" clause for CREATE INDEX at all -- a syntax error, not a
 -- no-op. Found running tst/integration/mariadb_backend.bats against a real

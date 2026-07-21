@@ -259,10 +259,10 @@ function schema.sync_table(db_path, def)
     if db.table_exists(db_path, def.name) == false then
         columns = {"id INTEGER PRIMARY KEY " .. db.autoincrement_keyword(db_path)}
         for _, field in ipairs(def.fields) do
-            table.insert(columns, field.name .. " " .. SQL_TYPE[field.type])
+            table.insert(columns, db.quote_ident(field.name) .. " " .. SQL_TYPE[field.type])
         end
         for _, builtin in ipairs(builtin_columns(db_path)) do
-            table.insert(columns, builtin.name .. " " .. builtin.sql_type)
+            table.insert(columns, db.quote_ident(builtin.name) .. " " .. builtin.sql_type)
         end
         db.exec(db_path, string.format(
             "CREATE TABLE %s (%s);", def.name, table.concat(columns, ", ")
@@ -285,14 +285,14 @@ function schema.sync_table(db_path, def)
     for _, field in ipairs(def.fields) do
         if have[field.name] == nil then
             db.exec(db_path, string.format(
-                "ALTER TABLE %s ADD COLUMN %s %s;", def.name, field.name, SQL_TYPE[field.type]
+                "ALTER TABLE %s ADD COLUMN %s %s;", def.name, db.quote_ident(field.name), SQL_TYPE[field.type]
             ))
         end
     end
     for _, builtin in ipairs(builtin_columns(db_path)) do
         if have[builtin.name] == nil then
             db.exec(db_path, string.format(
-                "ALTER TABLE %s ADD COLUMN %s %s;", def.name, builtin.name, builtin.sql_type
+                "ALTER TABLE %s ADD COLUMN %s %s;", def.name, db.quote_ident(builtin.name), builtin.sql_type
             ))
         end
     end

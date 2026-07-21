@@ -213,7 +213,7 @@ function entity.create(db_path, entity_type, values, author, source)
     columns = {"id"}
     literals = {tostring(entity_id)}
     for name, value in pairs(values) do
-        table.insert(columns, name)
+        table.insert(columns, db.quote_ident(name))
         table.insert(literals, db.literal(value))
     end
     table.insert(columns, "created_by")
@@ -266,7 +266,7 @@ function entity.update(db_path, entity_type, entity_id, values, author, source, 
         old_value = current[name]
         if tostring(old_value) != tostring(new_value) then
             field_changes[name] = {old = old_value, new = new_value}
-            table.insert(assignments, name .. " = " .. db.literal(new_value))
+            table.insert(assignments, db.quote_ident(name) .. " = " .. db.literal(new_value))
         end
     end
 
