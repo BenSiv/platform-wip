@@ -478,6 +478,12 @@ function cgi.handle_request()
     author = user.login
     show_sql_nav = cgi.has_capability(capabilities, "s") or cgi.has_capability(capabilities, "a")
     show_admin_nav = cgi.has_capability(capabilities, "a")
+    -- Nav-rail "Tasks" icon and Home's matching quick-link are only
+    -- real links when this deployment actually seeded a
+    -- "prioritized_tasks" view (task #101 -- a fresh/generic install
+    -- has no views/ at all, so this used to be a nav item every
+    -- deployment got that 404'd with a raw internal path).
+    has_tasks_view = view.load(config.views_dir(root), "prioritized_tasks") != nil
 
     if path_info == "/logout" then
         return print_response("302 Found", "text/plain", "", {
@@ -510,7 +516,7 @@ function cgi.handle_request()
         body = html.render(entity_type, layout_json, nonce)
         page_context = {page_type = "entity_register", entity_type = entity_type, title = entity_type .. " · Register"}
         return print_response("200 OK", "text/html",
-            html.page_shell(entity_type .. " · Register", "data", body, nonce, show_sql_nav, show_admin_nav, theme, author, page_context))
+            html.page_shell(entity_type .. " · Register", "data", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author, page_context))
     end
 
     if path_info == "/browse" then
@@ -537,7 +543,7 @@ function cgi.handle_request()
         body = html.render_browse(db_path, entity_type, layout, rows, page, BROWSE_PAGE_SIZE, total, nonce)
         page_context = {page_type = "entity_browse", entity_type = entity_type, title = entity_type .. " · Browse"}
         return print_response("200 OK", "text/html",
-            html.page_shell(entity_type .. " · Browse", "data", body, nonce, show_sql_nav, show_admin_nav, theme, author, page_context))
+            html.page_shell(entity_type .. " · Browse", "data", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author, page_context))
     end
 
     -- A simple, mostly-static landing page -- basic information and
@@ -546,9 +552,9 @@ function cgi.handle_request()
     -- from Benchling's own Home concept without copying its actual
     -- design; this is a real v1 (a start), not the end state.
     if path_info == "/" or path_info == "" then
-        body = html.render_home(theme, show_sql_nav, show_admin_nav)
+        body = html.render_home(theme, show_sql_nav, show_admin_nav, has_tasks_view)
         return print_response("200 OK", "text/html",
-            html.page_shell(theme.site_name, "home", body, nonce, show_sql_nav, show_admin_nav, theme, author))
+            html.page_shell(theme.site_name, "home", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author))
     end
 
     -- What "/" used to render, in full, before Home became its own
@@ -571,7 +577,7 @@ function cgi.handle_request()
         edges = schema.relationships(db_path)
         body = html.render_index(entity_types, edges, nonce)
         return print_response("200 OK", "text/html",
-            html.page_shell("Data", "data", body, nonce, show_sql_nav, show_admin_nav, theme, author))
+            html.page_shell("Data", "data", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author))
     end
 
     -- Landing page for admin/setup-only tooling (SQL console, user
@@ -584,7 +590,7 @@ function cgi.handle_request()
         end
         body = html.render_system(show_sql_nav, show_admin_nav)
         return print_response("200 OK", "text/html",
-            html.page_shell("System", "system", body, nonce, show_sql_nav, show_admin_nav, theme, author))
+            html.page_shell("System", "system", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author))
     end
 
     if path_info == "/knowledge" then
@@ -595,7 +601,7 @@ function cgi.handle_request()
         recent = knowledge.recent_retrievals(db_path, 10)
         body = html.render_knowledge_pool(stats, recent)
         return print_response("200 OK", "text/html",
-            html.page_shell("Knowledge Pool", "system", body, nonce, show_sql_nav, show_admin_nav, theme, author))
+            html.page_shell("Knowledge Pool", "system", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author))
     end
 
     if path_info == "/detail" then
@@ -623,7 +629,7 @@ function cgi.handle_request()
         page_context = {page_type = "entity_detail", entity_type = entity_type, entity_id = entity_id,
                          title = entity_type .. " #" .. tostring(entity_id)}
         return print_response("200 OK", "text/html",
-            html.page_shell(entity_type .. " #" .. tostring(entity_id), "data", body, nonce, show_sql_nav, show_admin_nav, theme, author, page_context))
+            html.page_shell(entity_type .. " #" .. tostring(entity_id), "data", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author, page_context))
     end
 
     if path_info == "/view" then
@@ -653,7 +659,7 @@ function cgi.handle_request()
         body = html.render_view(view_def, rows, param_value)
         page_context = {page_type = "view", view_name = view_name, title = view_name}
         return print_response("200 OK", "text/html",
-            html.page_shell(view_name, "data", body, nonce, show_sql_nav, show_admin_nav, theme, author, page_context))
+            html.page_shell(view_name, "data", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author, page_context))
     end
 
     -- Documents (src/document.lua): a real parent_id tree, not a
@@ -669,7 +675,7 @@ function cgi.handle_request()
         rows = document.all_active(db_path)
         body = html.render_document_tree(rows, true, nonce)
         return print_response("200 OK", "text/html",
-            html.page_shell("Pages", "documents", body, nonce, show_sql_nav, show_admin_nav, theme, author))
+            html.page_shell("Pages", "documents", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author))
     end
 
     if path_info == "/document" then
@@ -688,7 +694,7 @@ function cgi.handle_request()
         body = html.render_document(doc, rendered_html, breadcrumbs, children, backlinks, true)
         page_context = {page_type = "document", entity_type = "document", entity_id = doc.id, title = doc.title}
         return print_response("200 OK", "text/html",
-            html.page_shell(doc.title, "documents", body, nonce, show_sql_nav, show_admin_nav, theme, author, page_context))
+            html.page_shell(doc.title, "documents", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author, page_context))
     end
 
     if path_info == "/document-edit" then
@@ -708,7 +714,7 @@ function cgi.handle_request()
         body = html.render_document_edit(doc, parent_options_html, default_value(cookies.csrf, ""), nil, nonce)
         page_context = {page_type = "document_edit", entity_type = "document", entity_id = entity_id, title = "Edit page"}
         return print_response("200 OK", "text/html",
-            html.page_shell("Edit page", "documents", body, nonce, show_sql_nav, show_admin_nav, theme, author, page_context))
+            html.page_shell("Edit page", "documents", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author, page_context))
     end
 
     if path_info == "/document-save" and method == "POST" then
@@ -730,7 +736,7 @@ function cgi.handle_request()
                 "Can't move a page underneath its own sub-page.", nonce)
             page_context = {page_type = "document_edit", entity_type = "document", entity_id = entity_id, title = "Edit page"}
             return print_response("200 OK", "text/html",
-                html.page_shell("Edit page", "documents", body, nonce, show_sql_nav, show_admin_nav, theme, author, page_context))
+                html.page_shell("Edit page", "documents", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author, page_context))
         end
 
         saved_id = nil
@@ -753,7 +759,7 @@ function cgi.handle_request()
                 issues_to_message(issues), nonce)
             page_context = {page_type = "document_edit", entity_type = "document", entity_id = entity_id, title = "Edit page"}
             return print_response("200 OK", "text/html",
-                html.page_shell("Edit page", "documents", body, nonce, show_sql_nav, show_admin_nav, theme, author, page_context))
+                html.page_shell("Edit page", "documents", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author, page_context))
         end
 
         return print_response("302 Found", "text/plain", "", {"Location: document?entity_id=" .. tostring(saved_id)})
@@ -794,7 +800,7 @@ function cgi.handle_request()
             return print_response("200 OK", "text/html", body)
         end
         return print_response("200 OK", "text/html",
-            html.page_shell("SQL", "system", body, nonce, show_sql_nav, show_admin_nav, theme, author))
+            html.page_shell("SQL", "system", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author))
     end
 
     if path_info == "/admin-users" then
@@ -804,7 +810,7 @@ function cgi.handle_request()
         users = auth.list_users(db_path, true)
         body = html.render_admin_users(users, default_value(cookies.csrf, ""), nil, false)
         return print_response("200 OK", "text/html",
-            html.page_shell("Users", "system", body, nonce, show_sql_nav, show_admin_nav, theme, author))
+            html.page_shell("Users", "system", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author))
     end
 
     -- Flat, single-segment names (not "/admin/users/create" etc) --
@@ -831,7 +837,7 @@ function cgi.handle_request()
             users = auth.list_users(db_path, true)
             body = html.render_admin_users(users, default_value(cookies.csrf, ""), "CSRF check failed.", true)
             return print_response("403 Forbidden", "text/html",
-                html.page_shell("Users", "system", body, nonce, show_sql_nav, show_admin_nav, theme, author))
+                html.page_shell("Users", "system", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author))
         end
 
         ok = nil
@@ -853,7 +859,7 @@ function cgi.handle_request()
             users = auth.list_users(db_path, true)
             body = html.render_admin_users(users, default_value(cookies.csrf, ""), tostring(err), true)
             return print_response("200 OK", "text/html",
-                html.page_shell("Users", "system", body, nonce, show_sql_nav, show_admin_nav, theme, author))
+                html.page_shell("Users", "system", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author))
         end
         return print_response("302 Found", "text/plain", "", {"Location: admin-users"})
     end
@@ -880,7 +886,7 @@ function cgi.handle_request()
         end
         body = html.render_chat(sessions, session, messages, pending, default_value(cookies.csrf, ""), nonce)
         return print_response("200 OK", "text/html",
-            html.page_shell("Chat", "chat", body, nonce, show_sql_nav, show_admin_nav, theme, author))
+            html.page_shell("Chat", "chat", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author))
     end
 
     if path_info == "/chat-start" and method == "POST" then
@@ -1014,7 +1020,7 @@ function cgi.handle_request()
         templates_dir = config.templates_dir(root)
         body = html.render_templates_list(template.all(templates_dir))
         return print_response("200 OK", "text/html",
-            html.page_shell("Templates", "system", body, nonce, show_sql_nav, show_admin_nav, theme, author))
+            html.page_shell("Templates", "system", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author))
     end
 
     if path_info == "/template" then
@@ -1032,7 +1038,7 @@ function cgi.handle_request()
         rendered = template.render(template_def)
         body = html.render_template(template_def, rendered, nonce)
         return print_response("200 OK", "text/html",
-            html.page_shell(template_name, "system", body, nonce, show_sql_nav, show_admin_nav, theme, author))
+            html.page_shell(template_name, "system", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author))
     end
 
     if path_info == "/api/autocomplete" then

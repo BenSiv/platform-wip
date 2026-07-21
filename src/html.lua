@@ -293,7 +293,7 @@ end
 -- to, so it left owner/assignee-style fields blank instead of
 -- defaulting to the current user the way a human filling out the same
 -- form naturally would.
-function html.page_shell(title, active, body, nonce, show_sql, show_admin, theme, author, page_context)
+function html.page_shell(title, active, body, nonce, show_sql, show_admin, has_tasks_view, theme, author, page_context)
     if theme == nil then
         theme = {site_name = "Platform", colors = {}}
     end
@@ -316,8 +316,13 @@ function html.page_shell(title, active, body, nonce, show_sql, show_admin, theme
         {key = "home", href = "/", label = "Home", icon = ICON_HOME},
         {key = "documents", href = "documents", label = "Notebook", icon = ICON_NOTEBOOK},
         {key = "data", href = "data", label = "Data", icon = ICON_DATA},
-        {key = "tasks", href = "view?view_name=prioritized_tasks", label = "Tasks", icon = ICON_TASKS},
     }
+    -- Only a real rail icon when a deployment actually seeded a
+    -- "prioritized_tasks" view -- see the matching comment in
+    -- render_home (task #101).
+    if has_tasks_view == true then
+        table.insert(nav_items, {key = "tasks", href = "view?view_name=prioritized_tasks", label = "Tasks", icon = ICON_TASKS})
+    end
     if show_sql or show_admin then
         table.insert(nav_items, {key = "system", href = "system", label = "System", icon = ICON_SYSTEM})
     end
@@ -1739,7 +1744,7 @@ end
 -- config.load_theme(root)'s return value, purely for site_name; no
 -- other Celleste-specific content belongs here (see theme.json's own
 -- split from platform-wip).
-function html.render_home(theme, show_sql, show_admin)
+function html.render_home(theme, show_sql, show_admin, has_tasks_view)
     site_name = "Platform"
     has_logo = false
     hide_home_heading = false
@@ -1775,6 +1780,15 @@ function html.render_home(theme, show_sql, show_admin)
         system_link = "<li><a href=\"system\">System</a><p>Admin, SQL console, and templates.</p></li>"
     end
 
+    -- Only a real link when a deployment actually seeded a
+    -- "prioritized_tasks" view -- a fresh/generic install has no
+    -- views/ at all, so this used to be a nav item that 404'd on
+    -- "cannot open view: ./views/prioritized_tasks.lua" (task #101).
+    tasks_link = ""
+    if has_tasks_view == true then
+        tasks_link = "<li><a href=\"view?view_name=prioritized_tasks\">Tasks</a><p>Open tasks, ranked by priority.</p></li>"
+    end
+
     return string.format("""
 <div class="fossil-doc" data-title="Home">
     <style>
@@ -1800,12 +1814,12 @@ function html.render_home(theme, show_sql, show_admin)
             <li><a href="document-edit">New Page</a><p>Write a new notebook page from scratch.</p></li>
             <li><a href="documents">Notebook</a><p>Browse all pages, organized as a tree.</p></li>
             <li><a href="data">Data</a><p>Registered entity types, row counts, and relations.</p></li>
-            <li><a href="view?view_name=prioritized_tasks">Tasks</a><p>Open tasks, ranked by priority.</p></li>
+            %s
             %s
         </ul>
     </div>
 </div>
-""", fossci_container_css(1200), logo_html, heading_html, system_link)
+""", fossci_container_css(1200), logo_html, heading_html, tasks_link, system_link)
 end
 
 -- Landing page for Setup/Admin-only tooling -- a single destination
