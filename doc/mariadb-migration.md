@@ -296,15 +296,70 @@ not skipped as an oversight.
   `./bld/test.sh` (90/90, up from 87) stays green on the default SQLite
   path throughout every step of this phase.
 
-### Phase 4 -- cutover
-- Stand up managed MariaDB (Cloud SQL for MySQL, MariaDB-compatible, or
-  self-managed) alongside the existing SQLite deployment.
-- One-time data migration script (dump SQLite tables, load into
-  MariaDB, verify row counts + spot-check ledger integrity per
-  installation).
+### Phase 4 -- cutover (DONE, 2026-07-21)
+- Stood up Cloud SQL for MySQL (`platform-db-prod`, 1 vCPU/3.75GB,
+  `europe-west1`, single zone) -- Cloud SQL has no literal "MariaDB"
+  flavor, only MySQL 8.0; this surfaced real, previously-latent dialect
+  gaps that only a genuine MySQL server enforces (MariaDB silently
+  tolerates all of them): a literal `DEFAULT` value on a `TEXT`/`BLOB`
+  column is rejected outright (`extension_job.status`,
+  `agent_pending_action.status`, `user.cap` all became `VARCHAR(32)`);
+  `CREATE INDEX IF NOT EXISTS` doesn't exist at all (`db.index_exists`
+  added, every `CREATE INDEX` call site switched to check-then-create);
+  `rank` is a MySQL 8.0 reserved word (backtick-quoted in
+  `knowledge_retrieval_note`); and any schema-defined field name that
+  happens to be a reserved word (found via a real production field,
+  culture_medium's own `usage`) needed every DDL/DML column reference
+  backtick-quoted (`db.quote_ident`, applied in `schema.lua`/`entity.lua`).
+  Connectivity is a Cloud SQL Auth Proxy sidecar container (not private-
+  IP VPC peering -- `celleste-elab`'s only network is the default auto-
+  mode VPC, shared with other resources; the Auth Proxy needs no peering
+  and doesn't require the instance's public IP to accept any inbound
+  range), reachable from the `platform` container by its compose service
+  name.
+- One-time data migration: dumped a live, online `sqlite3 .backup` of
+  production's real `.store/store.db` (39 tables, ~307k rows -- 152,682
+  ledger events, 77,230 samples, 60,271 sample states among them) and
+  loaded it into Cloud SQL via `LOAD DATA LOCAL INFILE`, not per-row
+  `INSERT` (one `INSERT` per row was still running after 40+ minutes on
+  `entity_event` alone, network-round-trip-bound over the Auth Proxy
+  tunnel, not compute-bound). Getting this genuinely correct -- not just
+  "row counts matched" -- took five more real, confirmed-live bugs, none
+  of which row-count checks alone would have caught (a byte-exact
+  `HEX()`/numeric-epsilon comparison between source and destination,
+  built specifically because of these, did): (1) MySQL's `LOAD DATA`
+  defaults to `ESCAPED BY '\\'`, silently reinterpreting a JSON value's
+  own literal `\n`/`\"` text as real control characters -- fixed with
+  `ESCAPED BY ''`; (2) that fix breaks MySQL's bare `\N`-means-NULL
+  convention (only recognized when escaping is active) -- fixed with a
+  0x01 sentinel byte + `SET col = IF(...)` instead of relying on `\N`;
+  (3) the mariadb CLI's default connection charset is `latin1` even
+  though every table is `utf8mb4`, silently mangling any real multi-byte
+  UTF-8 character (found via a single EN DASH in experiment notes
+  becoming a single CP1252-ish byte) -- fixed with
+  `--default-character-set=utf8mb4` and an explicit `CHARACTER SET
+  utf8mb4` on `LOAD DATA`; (4) MySQL's `LOAD DATA "(@var)"` capture
+  collapses ANY empty field -- quoted `""` or not -- to empty-string-
+  read-as-NULL, indistinguishable from a truly-NULL field once
+  captured -- fixed with a second sentinel (0x02, "this was a real empty
+  string"); (5) the sentinel comparisons themselves (`@v = 0x01`) hit a
+  third bug: this connection's default collation
+  (`utf8mb4_0900_ai_ci`) treats control characters as
+  collation-ignorable, so *every* single-control-byte string compared
+  equal to *every other* -- fixed by forcing `BINARY` on both sides of
+  every sentinel check. Verified byte-exact (numeric epsilon for `REAL`
+  columns specifically, since two engines' float-to-decimal-string
+  conversion can legitimately round the same bit-identical double
+  differently at the ~15th significant digit -- confirmed directly, not
+  a real discrepancy) across all 39 tables before cutover.
 - Cut `fossci-app-prod`'s startup script over to the new connection
-  config; keep the SQLite file + its existing snapshot policy around,
-  untouched, as a rollback path for one full deploy cycle.
+  config via the existing `deploy.sh --redeploy` path; kept the SQLite
+  file + its existing snapshot policy around, untouched, as a rollback
+  path. Verified live post-cutover: both containers (`platform`,
+  `cloudsql-proxy`) up, `platform.env` shows `PLATFORM_DB_BACKEND=mariadb`,
+  and `platform entity list sample` inside the running container returns
+  exactly 77,230 rows -- the real migrated count, confirming the live
+  app is actually serving from Cloud SQL, not silently still on SQLite.
 
 ## Feature-parity check: does anything here actually need Postgres?
 
