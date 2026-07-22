@@ -117,6 +117,7 @@ CREATE TABLE IF NOT EXISTS knowledge_chat_eval (
     feedback_at TEXT,
     created_at TEXT DEFAULT (%s)
 );
+
 """
 
 function knowledge_schema_sql(db_path)
@@ -193,6 +194,50 @@ function knowledge.create_document_note(db_path, author, title, body, source_typ
         "UPDATE document SET source_type = %s, source_id = %s, source_ref = %s, content_hash = %s WHERE id = %d;",
         db.literal(source_type), db.literal(source_id), db.literal(source_ref),
         db.quote(document.content_hash(body)), document_id
+    ))
+    return document_id
+end
+
+function knowledge.session_document_for(db_path, session_id)
+    rows = db.query(db_path, string.format(
+        "SELECT * FROM document WHERE source_type = 'chat_session' AND source_ref = %s LIMIT 1;",
+        db.quote(session_id)
+    ))
+    if rows == nil or rows[1] == nil then
+        return nil
+    end
+    return rows[1]
+end
+
+-- task #108 follow-up, explicit user direction ("full ai thinking and
+-- chat session persistence in the knowledge pool... every conversation
+-- with the agent is itself saved as a document"): one document per chat
+-- session, kept in sync with its own transcript rather than a one-time
+-- snapshot -- find-or-create, then update in place on every call (agent.
+-- lua's sync_session_document calls this at the end of every real
+-- turn). Filed under the Knowledge Pool folder, tagged source_type =
+-- 'chat_session' / source_ref = the session's own id (not source_id --
+-- agent_session ids are opaque hex text, not the integer source_id
+-- column). Becomes part of the same tiered/searchable pool as every
+-- other document -- a heavily-revisited conversation can cross into
+-- distillation (knowledge.maybe_distill) exactly the same way any other
+-- document does, so "combine what a conversation touched into
+-- something durable" falls out of the existing pipeline instead of
+-- needing its own separate mechanism.
+function knowledge.sync_session_document(db_path, author, session_id, title, transcript)
+    existing = knowledge.session_document_for(db_path, session_id)
+    if existing != nil then
+        document.update_page(db_path, author, existing.id, title, existing.parent_id, transcript, nil)
+        return existing.id
+    end
+    folder_id = document.ensure_knowledge_pool_folder(db_path)
+    document_id, issues = document.create_page(db_path, author, title, folder_id, transcript, nil)
+    if document_id == nil then
+        return nil
+    end
+    db.exec(db_path, string.format(
+        "UPDATE document SET source_type = 'chat_session', source_ref = %s WHERE id = %d;",
+        db.quote(session_id), document_id
     ))
     return document_id
 end
@@ -307,7 +352,10 @@ end
 -- applies to system/agent-derived documents (source_type set) -- a
 -- real user-authored page's title is never rewritten out from under
 -- them, even if it happens to look generic ("note", "untitled", ...).
-function knowledge.review_retrieval(db_path, retrieval_id)
+-- `author` (task #108) attributes any resulting distillation
+-- (knowledge.maybe_distill) to the real user whose retrieval actually
+-- triggered it -- reactive, tied to real usage, not a synthetic actor.
+function knowledge.review_retrieval(db_path, retrieval_id, author)
     rows = db.query(db_path, string.format(
         "SELECT document_id FROM knowledge_retrieval_document WHERE retrieval_id = %d;", tonumber(retrieval_id)
     ))
@@ -354,6 +402,18 @@ function knowledge.review_retrieval(db_path, retrieval_id)
                 "VALUES (%d, %d, %s, %s, %s, %s);",
                 tonumber(retrieval_id), doc.id, db.quote(atomicity), db.quote(connectivity), db.quote(duplication), db.quote(title_status)
             ))
+
+            -- task #108: reactive distillation -- a document that just
+            -- reached "frequently retrieved and reviewed" (tier 2,
+            -- Curated Draft) generates its one atomic derivative right
+            -- here, inline, if it doesn't already have one. See
+            -- knowledge.maybe_distill's own comment for why this is a
+            -- direct one-shot model call rather than a full agent
+            -- session, and why the guard inside it keeps this a rare,
+            -- at-most-once-per-document cost, not a per-search tax.
+            if target_tier >= 2 then
+                knowledge.maybe_distill(db_path, author, doc, atomicity)
+            end
         end
     end
 end
@@ -463,6 +523,84 @@ function knowledge.record_chat_feedback(db_path, message_id, feedback)
 end
 
 --------------------------------------------------------------------------
+-- task #108: reactive distillation, tied to real usage/review activity
+--------------------------------------------------------------------------
+--
+-- Explicit user direction: not a periodic full-pool scan on a cron/
+-- systemd-timer schedule (this codebase has none anyway -- no in-app
+-- background scheduler exists at all) -- distillation should fall out
+-- of "general usage processing" itself. A document that's frequently
+-- retrieved and has been reviewed (crossed into tier 2, "Curated
+-- Draft", the same bar knowledge.promotion_target_tier already applies)
+-- and doesn't already have a distilled derivative gets one generated
+-- right here, inline in the same request that pushed it over that bar
+-- -- not queued for a separate process. This fires at most ONCE per
+-- source document ever (gated on "no existing distilled derivative"),
+-- so the added latency is a rare, one-time cost per document crossing
+-- the bar, not a per-search tax.
+--
+-- Deliberately a single, direct model call (agent_provider.generate),
+-- not a full tool-calling agent session/pending-approval flow like
+-- knowledge.distill/AGENT_TOOLS.knowledge.distill (task #107, still the
+-- right shape for an explicitly human- or agent-initiated distillation
+-- request) -- this path is a rule-triggered side effect of review, not
+-- a model deciding to act, so there's no proposal for a human to
+-- approve in the first place. Best-effort like everything else that
+-- calls an external API from a save/review path (document.
+-- reindex_embedding, task #105) -- a provider hiccup here must never
+-- fail the review pass, let alone the search request that triggered it.
+DISTILL_MODEL = "gemini-2.5-flash"
+
+DISTILL_SYSTEM_PROMPT = """
+Extract the single core idea from the following document into a new, concise, self-contained note in your own words -- not a verbatim copy. Remove anything not essential to that one idea. Reply with the distilled note text only: no title, no preamble, no commentary. If the document already covers exactly one focused idea and there is nothing meaningful to extract, reply with exactly: NONE
+"""
+
+function knowledge.already_distilled_from(db_path, source_document_id)
+    rows = db.query(db_path, string.format(
+        "SELECT id FROM document WHERE source_type = 'distilled' AND source_id = %d LIMIT 1;",
+        tonumber(source_document_id)
+    ))
+    return rows != nil and rows[1] != nil
+end
+
+-- Called from review_retrieval once a document's target_tier reaches 2
+-- ("Curated Draft" -- retrieval_count>=4, effective_heat>=1.60, not
+-- needs-split; see document.promotion_target_tier). Never distills a
+-- document that's itself already a distilled note (source_type ==
+-- 'distilled'), never redistills the same source twice, and skips a
+-- source whose atomicity is already "ok"/"thin" -- there's nothing to
+-- extract that isn't already there as-is.
+function knowledge.maybe_distill(db_path, author, doc, atomicity)
+    if doc.source_type == "distilled" then
+        return nil
+    end
+    if atomicity == "ok" or atomicity == "thin" then
+        return nil
+    end
+    if knowledge.already_distilled_from(db_path, doc.id) then
+        return nil
+    end
+
+    agent_provider = require("agent_provider")
+    body = doc.content
+    if body == nil then
+        body = ""
+    end
+    distilled, err = agent_provider.generate(DISTILL_MODEL, DISTILL_SYSTEM_PROMPT, body)
+    if distilled == nil then
+        return nil
+    end
+    distilled = (string.gsub(distilled, "^%s*(.-)%s*$", "%1"))
+    if distilled == "" or distilled == "NONE" then
+        return nil
+    end
+
+    title = document.guess_title_from_body(distilled)
+    document_id, err = knowledge.distill_document(db_path, author, doc.id, title, distilled)
+    return document_id
+end
+
+--------------------------------------------------------------------------
 -- The one integration point every retrieval path goes through
 --------------------------------------------------------------------------
 
@@ -514,7 +652,9 @@ end
 -- stays pure/reusable, knowledge.lua depends on document.lua, never
 -- the reverse. Every result IS already the record that accrues heat/
 -- tier (task #106) -- no separate note to create or look up first.
-function knowledge.search_and_log(db_path, query_text, limit, use_semantic, session_id)
+-- `author` (task #108) is threaded through to review_retrieval, purely
+-- for attributing any reactive distillation it triggers.
+function knowledge.search_and_log(db_path, query_text, limit, use_semantic, session_id, author)
     results = document.search(db_path, query_text, limit, use_semantic)
     retrieval_id = knowledge.begin_retrieval(db_path, session_id, query_text, #results)
     hit_ids = {}
@@ -530,7 +670,7 @@ function knowledge.search_and_log(db_path, query_text, limit, use_semantic, sess
         knowledge.spread_activation(db_path, retrieval_id, r.id, delta, hit_ids)
     end
     if #results > 0 then
-        knowledge.review_retrieval(db_path, retrieval_id)
+        knowledge.review_retrieval(db_path, retrieval_id, author)
     end
     return results, retrieval_id
 end

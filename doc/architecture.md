@@ -441,24 +441,73 @@ in `document.lua` now, alongside the columns they score --
   review pass (`agent.run_knowledge_review`, `platform knowledge
   review`) was removed for the same reason -- its one job was deciding
   what to materialize.
-- **Real agent-driven distillation** (task #107, `knowledge.distill`):
-  a destructive `AGENT_TOOLS` entry that writes a genuinely new,
-  concise, single-idea document extracted from a source the agent has
-  actually read (via `entity.get`), not a raw mirror of it -- the real
-  replacement for the old materialize/review pass, doing what that pass
-  never actually could (it only ever promoted a tier number). Always
-  starts at tier 0 like any new pool document, filed under the
-  Knowledge Pool folder with `source_type = 'distilled'` pointing back
-  at its source. `knowledge.list`'s tool output now includes each
-  document's `atomicity_status` (`ok`/`thin`/`needs-split`) so the
-  model can tell what's actually worth distilling from -- an already-
-  atomic document has nothing left to extract. Triggered explicitly
-  (`platform knowledge distill`, dispatched from `main.lua` directly
-  rather than `knowledge.do_knowledge` itself, for the same
-  knowledge/agent circular-require reason `review` used to be) or by
-  task #108's queue once it exists -- not automatic on every search,
-  same reasoning as the old review pass. A genuine write, so it pauses
-  for human approval exactly like `document.create`/`entity.create`.
+- **Real agent-driven distillation, on demand** (task #107,
+  `knowledge.distill`): a destructive `AGENT_TOOLS` entry that writes a
+  genuinely new, concise, single-idea document extracted from a source
+  the agent has actually read (via `entity.get`), not a raw mirror of
+  it -- the real replacement for the old materialize/review pass, doing
+  what that pass never actually could (it only ever promoted a tier
+  number). Always starts at tier 0 like any new pool document, filed
+  under the Knowledge Pool folder with `source_type = 'distilled'`
+  pointing back at its source. `knowledge.list`'s tool output includes
+  each document's `atomicity_status` (`ok`/`thin`/`needs-split`) so the
+  model can tell what's actually worth distilling from. Triggered
+  explicitly (`platform knowledge distill`, dispatched from `main.lua`
+  directly rather than `knowledge.do_knowledge` itself, for the same
+  knowledge/agent circular-require reason `review` used to be) -- a
+  genuine write, so it pauses for human approval exactly like
+  `document.create`/`entity.create`.
+- **Reactive distillation, tied to real usage** (task #108,
+  `knowledge.maybe_distill`): explicit user direction against a
+  periodic/cron-style scan of the whole pool ("it should be just part
+  of the general usage processing... pages that are frequently
+  retrieved and audited might generate new atomic documents"). Instead,
+  `knowledge.review_retrieval` calls `knowledge.maybe_distill` inline,
+  in the same request, the moment a document's `target_tier` reaches 2
+  ("Curated Draft" -- the same promotion bar `document.
+  promotion_target_tier` already applies) *and* it has no distilled
+  derivative yet (`knowledge.already_distilled_from`) *and* its
+  atomicity isn't already `ok`/`thin`. That guard makes this a rare,
+  at-most-once-per-source-document cost, not a per-search tax. Unlike
+  `knowledge.distill`, this is a single direct `agent_provider.generate`
+  call (not a full tool-calling agent session) and always auto-executes
+  -- no pending-action approval -- since it's a rule-triggered side
+  effect of review, not a model choosing to act, and it's additive-only
+  (never edits/deletes an existing document). Attributed to the real
+  user whose retrieval triggered it (`author`, threaded through
+  `knowledge.search_and_log` -> `review_retrieval` -> `maybe_distill`),
+  not a synthetic actor.
+- **Whole chat sessions are themselves documents** (task #108 follow-up,
+  explicit user direction: "every conversation with the agent is itself
+  saved as a document"). `agent.run_turn` calls `sync_session_document`
+  at the end of every real turn (every terminal status except a hard
+  provider error), which builds a human-readable transcript
+  (`build_session_transcript`, reusing `agent.all_messages`' own
+  display-cleanup) and finds-or-creates/updates one document per session
+  via `knowledge.sync_session_document` (`source_type = 'chat_session'`,
+  `source_ref` = the session's own id -- not `source_id`, since
+  `agent_session` ids are opaque hex text, not the integer `source_id`
+  column). `agent_session`/`agent_message` stay the authoritative,
+  append-only event log (never folded into `document` the way
+  `knowledge_note` was -- that would lose per-message ids, compaction,
+  and the FK `knowledge_context`/`knowledge_chat_eval` key off); the
+  synced document is a derived, searchable *projection* of that log, the
+  same relationship a rendered page has to its raw Markdown. Because
+  it's a real document, a heavily-revisited conversation participates in
+  the exact same tier/heat/distillation pipeline as anything else --
+  "combine what a conversation touched into something durable" falls
+  out of the existing mechanism with no separate code path needed.
+  Real, known tradeoffs accepted as-is (explicit user decision, not
+  overlooked): (1) every real turn now ledgers a write against the
+  *global*, cross-entity-type id sequence (`ledger.append_create`'s own
+  `entity_event` autoincrement) -- so ids for unrelated entity types
+  created in the same session are no longer small/predictable, which is
+  fine for real usage but means tests must look rows up by a stable key
+  (title, `source_ref`) rather than assume a specific id; (2) a
+  transcript that happens to contain a user's own search terms (it
+  usually will -- it recorded their query) can itself show up in a
+  later search for those same terms, which is a real, accepted echo
+  effect, not a bug.
 - **Hand-rolled tables, not `schema.register()` entities** --
   `knowledge_retrieval`/`knowledge_retrieval_document`/
   `knowledge_review`/`knowledge_context`/`knowledge_chat_eval` are

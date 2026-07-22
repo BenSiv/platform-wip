@@ -183,8 +183,14 @@ EOF
     run raw_post "/chat-message" "csrf_token=${CSRF}&session_id=${session_id}&message=create+a+page" "$COOKIE" "$scripted"
     [[ "$output" =~ "302 Found" ]]
 
-    run "$BIN" entity list document
-    [[ "$output" == "" ]]
+    # Not asserting the document table is empty -- a real chat turn now
+    # syncs the Knowledge Pool folder and this session's own transcript
+    # document (task #108 follow-up), even one that ends in
+    # pending_approval. What must still be true: the specifically
+    # *proposed* page was never created (entity list only prints ids,
+    # not titles, so this checks the real column directly).
+    run sqlite3 "$TEST_DIR/.store/store.db" "SELECT COUNT(*) FROM document WHERE title = 'New Page';"
+    [ "$output" -eq 0 ]
 
     run raw_get "/chat" "session_id=${session_id}" "$COOKIE"
     [[ "$output" =~ "wants to run" ]]
@@ -206,7 +212,15 @@ EOF
     run raw_post "/chat-approve" "csrf_token=${CSRF}&pending_id=${pending_id}&session_id=${session_id}" "$COOKIE" $'<done>Created it.</done>'
     [[ "$output" =~ "302 Found" ]]
 
-    run "$BIN" entity show document 1
+    # Not necessarily id 1 -- ledger ids are a single sequence shared
+    # across every entity type, and this session's own transcript
+    # document (task #108 follow-up) has already been ledgered by the
+    # time this page is approved. Look it up by title instead (entity
+    # list only prints ids, not titles -- entity show is what confirms
+    # content).
+    new_page_id=$(sqlite3 "$TEST_DIR/.store/store.db" "SELECT id FROM document WHERE title = 'New Page';")
+    [ -n "$new_page_id" ]
+    run "$BIN" entity show document "$new_page_id"
     [[ "$output" =~ "New Page" ]]
     [[ "$output" =~ created_by[[:space:]]+alice ]]
 
@@ -228,8 +242,14 @@ EOF
     run raw_post "/chat-deny" "csrf_token=${CSRF}&pending_id=${pending_id}&session_id=${session_id}" "$COOKIE" $'<done>Understood.</done>'
     [[ "$output" =~ "302 Found" ]]
 
-    run "$BIN" entity list document
-    [[ "$output" == "" ]]
+    # Not asserting the document table is empty -- see the "pauses for
+    # approval" test's own comment (task #108 follow-up: every real
+    # chat turn syncs a Knowledge Pool folder + session-transcript
+    # document). The specifically *denied* page must never exist
+    # (entity list only prints ids, not titles, so this checks the real
+    # column directly).
+    run sqlite3 "$TEST_DIR/.store/store.db" "SELECT COUNT(*) FROM document WHERE title = 'Denied Page';"
+    [ "$output" -eq 0 ]
 
     run raw_get "/chat" "session_id=${session_id}" "$COOKIE"
     [[ "$output" =~ "denied" ]]
@@ -311,7 +331,12 @@ EOF
     run raw_post "/chat-approve" "csrf_token=${CSRF}&pending_id=${pending_id}&session_id=${session_id}" "$COOKIE" $'<done>Created it.</done>'
     [[ "$output" =~ "302 Found" ]]
 
-    run "$BIN" entity show task 1
+    # Not necessarily id 1 -- ledger ids are a single sequence shared
+    # across every entity type (document included), and this session's
+    # own transcript document (task #108 follow-up) has already been
+    # ledgered by the time this task is approved.
+    task_id=$(sqlite3 "$TEST_DIR/.store/store.db" "SELECT id FROM task WHERE title = 'New task';")
+    run "$BIN" entity show task "$task_id"
     [[ "$output" =~ "New task" ]]
     [[ "$output" =~ created_by[[:space:]]+alice ]]
 }

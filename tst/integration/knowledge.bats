@@ -82,8 +82,12 @@ search_for_bioreactor() {
     search_for_bioreactor
 
     run "$BIN" knowledge stats
-    [[ "$output" =~ "tier0=1 tier1=0 tier2=0 tier3=0" ]]
-    [[ "$output" =~ "notes=1 retrievals=1 reviewed=1 sessions=1" ]]
+    # tier0=2, notes=2: Bioreactor Notes itself, plus the chat session's
+    # own transcript document (task #108 follow-up -- every conversation
+    # is synced into its own document under the Knowledge Pool folder,
+    # which is itself a pool "note" the moment it's created).
+    [[ "$output" =~ "tier0=2 tier1=0 tier2=0 tier3=0" ]]
+    [[ "$output" =~ "notes=2 retrievals=1 reviewed=1 sessions=1" ]]
 
     run "$BIN" knowledge list 0
     [[ "$output" =~ "Bioreactor Notes" ]]
@@ -96,10 +100,12 @@ search_for_bioreactor() {
     search_for_bioreactor
 
     run "$BIN" knowledge stats
-    # Still exactly one pool document -- a retrieved document accrues
-    # heat/tier directly on itself (task #106), never a second row per
-    # search.
-    [[ "$output" =~ "notes=1 retrievals=2" ]]
+    # notes=3: Bioreactor Notes (still exactly one row -- a retrieved
+    # document accrues heat/tier directly on itself, task #106, never a
+    # second row per search) plus two chat sessions' own transcript
+    # documents (task #108 follow-up -- each search_for_bioreactor call
+    # starts a fresh session).
+    [[ "$output" =~ "notes=3 retrievals=2" ]]
 
     # 2 retrievals crosses the tier-0->1 promotion threshold.
     run "$BIN" knowledge list 1
@@ -172,7 +178,11 @@ search_for_bioreactor() {
     raw_post "/chat-message" "csrf_token=${CSRF}&session_id=${session_id}&message=summarize+the+knowledge+pool" "$COOKIE" "$scripted" >/dev/null
 
     run raw_get "/chat" "session_id=${session_id}"
-    [[ "$output" =~ "notes=1" ]]
+    # notes=2: Bioreactor Notes plus the first session's own transcript
+    # document (task #108 follow-up) -- this second session's own
+    # transcript isn't synced yet at the moment its knowledge.stats tool
+    # call runs (sync happens once the turn concludes, not mid-turn).
+    [[ "$output" =~ "notes=2" ]]
     [[ "$output" =~ "retrievals=1" ]]
 }
 

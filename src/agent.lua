@@ -499,7 +499,7 @@ function agent.execute_tool(db_path, author, session_id, tool_name, method_name,
     source = {notebook_entry_id = "agent-session:" .. tostring(session_id)}
 
     if tool_name == "document" and method_name == "search" then
-        results = knowledge.search_and_log(db_path, args.query, 5, true, session_id)
+        results = knowledge.search_and_log(db_path, args.query, 5, true, session_id, author)
         if #results == 0 then
             return "No matching pages found."
         end
@@ -848,6 +848,49 @@ Never mix a tool call and a <done> reply in the same turn.
 """ .. extra
 end
 
+ROLE_LABELS = {user = "User", assistant = "Assistant", tool_result = "Tool result"}
+
+-- A human-readable transcript of a session's full message history (task
+-- #108 follow-up, explicit user direction: "every conversation with the
+-- agent is itself saved as a document" -- full session persistence, not
+-- just the individual prompt/reasoning audit rows knowledge_context
+-- already keeps per turn). Reuses agent.all_messages' own display_
+-- content cleanup (strips the [Current user:...]/[Current page:...]
+-- annotations, renders a tool call as "-> tool.method(...)") rather
+-- than a second rendering path.
+function build_session_transcript(messages)
+    lines = {}
+    for _, msg in ipairs(messages) do
+        label = ROLE_LABELS[msg.role]
+        if label == nil then
+            label = msg.role
+        end
+        table.insert(lines, label .. ": " .. tostring(msg.content))
+    end
+    return table.concat(lines, "\n\n")
+end
+
+-- Keeps this session's own document (knowledge.sync_session_document)
+-- in sync with its current transcript -- find-or-create, then update in
+-- place every time a turn concludes, so it always reflects the
+-- conversation so far, not a one-time snapshot. Filed under the
+-- Knowledge Pool folder like any other system-derived document, so a
+-- heavily-revisited conversation naturally becomes part of the same
+-- tiered/searchable pool as everything else, and can itself cross into
+-- distillation (knowledge.maybe_distill) the same way any other
+-- document does -- no separate "combine what a conversation touched
+-- into something durable" mechanism needed on top.
+function sync_session_document(db_path, login, session_id)
+    session = agent.get_session(db_path, session_id, login)
+    title = "Untitled chat"
+    if session != nil and session.title != nil and session.title != "" then
+        title = session.title
+    end
+    messages = agent.all_messages(db_path, session_id)
+    transcript = build_session_transcript(messages)
+    knowledge.sync_session_document(db_path, login, session_id, "Chat: " .. title, transcript)
+end
+
 -- Runs the turn loop starting from the session's current active-message
 -- state. `user_message`, if given, is recorded as a new user turn
 -- before the loop starts; pass nil when resuming after a tool
@@ -917,11 +960,13 @@ function agent.run_turn(db_path, session_id, login, system_prompt, model, user_m
 
         done_message = string.match(result, "<done>%s*(.-)%s*</done>")
         if done_message != nil then
+            sync_session_document(db_path, login, session_id)
             return {status = "done", message = done_message}
         end
 
         tool_name, method_name, args = parse_tool_call(result)
         if tool_name == nil or method_name == nil then
+            sync_session_document(db_path, login, session_id)
             return {status = "done", message = result}
         end
 
@@ -930,6 +975,7 @@ function agent.run_turn(db_path, session_id, login, system_prompt, model, user_m
                 "ERROR: unknown tool " .. tostring(tool_name) .. "." .. tostring(method_name), true)
         elseif agent.is_destructive(tool_name, method_name) then
             pending_id = agent.create_pending_action(db_path, session_id, tool_name, method_name, args)
+            sync_session_document(db_path, login, session_id)
             return {status = "pending_approval", pending_id = pending_id, tool = tool_name, method = method_name, args = args}
         else
             tool_result, tool_err = agent.execute_tool(db_path, login, session_id, tool_name, method_name, args)
@@ -941,6 +987,7 @@ function agent.run_turn(db_path, session_id, login, system_prompt, model, user_m
         end
     end
 
+    sync_session_document(db_path, login, session_id)
     return {status = "turn_limit", message = "Unable to complete tool-assisted run in " .. tostring(MAX_TURNS) .. " turns."}
 end
 
