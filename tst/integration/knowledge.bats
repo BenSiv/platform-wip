@@ -58,6 +58,25 @@ search_for_bioreactor() {
     [[ "$output" =~ "notes=0 retrievals=0 reviewed=0 sessions=0" ]]
 }
 
+@test "document.search's tool result grounds the agent in real content, not just a title" {
+    # Found live: document.search itself already fetched full content
+    # for scoring, but the agent tool wrapper around it used to throw
+    # that away and return only "#id title" -- the model could find
+    # which pages might be relevant but never actually read one before
+    # answering. Excerpted (not the full page verbatim) so a search
+    # matching several long pages doesn't balloon every turn's prompt.
+    long_content=$(python3 -c "print('The bioreactor procedure needs careful monitoring. ' * 40)")
+    "$BIN" entity create document title="Bioreactor SOP" content="$long_content"
+    search_for_bioreactor
+
+    tool_result=$(sqlite3 .store/store.db "SELECT content FROM agent_message WHERE role='tool_result' ORDER BY id DESC LIMIT 1;")
+    [[ "$tool_result" =~ "Bioreactor SOP" ]]
+    [[ "$tool_result" =~ "careful monitoring" ]]
+    # Truncated, not the full ~2000-char body verbatim.
+    [[ "$tool_result" =~ "..." ]]
+    [ "${#tool_result}" -lt 1400 ]
+}
+
 @test "a chat search creates a tier-0 note, logs the retrieval, and runs review" {
     "$BIN" entity create document title="Bioreactor Notes" content="cleaning steps for the bioreactor procedure"
     search_for_bioreactor

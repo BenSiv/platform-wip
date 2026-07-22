@@ -449,6 +449,32 @@ function issues_summary(issues)
     return table.concat(parts, "; ")
 end
 
+-- Grounds the agent's own answers in real page content (found live:
+-- document.search's tool result used to return only "#id title" lines
+-- -- document.search itself already fetches full content for scoring,
+-- but the tool wrapper around it threw that away, so the model could
+-- learn *which* pages might be relevant but never actually read one
+-- before answering). Bounded per result (not the full page verbatim)
+-- so a search that matches several long pages doesn't balloon every
+-- turn's prompt/token cost -- trimmed to the last whole word rather
+-- than cutting mid-word.
+SEARCH_EXCERPT_LENGTH = 1200
+
+function excerpt(text, max_length)
+    if text == nil or text == "" then
+        return ""
+    end
+    if string.len(text) <= max_length then
+        return text
+    end
+    truncated = string.sub(text, 1, max_length)
+    trimmed = string.match(truncated, "^(.*)%s%S*$")
+    if trimmed != nil and string.len(trimmed) > max_length - 40 then
+        truncated = trimmed
+    end
+    return truncated .. "..."
+end
+
 -- Compact "field=value; field=value" text for one entity.get/list row,
 -- for the model to read -- sorted so output is deterministic rather
 -- than depending on pairs()'s unspecified iteration order.
@@ -479,9 +505,11 @@ function agent.execute_tool(db_path, author, session_id, tool_name, method_name,
         end
         lines = {}
         for _, r in ipairs(results) do
-            table.insert(lines, string.format("#%s %s", tostring(r.id), r.title))
+            table.insert(lines, string.format(
+                "#%s %s\n%s", tostring(r.id), r.title, excerpt(r.content, SEARCH_EXCERPT_LENGTH)
+            ))
         end
-        return table.concat(lines, "\n")
+        return table.concat(lines, "\n\n")
     end
 
     if tool_name == "document" and method_name == "create" then
@@ -784,7 +812,7 @@ form by hand would make. If a field is genuinely ambiguous, ask rather than
 guessing.
 
 Available tools:
-- document.search -- search pages by keyword or topic. Args: query=<search text>
+- document.search -- search pages by keyword or topic; returns each matching page's id, title, and a real content excerpt so you can answer from what the page actually says, not just its title. Args: query=<search text>
 - document.create -- create a new page. Args: title=<title>, parent_id=<optional parent page id>, content=<markdown content>
 - document.update -- update an existing page. Args: entity_id=<page id>, title=<optional new title>, parent_id=<optional new parent id>, content=<optional new content>
 - entity.list_types -- list every registered entity type (samples, tasks, experiments, whatever this deployment has). No args.
