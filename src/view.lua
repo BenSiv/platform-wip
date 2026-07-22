@@ -367,30 +367,34 @@ function view.reference_columns(db_path, table_names)
     return columns
 end
 
+-- Fixed (found live in real production, MariaDB backend): this used
+-- to call sqlite3.open(db_path) directly, completely bypassing db.lua's
+-- own backend dispatch -- worked fine when db_path was always a SQLite
+-- file path, but a MariaDB descriptor is a table, not a string, so
+-- every single /sql query has been a hard 500 ("bad argument #1 to
+-- 'open' (string expected, got table)") since the MariaDB cutover,
+-- with no automated test ever exercising this path against that
+-- backend to catch it. db.query already dispatches correctly to
+-- either backend and already returns (rows, column_names) -- both
+-- vendored query functions (luam's sqlite_query/mariadb_query) throw
+-- via error() on invalid SQL rather than returning nil+err, so this is
+-- pcalled to keep converting a typo'd ad-hoc query into this page's own
+-- inline error message instead of a generic 500.
 function view.run_adhoc(db_path, sql_text)
     if view.is_select_only(sql_text) == false then
         return nil, nil, "refusing to run: not a plain SELECT"
     end
 
-    sqlite3 = require("sqlite3")
-    conn = sqlite3.open(db_path)
-    if conn == nil then
-        return nil, nil, "cannot open database"
+    ok, rows, column_names = pcall(db.query, db_path, sql_text)
+    if ok == false then
+        return nil, nil, "invalid sql: " .. tostring(rows)
     end
-
-    vm, err = sqlite3.prepare(conn, sql_text)
-    if vm == nil then
-        sqlite3.close(conn)
-        return nil, nil, "invalid sql: " .. tostring(err)
+    if rows == nil then
+        rows = {}
     end
-
-    column_names = sqlite3.stmt.get_names(vm)
-    rows = {}
-    for row in sqlite3.stmt.nrows(vm) do
-        table.insert(rows, row)
+    if column_names == nil then
+        column_names = {}
     end
-    sqlite3.stmt.finalize(vm)
-    sqlite3.close(conn)
     return column_names, rows
 end
 

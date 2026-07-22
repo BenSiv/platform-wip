@@ -109,6 +109,35 @@ EOF
     [[ "$output" =~ "concentration: 10 -> 99" ]]
 }
 
+@test "the /sql ad-hoc console works against a real MariaDB backend, not just SQLite" {
+    # Found live, in real production: view.run_adhoc called
+    # sqlite3.open(db_path) directly, bypassing db.lua's own backend
+    # dispatch entirely -- worked by accident whenever db_path was a
+    # SQLite file path, but a MariaDB descriptor is a table, not a
+    # string, so /sql has been a hard 500 ("bad argument #1 to 'open'
+    # (string expected, got table)") on every single query since the
+    # MariaDB cutover. No existing test exercised /sql against this
+    # backend at all -- this is that missing coverage.
+    "$BIN" init
+    mkdir -p schemas
+    cat > schemas/reagent.lua <<'EOF'
+return {
+  name = "reagent",
+  fields = { {name = "lot_number", type = "text", required = true} },
+}
+EOF
+    "$BIN" schema add schemas/reagent.lua
+    "$BIN" entity create reagent lot_number=LOT-1
+
+    read TEST_SESSION_COOKIE TEST_CSRF_TOKEN < <(login_test_user "sqluser" "is")
+    GATEWAY_INTERFACE="CGI/1.1" REQUEST_METHOD="GET" PATH_INFO="/sql" QUERY_STRING="q=SELECT+lot_number+FROM+reagent;" \
+        HTTP_COOKIE="session=${TEST_SESSION_COOKIE}; csrf=${TEST_CSRF_TOKEN}" run "$BIN"
+    [[ "$output" =~ "200 OK" ]]
+    [[ "$output" =~ "LOT-1" ]]
+    [[ ! "$output" =~ "Internal Server Error" ]]
+    [[ ! "$output" =~ "bad argument" ]]
+}
+
 @test "concurrent entity creates never collide on entity_id or leave one NULL against MariaDB (task #77)" {
     "$BIN" init
     mkdir -p schemas
