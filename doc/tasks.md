@@ -31,7 +31,9 @@ actionable any time by whoever has GCP Org/Billing Account admin access.
 
 ### Cleanup tier (working through this first, in order)
 
-_Empty -- see note above._
+| # | Subject | Notes |
+|---|---------|-------|
+| 111 | Fix broken popover on ID-value links in `/sql` result tables | Reported 2026-07-22 by the user, not yet investigated. The lazy-loaded hover-popover component (`html.popover_css`/`popover_js`, `.fossci-popover-trigger[data-fossci-popover-src]`) is what renders an entity preview on hover for a linked-entity ID value in a `/sql` query result row -- something about it is broken for these specific links. Quick, self-contained -- likely a fast fix once reproduced. |
 
 ### Blocked / contingent on humans (unaffected by the cleanup-first reordering)
 
