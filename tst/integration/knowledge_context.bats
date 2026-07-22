@@ -1,6 +1,9 @@
 #!/usr/bin/env bats
-# task #87: full prompt/reasoning/token persistence, chat evaluation,
-# note materialization, and the agent-driven review pass.
+# task #87: full prompt/reasoning/token persistence and chat evaluation.
+# Note materialization/agent-driven review (originally covered here too)
+# were removed under task #106 -- knowledge_note no longer exists as a
+# separate table to materialize out of; every pool record already is a
+# real document.
 
 load test_helper.bash
 
@@ -69,19 +72,23 @@ send_message() {
     [[ "$output" =~ "test|final|ok" ]]
 }
 
-@test "a reply leaking visible reasoning creates a linked reasoning knowledge_note" {
+@test "a reply leaking visible reasoning creates a linked reasoning document under the Knowledge Pool folder" {
     read session csrf < <(session_for admin secret123)
     chat_session=$(start_chat "$session" "$csrf" "Test")
     send_message "$session" "$csrf" "$chat_session" "hi" "<think>internal reasoning</think>" > /dev/null
 
-    run sqlite3 .store/store.db "SELECT tier, source_type FROM knowledge_note WHERE source_type='reasoning';"
+    run sqlite3 .store/store.db "SELECT tier, source_type FROM document WHERE source_type='reasoning';"
     [[ "$output" =~ "0|reasoning" ]]
 
     run sqlite3 .store/store.db "SELECT reply_kind, reasoning_status FROM knowledge_chat_eval ORDER BY id DESC LIMIT 1;"
     [[ "$output" =~ "reasoning-visible|visible" ]]
 
-    run sqlite3 .store/store.db "SELECT context.reasoning_note_id FROM knowledge_context context ORDER BY context.id DESC LIMIT 1;"
+    run sqlite3 .store/store.db "SELECT context.reasoning_document_id FROM knowledge_context context ORDER BY context.id DESC LIMIT 1;"
     [[ "$output" != "" ]]
+
+    # Lands under the Knowledge Pool folder, not at the top level.
+    run sqlite3 .store/store.db "SELECT d.title FROM document d JOIN document parent ON parent.id = d.parent_id WHERE d.source_type = 'reasoning' AND parent.title = 'Knowledge Pool';"
+    [[ "$output" =~ "Chat reasoning" ]]
 }
 
 @test "a provider failure still records knowledge_context/knowledge_chat_eval as an error, never reaching a real model call" {
@@ -94,43 +101,6 @@ send_message() {
 
     run sqlite3 .store/store.db "SELECT reply_kind, quality_status FROM knowledge_chat_eval ORDER BY id DESC LIMIT 1;"
     [[ "$output" =~ "error|error" ]]
-}
-
-@test "knowledge materialize promotes a tier 2+ note into a real page, refuses tier 0/1 and double-materialization" {
-    sqlite3 .store/store.db "INSERT INTO knowledge_note (tier, title, body, heat, retrieval_count, content_hash) VALUES (2, 'Durable concept', 'Real content.', 2.0, 5, 'h1');"
-    note_id=$(sqlite3 .store/store.db "SELECT id FROM knowledge_note;")
-
-    USER=tester run "$BIN" knowledge materialize "$note_id"
-    [[ "$output" =~ "materialized as document #" ]]
-
-    run "$BIN" entity list document
-    [[ "$output" =~ "#1" ]]
-
-    USER=tester run "$BIN" knowledge materialize "$note_id"
-    [[ "$output" =~ "already materialized" ]]
-
-    sqlite3 .store/store.db "INSERT INTO knowledge_note (tier, title, body, content_hash) VALUES (0, 'Too early', 'Body.', 'h2');"
-    early_id=$(sqlite3 .store/store.db "SELECT id FROM knowledge_note WHERE tier = 0;")
-    USER=tester run "$BIN" knowledge materialize "$early_id"
-    [[ "$output" =~ "only tier 2/3 notes are ready" ]]
-}
-
-@test "knowledge review runs an agent turn that proposes materialize, gated behind approval" {
-    sqlite3 .store/store.db "INSERT INTO knowledge_note (tier, title, body, heat, retrieval_count, content_hash) VALUES (2, 'Promotable', 'Content.', 2.0, 5, 'h1');"
-    note_id=$(sqlite3 .store/store.db "SELECT id FROM knowledge_note;")
-
-    USER=admin AGENT_PROVIDER=test \
-        AGENT_TEST_RESPONSES="<tool>knowledge</tool><method>materialize</method><args>note_id=${note_id}</args>" \
-        run "$BIN" knowledge review
-    [[ "$output" =~ "Status: pending_approval" ]]
-    [[ "$output" =~ "knowledge.materialize" ]]
-
-    # Nothing written yet -- still just a pending action, same as any
-    # other destructive tool call.
-    run sqlite3 .store/store.db "SELECT artifact_status FROM knowledge_note WHERE id = ${note_id};"
-    [[ "$output" == "none" ]]
-    run sqlite3 .store/store.db "SELECT status FROM agent_pending_action;"
-    [[ "$output" == "pending" ]]
 }
 
 @test "chat feedback is recorded for the owning user and rejected for anyone else" {

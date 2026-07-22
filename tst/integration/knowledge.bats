@@ -90,14 +90,15 @@ search_for_bioreactor() {
     [[ "$output" =~ "heat=1.15" ]]
 }
 
-@test "searching for the same document twice reuses its note (no duplicate) and promotes it to tier 1" {
+@test "searching for the same document twice reuses its own row (no duplicate) and promotes it to tier 1" {
     "$BIN" entity create document title="Bioreactor Notes" content="cleaning steps for the bioreactor procedure"
     search_for_bioreactor
     search_for_bioreactor
 
     run "$BIN" knowledge stats
-    # Still exactly one note -- ensure_note_for_document is idempotent,
-    # not a second note per search.
+    # Still exactly one pool document -- a retrieved document accrues
+    # heat/tier directly on itself (task #106), never a second row per
+    # search.
     [[ "$output" =~ "notes=1 retrievals=2" ]]
 
     # 2 retrievals crosses the tier-0->1 promotion threshold.
@@ -106,28 +107,59 @@ search_for_bioreactor() {
     [[ "$output" =~ "retrievals=2" ]]
 }
 
-@test "platform knowledge show prints a note's full detail" {
+@test "platform knowledge show prints a document's full pool detail" {
     "$BIN" entity create document title="Bioreactor Notes" content="cleaning steps for the bioreactor procedure"
     search_for_bioreactor
 
     run "$BIN" knowledge show 1
     [[ "$output" =~ "title: Bioreactor Notes" ]]
     [[ "$output" =~ "tier: 0" ]]
-    [[ "$output" =~ "source: document #1" ]]
+    # A real, user-authored page retrieved directly has no source_type
+    # (task #106) -- it isn't "sourced from" anything, it simply IS the
+    # document; only agent-derived content (reasoning notes, future
+    # distilled notes) prints a "source:" line.
+    [[ ! "$output" =~ "source:" ]]
     [[ "$output" =~ "cleaning steps for the bioreactor procedure" ]]
 }
 
-@test "platform knowledge promote manually overrides a note's tier" {
+@test "platform knowledge promote manually overrides a document's tier" {
     "$BIN" entity create document title="Bioreactor Notes" content="cleaning steps for the bioreactor procedure"
     search_for_bioreactor
 
     run "$BIN" knowledge promote 1 2
-    [[ "$output" =~ "Note #1 set to tier 2" ]]
+    [[ "$output" =~ "Document #1 set to tier 2" ]]
 
     run "$BIN" knowledge list 2
     [[ "$output" =~ "Bioreactor Notes" ]]
     run "$BIN" knowledge list 0
     [[ ! "$output" =~ "Bioreactor Notes" ]]
+}
+
+@test "spreading activation reinforces a retrieved document's linked neighbors, not just the exact hit" {
+    # Real [[title]] links (task #106 follow-up, ACT-R "spreading
+    # activation") -- only document.create_page/sync_links populates
+    # document_link, so this goes through the real /document-save
+    # route rather than the `entity create` CLI shortcut every other
+    # test in this file uses.
+    # The link target must exist BEFORE the linking page is saved --
+    # document.sync_links resolves "[[title]]" against documents that
+    # exist at save time and is never retroactively re-run when a
+    # dangling link's target later appears.
+    raw_post "/document-save" "csrf_token=${CSRF}&title=Cleaning+Checklist&parent_id=&content=Checklist+content+here." "$COOKIE" "" >/dev/null
+    raw_post "/document-save" "csrf_token=${CSRF}&title=Bioreactor+SOP&parent_id=&content=Steps+for+the+bioreactor.+See+%5B%5BCleaning+Checklist%5D%5D+for+details." "$COOKIE" "" >/dev/null
+
+    resp=$(start_chat)
+    session_id=$(extract_query_param "$resp" "session_id")
+    scripted=$'<tool>document</tool>\n<method>search</method>\n<args>\nquery=bioreactor\n</args>\1<done>Found it.</done>'
+    raw_post "/chat-message" "csrf_token=${CSRF}&session_id=${session_id}&message=find+bioreactor+pages" "$COOKIE" "$scripted" >/dev/null
+
+    # The linked neighbor ("Cleaning Checklist") never matched the query
+    # directly, so its retrieval_count stays 0 -- but it should still
+    # get a heat bump above the 1.0 default via spreading activation.
+    run sqlite3 .store/store.db "SELECT retrieval_count FROM document WHERE title = 'Cleaning Checklist';"
+    [ "$output" -eq 0 ]
+    run sqlite3 .store/store.db "SELECT heat > 1.0 FROM document WHERE title = 'Cleaning Checklist';"
+    [ "$output" -eq 1 ]
 }
 
 @test "the agent's knowledge.stats tool reports the same numbers as the CLI" {

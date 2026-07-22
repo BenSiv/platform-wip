@@ -166,12 +166,12 @@ EOF
     [[ ! "$output" =~ "wants to run" ]]
 
     # The document.search tool routes through knowledge.search_and_log:
-    # every search is logged, and the retrieved document gets its
-    # tier-0 knowledge_note created lazily (see knowledge.bats for the
-    # full tiering/review coverage).
+    # every search is logged, and the retrieved document itself accrues
+    # tier/heat directly (task #106 -- no separate knowledge_note; see
+    # knowledge.bats for the full tiering/review coverage).
     run sqlite3 "$TEST_DIR/.store/store.db" "SELECT query_text, hit_count FROM knowledge_retrieval;"
     [[ "$output" =~ "bioreactor|1" ]]
-    run sqlite3 "$TEST_DIR/.store/store.db" "SELECT COUNT(*) FROM knowledge_note;"
+    run sqlite3 "$TEST_DIR/.store/store.db" "SELECT retrieval_count FROM document WHERE title = 'Bioreactor Notes';"
     [ "$output" -eq 1 ]
 }
 

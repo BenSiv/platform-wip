@@ -146,7 +146,7 @@ end
 -- fires on the first message that finds an empty title, so in the
 -- normal case that's the session's actual first message; a title set
 -- explicitly at chat-start is never overwritten. Reuses
--- knowledge.guess_title_from_body's own text-to-title logic (skip
+-- document.guess_title_from_body's own text-to-title logic (skip
 -- headings, strip bullet/quote prefixes, ~72-char word-boundary
 -- cutoff) rather than duplicating it -- same underlying problem
 -- (turn a blob of text into a short display title), and
@@ -159,7 +159,7 @@ function agent.maybe_set_title_from_message(db_path, session_id, login, user_mes
         return
     end
     clean_message = agent.display_content(user_message)
-    title = knowledge.guess_title_from_body(clean_message)
+    title = document.guess_title_from_body(clean_message)
     if title == "Untitled note" then
         return
     end
@@ -405,15 +405,15 @@ AGENT_TOOLS = {
         update = {destructive = true},
     },
     -- Read-only introspection into the knowledge pool's own tiering/
-    -- retrieval activity (see knowledge.lua). `materialize` (task #87)
-    -- is the one destructive knowledge tool -- note creation itself is
-    -- still retrieval-driven, not model-invoked, but promoting a note
-    -- into a real durable page is a genuine write, so it needs the
-    -- same human-approval gate every other destructive tool has.
+    -- retrieval activity (see knowledge.lua). task #106: no destructive
+    -- knowledge tool exists any more -- tier/heat live directly on
+    -- `document`, so there's no separate "materialize a note into a
+    -- real page" step left to gate; every pool record already is a
+    -- real page. A real distillation tool (task #107) will land here
+    -- once it exists.
     knowledge = {
         stats = {destructive = false},
         list = {destructive = false},
-        materialize = {destructive = true},
     },
 }
 
@@ -644,42 +644,23 @@ function agent.execute_tool(db_path, author, session_id, tool_name, method_name,
         )
     end
 
-    -- Read-only listing (task #87) -- exists so the agent-driven review
-    -- pass has a way to discover real note ids/tiers/artifact status
-    -- before ever proposing materialize; without this, materialize
-    -- would be unreachable in practice (nothing else surfaces note ids
-    -- to the model). Optional args.tier filters, same as the CLI.
+    -- Read-only listing (task #87, updated #106) -- surfaces the pool's
+    -- real document ids/tiers/sources to the model. Optional args.tier
+    -- filters, same as the CLI.
     if tool_name == "knowledge" and method_name == "list" then
-        rows = knowledge.list_notes(db_path, tonumber(args.tier))
+        rows = knowledge.list_documents(db_path, tonumber(args.tier))
         if #rows == 0 then
-            return "No notes found."
+            return "No knowledge pool documents found."
         end
         lines = {}
         for _, row in ipairs(rows) do
             table.insert(lines, string.format(
-                "#%s [tier %s, %s] %s (heat=%.2f, retrievals=%s)",
-                tostring(row.id), tostring(row.tier), tostring(row.artifact_status), tostring(row.title),
+                "#%s [tier %s] %s (heat=%.2f, retrievals=%s)",
+                tostring(row.id), tostring(row.tier), tostring(row.title),
                 row.effective_heat, tostring(row.retrieval_count)
             ))
         end
         return table.concat(lines, "\n")
-    end
-
-    -- Destructive (task #87): materializes a knowledge_note into a
-    -- real Notebook page. A genuine write (a new document/entity_event
-    -- row), so this goes through the same pending-action approval flow
-    -- as document.create/entity.create -- the agent can propose it,
-    -- but nothing is written until a human approves.
-    if tool_name == "knowledge" and method_name == "materialize" then
-        note_id = tonumber(args.note_id)
-        if note_id == nil then
-            return nil, "materialize requires note_id"
-        end
-        document_id, err = knowledge.materialize_note(db_path, note_id, author)
-        if document_id == nil then
-            return nil, tostring(err)
-        end
-        return "Materialized note #" .. tostring(note_id) .. " as document #" .. tostring(document_id)
     end
 
     return nil, "unknown tool: " .. tostring(tool_name) .. "." .. tostring(method_name)
@@ -822,8 +803,7 @@ Available tools:
 - entity.create -- create a new entity row. Args: entity_type=<name>, plus one arg per field (e.g. status=open, due_date=2026-08-01)
 - entity.update -- update fields on an existing entity row. Args: entity_type=<name>, entity_id=<id>, reason=<optional: why this change is being made>, plus one arg per field to change. Some entity types require a reason -- if the tool result says one is required, ask the user why before retrying.
 - knowledge.stats -- summarize the knowledge pool's tier distribution and retrieval activity. No args.
-- knowledge.list -- list knowledge notes with their id, tier, artifact status, heat, and retrieval count. Args: tier=<optional, filter to one tier 0-3>
-- knowledge.materialize -- promote a tier 2 or 3 knowledge note into a real, durable Notebook page. Only do this for notes you're confident are genuinely useful and ready to be a durable reference, not every promotable note. Args: note_id=<id>. Requires human approval before anything is actually written.
+- knowledge.list -- list knowledge pool documents with their id, tier, heat, and retrieval count. Args: tier=<optional, filter to one tier 0-3>
 
 If you don't already know an entity type's fields, call entity.fields first rather than guessing field names.
 
@@ -895,17 +875,19 @@ function agent.run_turn(db_path, session_id, login, system_prompt, model, user_m
         -- task #87: persist the exact prompt/reasoning/tokens for this
         -- turn. A reply that leaks visible reasoning (see
         -- knowledge.reply_has_visible_reasoning) gets that reasoning
-        -- split out into its own knowledge_note (source_type=
-        -- 'reasoning') -- it then goes through the same tiering/
-        -- retrieval/decay pipeline as every other note, rather than
-        -- sitting in a second, parallel log only this table can see.
-        reasoning_note_id = nil
+        -- split out into its own document (source_type='reasoning',
+        -- task #106: a real Notebook page under the Knowledge Pool
+        -- folder, not a separate knowledge_note) -- it then goes
+        -- through the same tiering/retrieval/decay pipeline as every
+        -- other pool document, rather than sitting in a second,
+        -- parallel log only this table can see.
+        reasoning_document_id = nil
         if knowledge.reply_has_visible_reasoning(result) then
-            reasoning_note_id = knowledge.create_note(db_path, 0,
+            reasoning_document_id = knowledge.create_document_note(db_path, login,
                 "Chat reasoning (session " .. tostring(session_id) .. ")", result,
                 "reasoning", message_id, tostring(session_id))
         end
-        context_id = knowledge.record_context(db_path, session_id, message_id, prompt, model, reasoning_note_id, usage)
+        context_id = knowledge.record_context(db_path, session_id, message_id, prompt, model, reasoning_document_id, usage)
         knowledge.record_chat_eval(db_path, session_id, context_id, message_id, agent_provider.name(), model, false, result)
 
         done_message = string.match(result, "<done>%s*(.-)%s*</done>")
@@ -937,42 +919,13 @@ function agent.run_turn(db_path, session_id, login, system_prompt, model, user_m
     return {status = "turn_limit", message = "Unable to complete tool-assisted run in " .. tostring(MAX_TURNS) .. " turns."}
 end
 
--- task #87: the agent-driven review pass -- unlike knowledge.
--- review_retrieval (rule-based: heading counts, content-hash matching,
--- runs automatically after every real search), this is a genuine
--- model call, judging which notes are actually ready to become a
--- durable page, not just which ones cleared a numeric threshold. Not
--- automatic on every search -- that would be a real, ongoing LLM cost
--- for something that isn't time-critical -- triggered explicitly (CLI
--- `platform knowledge review`, or a button on /knowledge).
---
--- Deliberately just a normal chat session/turn, not a separate
--- pipeline: knowledge.materialize is a destructive tool, so a call to
--- it here pauses for approval exactly like any user-initiated chat
--- does (agent.run_turn's own pending_approval path) -- a human still
--- has to approve every materialization from the resulting session in
--- the normal chat UI, same as any other destructive tool call. This
--- function only ever kicks the session off; it doesn't bypass
--- approval to "run faster" as an internal process.
-KNOWLEDGE_REVIEW_SYSTEM_PROMPT = """
-You are reviewing this deployment's knowledge pool: notes captured from real retrieval activity, tiered by how often and how reliably they've proven useful (tier 0 raw intake, tier 1 working set, tier 2 curated draft, tier 3 atomic durable record). Heat decays over time, so tier and retrieval count alone don't guarantee current relevance -- effective_heat (from knowledge.list) reflects that.
-
-Use knowledge.list to see current notes: id, tier, artifact status, effective heat, retrieval count. For each tier 2 or 3 note with artifact_status "none" (not yet materialized), decide whether it is genuinely ready to become a durable Notebook page:
-- it should be atomic and well-formed, not something that still needs splitting or cleanup
-- it should be useful as a standalone reference, not just frequently retrieved by coincidence
-
-Call knowledge.materialize only for notes you're confident about. Materializing nothing this pass is a completely acceptable outcome -- do not materialize a note you're unsure about; say why you're leaving it alone instead. When you're done, summarize what you reviewed and what you did (or didn't) materialize, and end with a <done> message.
-"""
-
-function agent.run_knowledge_review(db_path, login, model)
-    session_id, err = agent.create_session(db_path, login, "Knowledge Pool Review")
-    if session_id == nil then
-        return nil, err
-    end
-    result = agent.run_turn(db_path, session_id, login, KNOWLEDGE_REVIEW_SYSTEM_PROMPT, model,
-        "Review the current knowledge pool and materialize any notes that are genuinely ready.")
-    return session_id, result
-end
+-- task #106: the old agent-driven review pass (agent.run_knowledge_
+-- review / KNOWLEDGE_REVIEW_SYSTEM_PROMPT) was removed here -- its one
+-- job was deciding which notes were ready for knowledge.materialize,
+-- which no longer exists (every pool record already is a real page;
+-- see document.lua/knowledge.lua headers). Real agent-driven
+-- distillation -- generating genuinely atomic derivative notes, not
+-- just promoting a tier number -- is task #107's job, not this one's.
 
 -- Executes an approved pending action, records its result, and resumes
 -- the turn loop from there.

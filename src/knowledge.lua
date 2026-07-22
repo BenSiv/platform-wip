@@ -1,20 +1,34 @@
--- The knowledge pool: retrieval activity logging, note tiering, and
+-- The knowledge pool: retrieval activity logging, tiering, and
 -- rule-based review, adapted from a Fossil SCM fork's much larger
 -- ai_note/ai_retrieval/ai_review system (not copied verbatim -- see
 -- doc/architecture.md's "Knowledge pool" section for the mapping).
 -- Deliberately dropped from the source system: per-source-type
 -- authority weighting, a metadata-quality gate (tied to fields this
 -- codebase's notes don't have), and heat decay (the source system has
--- none either -- heat only ever grows).
+-- none either -- heat only ever grows; this port added lazy decay, see
+-- document.effective_heat).
 --
--- Hand-rolled tables (own CREATE TABLE + init_schema), not a
--- schema.register() entity type -- same reasoning as document_link/
--- document_embedding/agent_session: these are system/derived records,
--- not user-authored data with its own field-level audit needs.
+-- task #106: `knowledge_note` no longer exists as a separate table.
+-- Tier/heat/retrieval_count/source_*/content_hash/duplicate_of/
+-- merged_into are columns directly on `document` (see document.lua's
+-- ensure_document_knowledge_columns) -- one unified pool, not two
+-- concepts mirroring each other's content. A document that gets
+-- searched IS the record that accrues heat/tier; there's no separate
+-- "note" created to shadow it. The only thing still created fresh here
+-- is a genuinely new document (e.g. a chat's leaked reasoning text, or
+-- a future distilled note -- task #107) that has no existing page to
+-- attach to -- those land under document.ensure_knowledge_pool_folder,
+-- visible and browsable like any other Notebook folder, never hidden.
 --
--- A note is created lazily, the first time its source document is
--- actually retrieved (see knowledge.ensure_note_for_document) -- not
--- an eager bulk sweep over every document at init time.
+-- The pure tier/heat/dedup heuristics (content_hash, effective_heat,
+-- promotion_target_tier, atomicity_status, title_is_generic, ...) live
+-- in document.lua now, alongside the columns they score -- this file
+-- depends on document.lua, never the reverse.
+--
+-- Retrieval/review bookkeeping (knowledge_retrieval, knowledge_
+-- retrieval_document, knowledge_review) stays in its own hand-rolled
+-- tables here -- these are event logs (one row per retrieval/review
+-- event), not pool content, so they don't belong on `document` itself.
 
 db = require("db")
 document = require("document")
@@ -22,34 +36,7 @@ entity = require("entity")
 
 knowledge = {}
 
-TIER_WEIGHT = {[0] = 0.0, [1] = 0.10, [2] = 0.20, [3] = 0.35}
-
 KNOWLEDGE_SCHEMA = """
-CREATE TABLE IF NOT EXISTS knowledge_note (
-    id INTEGER PRIMARY KEY %s,
-    tier INTEGER NOT NULL DEFAULT 0,
-    title TEXT,
-    body TEXT NOT NULL,
-    source_type TEXT,
-    source_id INTEGER,
-    source_ref TEXT,
-    content_hash TEXT,
-    duplicate_of INTEGER,
-    merged_into INTEGER,
-    heat REAL NOT NULL DEFAULT 1.0,
-    retrieval_count INTEGER NOT NULL DEFAULT 0,
-    last_retrieved_at TEXT,
-    -- task #87: the "durable artifact" layer the source Fossil-fork
-    -- design describes but this port never built until now -- a
-    -- promotable note materialized into a real Notebook page, not just
-    -- a tier number change. artifact_status is 'none' until
-    -- materialized (see knowledge.materialize_note).
-    artifact_document_id INTEGER,
-    artifact_status TEXT DEFAULT 'none',
-    created_at TEXT DEFAULT (%s),
-    updated_at TEXT DEFAULT (%s)
-);
-
 CREATE TABLE IF NOT EXISTS knowledge_retrieval (
     id INTEGER PRIMARY KEY %s,
     session_id TEXT,
@@ -64,20 +51,20 @@ CREATE TABLE IF NOT EXISTS knowledge_retrieval (
 -- for MySQL instance. Backtick quoting is valid MySQL/MariaDB syntax and
 -- SQLite's own MySQL-compatibility extension, so this is a single,
 -- unified fix needing no per-backend branch.
-CREATE TABLE IF NOT EXISTS knowledge_retrieval_note (
+CREATE TABLE IF NOT EXISTS knowledge_retrieval_document (
     retrieval_id INTEGER NOT NULL,
-    note_id INTEGER NOT NULL,
+    document_id INTEGER NOT NULL,
     `rank` INTEGER,
     score REAL,
     tier_weight REAL,
     reinforcement_delta REAL,
-    PRIMARY KEY (retrieval_id, note_id)
+    PRIMARY KEY (retrieval_id, document_id)
 );
 
 CREATE TABLE IF NOT EXISTS knowledge_review (
     id INTEGER PRIMARY KEY %s,
     retrieval_id INTEGER NOT NULL,
-    note_id INTEGER NOT NULL,
+    document_id INTEGER NOT NULL,
     atomicity_status TEXT,
     connectivity_status TEXT,
     duplication_status TEXT,
@@ -92,17 +79,18 @@ CREATE TABLE IF NOT EXISTS knowledge_review (
 -- produced), not a commit/rid the way the source system's version-
 -- control-centric design was -- platform-wip's own immutable,
 -- append-only chat log is the natural anchor here, not a Fossil-style
--- checkin. `reasoning_note_id` points at a knowledge_note
--- (source_type='reasoning') rather than storing reasoning text inline
--- -- reasoning goes through the exact same tiering/retrieval/decay
--- pipeline as everything else, not a second parallel log.
+-- checkin. `reasoning_document_id` (task #106: renamed from
+-- reasoning_note_id) points at a document (source_type='reasoning')
+-- rather than storing reasoning text inline -- reasoning goes through
+-- the exact same tiering/retrieval/decay pipeline as everything else,
+-- not a second parallel log.
 CREATE TABLE IF NOT EXISTS knowledge_context (
     id INTEGER PRIMARY KEY %s,
     session_id TEXT NOT NULL,
     message_id INTEGER,
     prompt TEXT,
     model_id TEXT,
-    reasoning_note_id INTEGER,
+    reasoning_document_id INTEGER,
     prompt_tokens INTEGER,
     completion_tokens INTEGER,
     total_tokens INTEGER,
@@ -133,7 +121,6 @@ CREATE TABLE IF NOT EXISTS knowledge_chat_eval (
 
 function knowledge_schema_sql(db_path)
     return string.format(KNOWLEDGE_SCHEMA,
-        db.autoincrement_keyword(db_path), db.now_expr(db_path), db.now_expr(db_path),
         db.autoincrement_keyword(db_path), db.now_expr(db_path),
         db.autoincrement_keyword(db_path), db.now_expr(db_path),
         db.autoincrement_keyword(db_path), db.now_expr(db_path),
@@ -144,20 +131,15 @@ end
 -- Real MySQL has no "CREATE INDEX IF NOT EXISTS" at all (a syntax error,
 -- not a no-op, unlike MariaDB) -- found running tst/integration/
 -- mariadb_backend.bats against a real Cloud SQL for MySQL instance. These
--- three indexes used to live inside KNOWLEDGE_SCHEMA's own semicolon
--- batch; pulled out into their own guarded execs (db.index_exists first,
--- same "check, then conditionally create" shape schema.lua's own
--- CREATE INDEX call sites now use) since a single bad statement fails the
--- whole batch on MySQL, not just that one statement.
+-- indexes used to live inside KNOWLEDGE_SCHEMA's own semicolon batch;
+-- pulled out into their own guarded execs (db.index_exists first, same
+-- "check, then conditionally create" shape schema.lua's own CREATE INDEX
+-- call sites use) since a single bad statement fails the whole batch on
+-- MySQL, not just that one statement.
 function ensure_knowledge_indexes(db_path)
     indexes = {
-        {name = "knowledge_note_tier_idx", table = "knowledge_note",
-         sql = "CREATE INDEX knowledge_note_tier_idx ON knowledge_note(tier, heat DESC, retrieval_count DESC);"},
-        {name = "knowledge_note_hash_idx", table = "knowledge_note",
-         sql = string.format("CREATE INDEX knowledge_note_hash_idx ON knowledge_note(%s);",
-             db.text_index_column(db_path, "content_hash"))},
-        {name = "knowledge_retrieval_note_note_idx", table = "knowledge_retrieval_note",
-         sql = "CREATE INDEX knowledge_retrieval_note_note_idx ON knowledge_retrieval_note(note_id);"},
+        {name = "knowledge_retrieval_document_document_idx", table = "knowledge_retrieval_document",
+         sql = "CREATE INDEX knowledge_retrieval_document_document_idx ON knowledge_retrieval_document(document_id);"},
         {name = "knowledge_context_message_idx", table = "knowledge_context",
          sql = "CREATE INDEX knowledge_context_message_idx ON knowledge_context(message_id);"},
         {name = "knowledge_chat_eval_message_idx", table = "knowledge_chat_eval",
@@ -170,341 +152,135 @@ function ensure_knowledge_indexes(db_path)
     end
 end
 
--- CREATE TABLE IF NOT EXISTS never retrofits an existing table (same
--- reasoning as ledger.lua's own ensure_entity_event_reason_column) --
--- an existing knowledge_note needs these added by hand; a brand-new
--- store gets them straight from KNOWLEDGE_SCHEMA.
-function ensure_knowledge_note_artifact_columns(db_path)
-    existing = db.get_columns(db_path, "knowledge_note")
-    have = {}
-    for _, name in ipairs(existing) do
-        have[name] = true
-    end
-    if have["artifact_document_id"] == nil then
-        db.exec(db_path, "ALTER TABLE knowledge_note ADD COLUMN artifact_document_id INTEGER;")
-    end
-    if have["artifact_status"] == nil then
-        db.exec(db_path, "ALTER TABLE knowledge_note ADD COLUMN artifact_status TEXT DEFAULT 'none';")
-    end
-end
-
 function knowledge.init_schema(db_path)
     db.exec(db_path, knowledge_schema_sql(db_path))
     ensure_knowledge_indexes(db_path)
-    ensure_knowledge_note_artifact_columns(db_path)
 end
+
+-- A document counts as "in the pool" for stats/listing once it's
+-- actually been retrieved, or was created as system/agent-derived
+-- content in the first place -- distinguishing that from every other
+-- ordinary, never-touched Notebook page.
+KNOWLEDGE_MEMBER_WHERE = "(retrieval_count > 0 OR (source_type IS NOT NULL AND source_type != ''))"
 
 --------------------------------------------------------------------------
--- Pure functions -- no DB access, fully unit-testable in isolation
+-- Documents as the pool's own records
 --------------------------------------------------------------------------
 
--- A fast, deterministic (not cryptographic -- dedup fingerprinting has
--- no adversarial threat model here) djb2-style hash, since no SHA1/MD5
--- binding is available in this Lua fork's stdlib. Kept within 2^32 so
--- the running total stays exactly representable in a Lua 5.1 double.
-function knowledge.content_hash(body)
-    body = tostring(body)
-    hash = 5381
-    for i = 1, string.len(body) do
-        hash = (hash * 33 + string.byte(body, i)) % 4294967296
-    end
-    return string.format("%08x", hash)
-end
-
--- Exact port of ai_note_record_retrieval's reinforcement formula: a
--- flat 0.15 plus the retrieved note's own tier weight, added to heat
--- on every retrieval hit. No decay -- heat is monotonic, matching the
--- source system.
-function knowledge.reinforcement_delta(tier)
-    tier_weight = TIER_WEIGHT[tier]
-    if tier_weight == nil then
-        tier_weight = 0.0
-    end
-    return 0.15 + tier_weight
-end
-
--- Heat decay (task #87): neither this port nor the source Fossil-fork
--- system it came from ever had decay -- heat only ever grew, so a note
--- that crossed a tier threshold once stayed there forever regardless
--- of whether it was ever retrieved again. Explicit user direction:
--- knowledge should stay fluid, not settle into a fixed state. Computed
--- lazily wherever heat is actually used for a decision (review's own
--- promotion/demotion check) rather than a scheduled job rewriting
--- every row -- matches this codebase's "compute at request time"
--- convention throughout (no in-app background scheduler exists at
--- all; the one periodic job in this whole system, Benchling sync, is
--- an external systemd timer, not something cgi.lua itself runs). The
--- stored `heat` column is left untouched -- it's the raw, monotonic
--- reinforcement total; effective_heat is the read-time view of it.
-HEAT_DECAY_HALF_LIFE_DAYS = 14
-
--- Days between `timestamp_str` (this codebase's "YYYY-MM-DD HH:MM:SS"
--- convention, whatever db.now_expr's own DEFAULT produced) and now.
--- nil (not 0) for anything unparseable -- callers treat that as "no
--- decay information, use heat as-is" rather than "decay as if just
--- retrieved," which would be the wrong direction to fail in.
-function knowledge.days_since(timestamp_str)
-    if timestamp_str == nil or timestamp_str == "" then
-        return nil
-    end
-    year, month, day, hour, min, sec = string.match(timestamp_str, "(%d+)-(%d+)-(%d+)[ T](%d+):(%d+):(%d+)")
-    if year == nil then
-        return nil
-    end
-    then_time = os.time({
-        year = tonumber(year), month = tonumber(month), day = tonumber(day),
-        hour = tonumber(hour), min = tonumber(min), sec = tonumber(sec),
-    })
-    return (os.time() - then_time) / 86400
-end
-
--- Exponential half-life decay: unchanged the instant a note is
--- retrieved, half its value after HEAT_DECAY_HALF_LIFE_DAYS of
--- disuse, a quarter after twice that, and so on -- never negative,
--- never demanding an exact "when did decay start" origin point the
--- way a linear decay would.
-function knowledge.effective_heat(heat, last_retrieved_at)
-    days = knowledge.days_since(last_retrieved_at)
-    if days == nil or days <= 0 then
-        return heat
-    end
-    return heat * (0.5 ^ (days / HEAT_DECAY_HALF_LIFE_DAYS))
-end
-
--- Adapted from ai_promotion_target_tier, made bidirectional (task
--- #87): the source version only ever ratcheted `tier` upward and
--- never demoted. Recomputed from scratch against CURRENT (decayed)
--- stats every time instead of starting from the note's existing tier,
--- so a note that cools off (stops being retrieved, effective_heat
--- decays below a threshold it previously cleared) genuinely drops back
--- down on its next review -- `retrieval_count` alone can't gate this
--- indefinitely once heat has decayed, which is the whole point.
--- Duplicates still never move, same as before.
-function knowledge.promotion_target_tier(tier, retrieval_count, effective_heat, is_duplicate, atomicity)
-    if is_duplicate == true then
-        return tier
-    end
-    target = 0
-    if retrieval_count >= 2 then
-        target = 1
-    end
-    if retrieval_count >= 4 and effective_heat >= 1.60 and atomicity != "needs-split" then
-        target = 2
-    end
-    if retrieval_count >= 7 and effective_heat >= 2.60 and atomicity == "ok" then
-        target = 3
-    end
-    return target
-end
-
--- Exact port of the atomicity heuristic: counts "#"-prefixed heading
--- lines and blank-line-delimited paragraphs.
-function knowledge.atomicity_status(body)
-    body = tostring(body)
-    heading_count = 0
-    for _ in string.gmatch(body, "\n#[^\n]*") do
-        heading_count = heading_count + 1
-    end
-    if string.match(body, "^#") != nil then
-        heading_count = heading_count + 1
-    end
-
-    paragraph_count = 0
-    for para in string.gmatch(body .. "\n\n", "(.-)\n\n") do
-        if string.match(para, "%S") != nil then
-            paragraph_count = paragraph_count + 1
-        end
-    end
-
-    if heading_count > 1 or paragraph_count > 6 then
-        return "needs-split"
-    end
-    if paragraph_count <= 1 and string.len(body) < 64 then
-        return "thin"
-    end
-    return "ok"
-end
-
-function knowledge.connectivity_status(peer_count)
-    return "linked-" .. tostring(peer_count)
-end
-
-GENERIC_TITLES = {["note"] = true, ["untitled note"] = true, ["manual note"] = true, [""] = true}
-
-function knowledge.title_is_generic(title)
-    if title == nil then
-        return true
-    end
-    return GENERIC_TITLES[string.lower(strip_spaces(title))] == true
-end
-
-function strip_spaces(s)
-    return (string.gsub(s, "^%s*(.-)%s*$", "%1"))
-end
-
--- First non-heading line of body (heading lines are skipped entirely,
--- not stripped-and-used -- "# Heading\n\nFirst real line" guesses
--- "First real line", not "Heading"), with leading bullet/quote
--- decoration stripped, truncated to ~72 chars on a word boundary when
--- one exists past position 24 (short enough truncations just get a
--- hard cut rather than a barely-shorter one).
-function knowledge.guess_title_from_body(body)
-    if body == nil then
-        return "Untitled note"
-    end
-    for line in string.gmatch(body, "[^\n]+") do
-        if string.match(line, "^%s*#") == nil then
-            candidate = strip_spaces(string.gsub(line, "^[>%-%*%s]+", ""))
-            if candidate != "" then
-                if string.len(candidate) <= 72 then
-                    return candidate
-                end
-                cut = string.find(string.sub(candidate, 1, 72), " [^ ]*$")
-                if cut != nil and cut > 24 then
-                    return string.sub(candidate, 1, cut - 1)
-                end
-                return string.sub(candidate, 1, 72)
-            end
-        end
-    end
-    return "Untitled note"
-end
-
---------------------------------------------------------------------------
--- Notes
---------------------------------------------------------------------------
-
-function knowledge.get_note(db_path, note_id)
-    rows = db.query(db_path, "SELECT * FROM knowledge_note WHERE id = " .. tostring(tonumber(note_id)) .. ";")
-    if rows == nil or rows[1] == nil then
-        return nil
-    end
-    note = rows[1]
-    note.effective_heat = knowledge.effective_heat(tonumber(note.heat), note.last_retrieved_at)
-    return note
-end
-
--- Fixed (task #87, in passing): same real concurrent-CGI race as
--- ledger.lua's append_create/agent.add_message had (see their own
--- comments) -- SELECT MAX(id) can collide with another connection's
--- own insert; db.exec's own connection-scoped second return value
--- can't. Matters now that this runs on every chat turn with visible
--- reasoning, not just the occasional document-indexing path.
-function knowledge.create_note(db_path, tier, title, body, source_type, source_id, source_ref)
-    _, note_id = db.exec(db_path, string.format(
-        "INSERT INTO knowledge_note (tier, title, body, source_type, source_id, source_ref, content_hash) " ..
-        "VALUES (%d, %s, %s, %s, %s, %s, %s);",
-        tonumber(tier), db.literal(title), db.literal(body), db.literal(source_type),
-        db.literal(source_id), db.literal(source_ref), db.quote(knowledge.content_hash(body))
-    ))
-    return tonumber(note_id)
-end
-
-function knowledge.note_for_document(db_path, document_id)
-    rows = db.query(db_path, string.format(
-        "SELECT * FROM knowledge_note WHERE source_type = 'document' AND source_id = %d LIMIT 1;",
-        tonumber(document_id)
-    ))
-    if rows == nil or rows[1] == nil then
-        return nil
-    end
-    return rows[1]
-end
-
--- A document gets its tier-0 knowledge_note lazily, the first time
--- it's actually retrieved -- not an eager bulk sweep over every
--- document. Idempotent: a second call for the same document returns
--- the existing note rather than creating a duplicate.
-function knowledge.ensure_note_for_document(db_path, document_id)
-    existing = knowledge.note_for_document(db_path, document_id)
-    if existing != nil then
-        return existing
-    end
+function knowledge.get_document(db_path, document_id)
     doc = entity.get(db_path, "document", document_id)
     if doc == nil then
         return nil
     end
-    body = doc.content
-    if body == nil then
-        body = ""
+    doc.effective_heat = document.effective_heat(tonumber(doc.heat), doc.last_retrieved_at)
+    return doc
+end
+
+-- Creates a genuinely new document (chat reasoning today; future
+-- distilled notes -- task #107) under the Knowledge Pool folder --
+-- there's no existing page to attach this content to, unlike a search
+-- hit against a document that already exists. Attributed to the real
+-- logged-in user, same as any other document, not a synthetic actor --
+-- the Knowledge Pool folder itself is the only thing authored as
+-- "system" (see document.ensure_knowledge_pool_folder).
+function knowledge.create_document_note(db_path, author, title, body, source_type, source_id, source_ref)
+    folder_id = document.ensure_knowledge_pool_folder(db_path)
+    document_id, issues = document.create_page(db_path, author, title, folder_id, body, nil)
+    if document_id == nil then
+        return nil, issues
     end
-    note_id = knowledge.create_note(db_path, 0, doc.title, body, "document", document_id, nil)
-    return knowledge.get_note(db_path, note_id)
+    db.exec(db_path, string.format(
+        "UPDATE document SET source_type = %s, source_id = %s, source_ref = %s, content_hash = %s WHERE id = %d;",
+        db.literal(source_type), db.literal(source_id), db.literal(source_ref),
+        db.quote(document.content_hash(body)), document_id
+    ))
+    return document_id
 end
 
 --------------------------------------------------------------------------
 -- Retrieval logging
 --------------------------------------------------------------------------
 
+-- Fixed (task #87, in passing): same real concurrent-CGI race as
+-- ledger.lua's append_create/agent.add_message had (see their own
+-- comments) -- SELECT MAX(id) can collide with another connection's
+-- own insert; db.exec's own connection-scoped second return value
+-- can't.
 function knowledge.begin_retrieval(db_path, session_id, query_text, hit_count)
-    db.exec(db_path, string.format(
+    _, retrieval_id = db.exec(db_path, string.format(
         "INSERT INTO knowledge_retrieval (session_id, query_text, hit_count) VALUES (%s, %s, %d);",
         db.literal(session_id), db.literal(query_text), tonumber(hit_count)
     ))
-    rows = db.query(db_path, "SELECT MAX(id) AS id FROM knowledge_retrieval;")
-    return tonumber(rows[1].id)
+    return tonumber(retrieval_id)
 end
 
--- Bumps the note's heat/retrieval_count by the ported reinforcement
+-- Bumps the document's heat/retrieval_count by the ported reinforcement
 -- formula and records the per-hit row audit-style, mirroring
--- ai_note_record_retrieval exactly (see knowledge.reinforcement_delta).
-function knowledge.record_retrieval_hit(db_path, retrieval_id, note_id, tier, rank, score)
-    delta = knowledge.reinforcement_delta(tier)
-    tier_weight = TIER_WEIGHT[tier]
-    if tier_weight == nil then
-        tier_weight = 0.0
-    end
+-- ai_note_record_retrieval exactly (see document.reinforcement_delta).
+-- content_hash is refreshed on every hit (not just at creation) so
+-- dedup review stays accurate even as a page's content is edited over
+-- time.
+function knowledge.record_retrieval_hit(db_path, retrieval_id, document_id, tier, rank, score, content_hash)
+    delta = document.reinforcement_delta(tier)
+    tier_weight = document.tier_weight(tier)
     db.exec(db_path, string.format(
-        "UPDATE knowledge_note SET heat = heat + %.17g, retrieval_count = retrieval_count + 1, " ..
-        "last_retrieved_at = %s, updated_at = %s WHERE id = %d;",
-        delta, db.now_expr(db_path), db.now_expr(db_path), tonumber(note_id)
+        "UPDATE document SET heat = heat + %.17g, retrieval_count = retrieval_count + 1, " ..
+        "last_retrieved_at = %s, content_hash = %s, updated_at = %s WHERE id = %d;",
+        delta, db.now_expr(db_path), db.quote(content_hash), db.now_expr(db_path), tonumber(document_id)
     ))
     db.exec(db_path, string.format(
-        "%s knowledge_retrieval_note (retrieval_id, note_id, `rank`, score, tier_weight, reinforcement_delta) " ..
+        "%s knowledge_retrieval_document (retrieval_id, document_id, `rank`, score, tier_weight, reinforcement_delta) " ..
         "VALUES (%d, %d, %d, %.17g, %.17g, %.17g);",
         db.replace_into(db_path),
-        tonumber(retrieval_id), tonumber(note_id), tonumber(rank), tonumber(score), tier_weight, delta
+        tonumber(retrieval_id), tonumber(document_id), tonumber(rank), tonumber(score), tier_weight, delta
     ))
     return delta
 end
 
 --------------------------------------------------------------------------
--- Review gates (DB-touching orchestration; see the pure heuristics above)
+-- Review gates (DB-touching orchestration; see document.lua's pure heuristics)
 --------------------------------------------------------------------------
 
--- Canonical = lowest id sharing the same content hash. A non-canonical
--- note gets its own duplicate_of/merged_into set, mirroring the source
--- system's dedup bookkeeping.
-function knowledge.duplication_status(db_path, note_id, content_hash)
+-- Canonical = lowest id sharing the same content hash. Only ever
+-- MUTATES duplicate_of/merged_into for a system/agent-derived document
+-- (source_type set) -- a real user-authored page is never silently
+-- folded into another one just because their content happens to
+-- match; the status is still reported either way for visibility.
+function knowledge.duplication_status(db_path, document_id, content_hash, source_type)
     if content_hash == nil or content_hash == "" then
         return "unique"
     end
     rows = db.query(db_path, string.format(
-        "SELECT id FROM knowledge_note WHERE content_hash = %s AND id != %d ORDER BY id ASC LIMIT 1;",
-        db.quote(content_hash), tonumber(note_id)
+        "SELECT id FROM document WHERE content_hash = %s AND id != %d AND (archived_at IS NULL OR archived_at = '') ORDER BY id ASC LIMIT 1;",
+        db.quote(content_hash), tonumber(document_id)
     ))
     if rows == nil or rows[1] == nil then
         return "unique"
     end
     canonical_id = tonumber(rows[1].id)
-    if canonical_id < tonumber(note_id) then
-        db.exec(db_path, string.format(
-            "UPDATE knowledge_note SET duplicate_of = %d, merged_into = %d WHERE id = %d;",
-            canonical_id, canonical_id, tonumber(note_id)
-        ))
+    if canonical_id < tonumber(document_id) then
+        if source_type != nil and source_type != "" then
+            db.exec(db_path, string.format(
+                "UPDATE document SET duplicate_of = %d, merged_into = %d WHERE id = %d;",
+                canonical_id, canonical_id, tonumber(document_id)
+            ))
+        end
         return "duplicate-of-" .. tostring(canonical_id)
     end
     return "unique"
 end
 
 -- Runs once per retrieval, after all hits are logged (mirrors
--- ai_retrieval_review's invocation point): for every note this
+-- ai_retrieval_review's invocation point): for every document this
 -- retrieval touched, computes the review gates, applies any resulting
--- note mutation (retitle, dedup, tier promotion), and records one
--- knowledge_review row per note for audit.
+-- mutation (retitle, dedup, tier promotion), and records one
+-- knowledge_review row per document for audit. Retitling only ever
+-- applies to system/agent-derived documents (source_type set) -- a
+-- real user-authored page's title is never rewritten out from under
+-- them, even if it happens to look generic ("note", "untitled", ...).
 function knowledge.review_retrieval(db_path, retrieval_id)
     rows = db.query(db_path, string.format(
-        "SELECT note_id FROM knowledge_retrieval_note WHERE retrieval_id = %d;", tonumber(retrieval_id)
+        "SELECT document_id FROM knowledge_retrieval_document WHERE retrieval_id = %d;", tonumber(retrieval_id)
     ))
     if rows == nil then
         return
@@ -515,34 +291,39 @@ function knowledge.review_retrieval(db_path, retrieval_id)
     end
 
     for _, row in ipairs(rows) do
-        note = knowledge.get_note(db_path, row.note_id)
-        if note != nil then
-            atomicity = knowledge.atomicity_status(note.body)
-            duplication = knowledge.duplication_status(db_path, note.id, note.content_hash)
-            connectivity = knowledge.connectivity_status(peer_count)
+        doc = knowledge.get_document(db_path, row.document_id)
+        if doc != nil then
+            is_system = doc.source_type != nil and doc.source_type != ""
+            body = doc.content
+            if body == nil then
+                body = ""
+            end
+            atomicity = document.atomicity_status(body)
+            duplication = knowledge.duplication_status(db_path, doc.id, doc.content_hash, doc.source_type)
+            connectivity = document.connectivity_status(peer_count)
             is_duplicate = string.match(duplication, "^duplicate%-of%-") != nil
 
             title_status = "ok"
-            new_title = note.title
-            if knowledge.title_is_generic(note.title) then
-                new_title = knowledge.guess_title_from_body(note.body)
+            new_title = doc.title
+            if is_system and document.title_is_generic(doc.title) then
+                new_title = document.guess_title_from_body(body)
                 title_status = "retitled"
             end
 
-            target_tier = knowledge.promotion_target_tier(
-                tonumber(note.tier), tonumber(note.retrieval_count),
-                knowledge.effective_heat(tonumber(note.heat), note.last_retrieved_at),
+            target_tier = document.promotion_target_tier(
+                tonumber(doc.tier), tonumber(doc.retrieval_count),
+                document.effective_heat(tonumber(doc.heat), doc.last_retrieved_at),
                 is_duplicate, atomicity
             )
 
             db.exec(db_path, string.format(
-                "UPDATE knowledge_note SET tier = %d, title = %s, updated_at = %s WHERE id = %d;",
-                target_tier, db.literal(new_title), db.now_expr(db_path), note.id
+                "UPDATE document SET tier = %d, title = %s, updated_at = %s WHERE id = %d;",
+                target_tier, db.literal(new_title), db.now_expr(db_path), doc.id
             ))
             db.exec(db_path, string.format(
-                "INSERT INTO knowledge_review (retrieval_id, note_id, atomicity_status, connectivity_status, duplication_status, title_status) " ..
+                "INSERT INTO knowledge_review (retrieval_id, document_id, atomicity_status, connectivity_status, duplication_status, title_status) " ..
                 "VALUES (%d, %d, %s, %s, %s, %s);",
-                tonumber(retrieval_id), note.id, db.quote(atomicity), db.quote(connectivity), db.quote(duplication), db.quote(title_status)
+                tonumber(retrieval_id), doc.id, db.quote(atomicity), db.quote(connectivity), db.quote(duplication), db.quote(title_status)
             ))
         end
     end
@@ -592,23 +373,23 @@ end
 
 -- Persists the exact prompt (system_prompt .. history, verbatim, not
 -- reconstructed later from agent_message rows) plus real token counts
--- for one model call. `reasoning_note_id` is optional -- filled in by
--- the caller only when the reply's own reasoning was split out into
--- its own knowledge_note (source_type='reasoning'), not every turn.
--- `usage` is the {prompt_tokens, completion_tokens, total_tokens}
--- table agent_provider.generate's third return value now carries
--- (real counts from Vertex, estimated-but-present under the test
--- provider) -- every field is nil-safe since a provider without usage
--- metadata at all shouldn't fail this call over accounting.
-function knowledge.record_context(db_path, session_id, message_id, prompt, model_id, reasoning_note_id, usage)
+-- for one model call. `reasoning_document_id` is optional -- filled in
+-- by the caller only when the reply's own reasoning was split out into
+-- its own document (source_type='reasoning'), not every turn. `usage`
+-- is the {prompt_tokens, completion_tokens, total_tokens} table
+-- agent_provider.generate's third return value now carries (real
+-- counts from Vertex, estimated-but-present under the test provider) --
+-- every field is nil-safe since a provider without usage metadata at
+-- all shouldn't fail this call over accounting.
+function knowledge.record_context(db_path, session_id, message_id, prompt, model_id, reasoning_document_id, usage)
     if usage == nil then
         usage = {}
     end
     _, context_id = db.exec(db_path, string.format(
-        "INSERT INTO knowledge_context (session_id, message_id, prompt, model_id, reasoning_note_id, prompt_tokens, completion_tokens, total_tokens) " ..
+        "INSERT INTO knowledge_context (session_id, message_id, prompt, model_id, reasoning_document_id, prompt_tokens, completion_tokens, total_tokens) " ..
         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s);",
         db.quote(session_id), db.literal(tonumber(message_id)), db.quote(prompt), db.quote(model_id),
-        db.literal(tonumber(reasoning_note_id)), db.literal(usage.prompt_tokens), db.literal(usage.completion_tokens),
+        db.literal(tonumber(reasoning_document_id)), db.literal(usage.prompt_tokens), db.literal(usage.completion_tokens),
         db.literal(usage.total_tokens)
     ))
     return context_id
@@ -656,19 +437,68 @@ end
 -- The one integration point every retrieval path goes through
 --------------------------------------------------------------------------
 
+-- ACT-R's "spreading activation" (explicit user direction: fold the
+-- existing document_link graph into retrieval/context scoring): a
+-- retrieved document's linked neighbors get a smaller, fan-diluted heat
+-- reinforcement too, not just the document that actually matched the
+-- query. Skips any neighbor that was ALSO a direct hit this retrieval
+-- -- it already got the full direct-hit treatment via
+-- record_retrieval_hit, and the two writes would otherwise fight over
+-- the same knowledge_retrieval_document audit row (PRIMARY KEY
+-- (retrieval_id, document_id)) for no benefit. retrieval_count is
+-- deliberately NOT bumped for a spread neighbor -- it measures direct
+-- retrieval hits specifically (promotion_target_tier's thresholds read
+-- it that way); only heat/last_retrieved_at, the shared reinforcement
+-- signal, moves. If the same neighbor is shared by more than one hit
+-- document in the same retrieval, its real heat still accumulates both
+-- bumps (that UPDATE is cumulative), but only the last-applied bump
+-- writes the audit row -- an accepted, documented imprecision, same
+-- category as knowledge.list_documents' own approximate raw-heat
+-- ordering.
+function knowledge.spread_activation(db_path, retrieval_id, document_id, base_delta, hit_ids)
+    neighbors = document.linked_neighbors(db_path, document_id)
+    if #neighbors == 0 then
+        return
+    end
+    delta = document.spreading_delta(base_delta, #neighbors)
+    for _, neighbor in ipairs(neighbors) do
+        neighbor_id = tonumber(neighbor.id)
+        if neighbor_id != nil and hit_ids[neighbor_id] == nil then
+            neighbor_doc = knowledge.get_document(db_path, neighbor_id)
+            if neighbor_doc != nil then
+                tier_weight = document.tier_weight(neighbor_doc.tier)
+                db.exec(db_path, string.format(
+                    "UPDATE document SET heat = heat + %.17g, last_retrieved_at = %s, updated_at = %s WHERE id = %d;",
+                    delta, db.now_expr(db_path), db.now_expr(db_path), neighbor_id
+                ))
+                db.exec(db_path, string.format(
+                    "%s knowledge_retrieval_document (retrieval_id, document_id, `rank`, score, tier_weight, reinforcement_delta) " ..
+                    "VALUES (%d, %d, NULL, NULL, %.17g, %.17g);",
+                    db.replace_into(db_path), tonumber(retrieval_id), neighbor_id, tier_weight, delta
+                ))
+            end
+        end
+    end
+end
+
 -- Wraps document.search rather than modifying it -- document.search
 -- stays pure/reusable, knowledge.lua depends on document.lua, never
--- the reverse. A document gets its knowledge_note lazily, the first
--- time it's actually retrieved (knowledge.ensure_note_for_document) --
--- heat/tier/review then apply to it on every retrieval from here on.
+-- the reverse. Every result IS already the record that accrues heat/
+-- tier (task #106) -- no separate note to create or look up first.
 function knowledge.search_and_log(db_path, query_text, limit, use_semantic, session_id)
     results = document.search(db_path, query_text, limit, use_semantic)
     retrieval_id = knowledge.begin_retrieval(db_path, session_id, query_text, #results)
+    hit_ids = {}
+    for _, r in ipairs(results) do
+        hit_ids[tonumber(r.id)] = true
+    end
     for rank, r in ipairs(results) do
-        note = knowledge.ensure_note_for_document(db_path, r.id)
-        if note != nil then
-            knowledge.record_retrieval_hit(db_path, retrieval_id, note.id, tonumber(note.tier), rank, r.score)
+        tier = tonumber(r.tier)
+        if tier == nil then
+            tier = 0
         end
+        delta = knowledge.record_retrieval_hit(db_path, retrieval_id, r.id, tier, rank, r.score, document.content_hash(r.content))
+        knowledge.spread_activation(db_path, retrieval_id, r.id, delta, hit_ids)
     end
     if #results > 0 then
         knowledge.review_retrieval(db_path, retrieval_id)
@@ -696,7 +526,10 @@ end
 function knowledge.stats(db_path)
     tier_counts = {}
     for tier = 0, 3 do
-        tier_counts[tier] = count_rows(db_path, "SELECT COUNT(*) AS n FROM knowledge_note WHERE tier = " .. tostring(tier) .. ";")
+        tier_counts[tier] = count_rows(db_path, string.format(
+            "SELECT COUNT(*) AS n FROM document WHERE tier = %d AND %s AND (archived_at IS NULL OR archived_at = '');",
+            tier, KNOWLEDGE_MEMBER_WHERE
+        ))
     end
     session_count = 0
     if db.table_exists(db_path, "agent_session") then
@@ -704,9 +537,11 @@ function knowledge.stats(db_path)
     end
     return {
         tier_counts = tier_counts,
-        note_count = count_rows(db_path, "SELECT COUNT(*) AS n FROM knowledge_note;"),
+        note_count = count_rows(db_path, string.format(
+            "SELECT COUNT(*) AS n FROM document WHERE %s AND (archived_at IS NULL OR archived_at = '');", KNOWLEDGE_MEMBER_WHERE
+        )),
         retrieval_count = count_rows(db_path, "SELECT COUNT(*) AS n FROM knowledge_retrieval;"),
-        reviewed_note_count = count_rows(db_path, "SELECT COUNT(DISTINCT note_id) AS n FROM knowledge_review;"),
+        reviewed_note_count = count_rows(db_path, "SELECT COUNT(DISTINCT document_id) AS n FROM knowledge_review;"),
         session_count = session_count,
     }
 end
@@ -729,11 +564,15 @@ end
 -- decay computation) -- an approximate, not exact, decayed ordering.
 -- Exact enough for a listing command; each row's own effective_heat
 -- field (added below) is the exact figure review/promotion decisions
--- actually use.
-function knowledge.list_notes(db_path, tier)
-    query = "SELECT * FROM knowledge_note"
+-- actually use. Restricted to documents that are actually "in the
+-- pool" (see KNOWLEDGE_MEMBER_WHERE) -- an ordinary, never-retrieved
+-- Notebook page doesn't show up here just because it exists.
+function knowledge.list_documents(db_path, tier)
+    query = string.format(
+        "SELECT * FROM document WHERE %s AND (archived_at IS NULL OR archived_at = '')", KNOWLEDGE_MEMBER_WHERE
+    )
     if tier != nil then
-        query = query .. " WHERE tier = " .. tostring(tonumber(tier))
+        query = query .. " AND tier = " .. tostring(tonumber(tier))
     end
     query = query .. " ORDER BY heat DESC, retrieval_count DESC;"
     rows = db.query(db_path, query)
@@ -741,78 +580,16 @@ function knowledge.list_notes(db_path, tier)
         return {}
     end
     for _, row in ipairs(rows) do
-        row.effective_heat = knowledge.effective_heat(tonumber(row.heat), row.last_retrieved_at)
+        row.effective_heat = document.effective_heat(tonumber(row.heat), row.last_retrieved_at)
     end
     return rows
 end
 
-function knowledge.set_tier(db_path, note_id, tier)
+function knowledge.set_tier(db_path, document_id, tier)
     db.exec(db_path, string.format(
-        "UPDATE knowledge_note SET tier = %d, updated_at = %s WHERE id = %d;",
-        tonumber(tier), db.now_expr(db_path), tonumber(note_id)
+        "UPDATE document SET tier = %d, updated_at = %s WHERE id = %d;",
+        tonumber(tier), db.now_expr(db_path), tonumber(document_id)
     ))
-end
-
--- Materializes a promotable note into a real Notebook page (task #87's
--- "durable artifact" layer -- the source Fossil-fork design describes
--- this, but this port never built it: `promote` above was always just
--- a tier number change). Tagged back onto the note via
--- artifact_document_id/artifact_status so a note is never
--- materialized twice. This is the one genuinely mutating knowledge
--- operation, so it's registered as a destructive AGENT_TOOLS entry
--- (see agent.lua) -- the agent can propose it, but nothing is written
--- until a human approves the pending action, same as entity.create/
--- document.update.
-function knowledge.materialize_note(db_path, note_id, author)
-    note = knowledge.get_note(db_path, note_id)
-    if note == nil then
-        return nil, "no such note #" .. tostring(note_id)
-    end
-    if note.artifact_status == "materialized" then
-        return nil, "note #" .. tostring(note_id) .. " is already materialized (document #" .. tostring(note.artifact_document_id) .. ")"
-    end
-    -- note.duplicate_of comes back as "" (not Lua nil) for a genuinely
-    -- NULL column under this sqlite binding -- confirmed directly (a
-    -- note with duplicate_of never set still tripped a bare `!= nil`
-    -- check here until this was added; `knowledge show`'s own
-    -- tostring(note.duplicate_of) prints nothing, not the literal
-    -- string "nil", on the exact same row).
-    if note.duplicate_of != nil and note.duplicate_of != "" then
-        return nil, "note #" .. tostring(note_id) .. " is a duplicate, refusing to materialize"
-    end
-    if tonumber(note.tier) < 2 then
-        return nil, "note #" .. tostring(note_id) .. " is tier " .. tostring(note.tier) .. " -- only tier 2/3 notes are ready to materialize"
-    end
-
-    title = note.title
-    if title == nil or title == "" then
-        title = "Knowledge note #" .. tostring(note_id)
-    end
-    document_id, issues = document.create_page(db_path, author, title, nil, note.body, nil)
-    if document_id == nil then
-        -- entity.create's own issues shape (a list of {field, severity,
-        -- message} tables, not a string) -- flattened here rather than
-        -- leaking that shape to this function's own callers (the CLI
-        -- and the agent tool dispatch both just want a plain message).
-        messages = {}
-        if issues != nil then
-            for _, issue in ipairs(issues) do
-                if issue.severity == "error" then
-                    table.insert(messages, tostring(issue.message))
-                end
-            end
-        end
-        if #messages == 0 then
-            return nil, "failed to create the materialized page"
-        end
-        return nil, table.concat(messages, "; ")
-    end
-
-    db.exec(db_path, string.format(
-        "UPDATE knowledge_note SET artifact_document_id = %d, artifact_status = 'materialized', updated_at = %s WHERE id = %d;",
-        document_id, db.now_expr(db_path), tonumber(note_id)
-    ))
-    return document_id
 end
 
 --------------------------------------------------------------------------
@@ -833,7 +610,7 @@ function knowledge.do_knowledge(cmd_args, db_path)
 
     if action == "list" then
         tier = tonumber(cmd_args[2])
-        rows = knowledge.list_notes(db_path, tier)
+        rows = knowledge.list_documents(db_path, tier)
         for _, row in ipairs(rows) do
             print(string.format("#%s [tier %s] %s (heat=%s, effective=%.2f, retrievals=%s)",
                 tostring(row.id), tostring(row.tier), tostring(row.title), tostring(row.heat),
@@ -843,56 +620,43 @@ function knowledge.do_knowledge(cmd_args, db_path)
     end
 
     if action == "show" then
-        note_id = tonumber(cmd_args[2])
-        if note_id == nil then
-            print("Usage: platform knowledge show <note_id>")
+        document_id = tonumber(cmd_args[2])
+        if document_id == nil then
+            print("Usage: platform knowledge show <document_id>")
             return
         end
-        note = knowledge.get_note(db_path, note_id)
-        if note == nil then
-            print("Error: no such note #" .. tostring(note_id))
+        doc = knowledge.get_document(db_path, document_id)
+        if doc == nil then
+            print("Error: no such document #" .. tostring(document_id))
             return
         end
-        print("id: " .. tostring(note.id))
-        print("tier: " .. tostring(note.tier))
-        print("title: " .. tostring(note.title))
-        print("heat: " .. tostring(note.heat) .. " (effective: " .. string.format("%.2f", note.effective_heat) .. ")")
-        print("retrieval_count: " .. tostring(note.retrieval_count))
-        print("source: " .. tostring(note.source_type) .. " #" .. tostring(note.source_id))
-        print("duplicate_of: " .. tostring(note.duplicate_of))
+        print("id: " .. tostring(doc.id))
+        print("tier: " .. tostring(doc.tier))
+        print("title: " .. tostring(doc.title))
+        print("heat: " .. tostring(doc.heat) .. " (effective: " .. string.format("%.2f", doc.effective_heat) .. ")")
+        print("retrieval_count: " .. tostring(doc.retrieval_count))
+        if doc.source_type != nil and doc.source_type != "" then
+            print("source: " .. tostring(doc.source_type) .. " #" .. tostring(doc.source_id))
+        end
+        print("duplicate_of: " .. tostring(doc.duplicate_of))
         print("body:")
-        print(tostring(note.body))
+        print(tostring(doc.content))
         return
     end
 
     if action == "promote" then
-        note_id = tonumber(cmd_args[2])
+        document_id = tonumber(cmd_args[2])
         tier = tonumber(cmd_args[3])
-        if note_id == nil or tier == nil then
-            print("Usage: platform knowledge promote <note_id> <tier>")
+        if document_id == nil or tier == nil then
+            print("Usage: platform knowledge promote <document_id> <tier>")
             return
         end
-        knowledge.set_tier(db_path, note_id, tier)
-        print("Note #" .. tostring(note_id) .. " set to tier " .. tostring(tier))
+        knowledge.set_tier(db_path, document_id, tier)
+        print("Document #" .. tostring(document_id) .. " set to tier " .. tostring(tier))
         return
     end
 
-    if action == "materialize" then
-        note_id = tonumber(cmd_args[2])
-        if note_id == nil then
-            print("Usage: platform knowledge materialize <note_id>")
-            return
-        end
-        document_id, err = knowledge.materialize_note(db_path, note_id, os.getenv("USER"))
-        if document_id == nil then
-            print("Error: " .. tostring(err))
-            return
-        end
-        print("Note #" .. tostring(note_id) .. " materialized as document #" .. tostring(document_id))
-        return
-    end
-
-    print("Usage: platform knowledge <stats|list [tier]|show <note_id>|promote <note_id> <tier>|materialize <note_id>|review>")
+    print("Usage: platform knowledge <stats|list [tier]|show <document_id>|promote <document_id> <tier>>")
 end
 
 return knowledge
