@@ -132,3 +132,23 @@ teardown() {
     run "$BIN" entity list reagent
     [[ "$output" =~ "#1" ]]
 }
+
+@test "entity external-ids returns a real {external_id: id} map, for an external importer's own dedup check" {
+    "$BIN" entity create reagent lot_number=LOT-1 concentration=5 external_id=ext-abc-123
+    "$BIN" entity create reagent lot_number=LOT-2 concentration=10 external_id=ext-xyz-456
+    "$BIN" entity create reagent lot_number=LOT-3 concentration=15
+
+    run "$BIN" entity external-ids reagent
+    [[ "$output" =~ '"ext-abc-123":1' ]]
+    [[ "$output" =~ '"ext-xyz-456":2' ]]
+    # The third row has no external_id -- never shows up as a key at all.
+    [[ ! "$output" =~ "LOT-3" ]]
+}
+
+@test "entity external-ids returns an empty result for an unregistered entity type, not an error" {
+    run "$BIN" entity external-ids nonexistent_type
+    [ "$status" -eq 0 ]
+    # dkjson encodes an empty Lua table as "[]" (can't distinguish empty
+    # object from empty array) -- still a valid, empty JSON result either way.
+    [ "$output" = "{}" ] || [ "$output" = "[]" ]
+}

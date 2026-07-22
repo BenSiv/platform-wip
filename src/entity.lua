@@ -791,6 +791,42 @@ function entity.do_entity(cmd_args, db_path)
         return
     end
 
+    -- {external_id: id} for every row of `entity_type` that has one --
+    -- a real, backend-agnostic (SQLite or MariaDB, via db.lua's own
+    -- dispatch) read path an external importer can use to detect "does
+    -- a row for this source record already exist" and upsert instead of
+    -- blindly re-creating it every run. Added because a prior version
+    -- of that dedup logic (import_data_rest.py's own
+    -- load_existing_external_ids) read a hardcoded, stale SQLite file
+    -- path left over from before the fossci->platform-wip rename --
+    -- that path never existed once this deployment moved to MariaDB,
+    -- silently breaking dedup and causing every entity type to be
+    -- re-created wholesale on every sync run (confirmed live: ~4x
+    -- duplication of every table over 4 days before this was found).
+    -- Every row regardless of archived_at -- an archived row's
+    -- external_id is still "already imported," not fair game to
+    -- recreate.
+    if action == "external-ids" then
+        entity_type = cmd_args[2]
+        if entity_type == nil then
+            print("Usage: fossci entity external-ids <type>")
+            return
+        end
+        result = {}
+        if db.table_exists(db_path, entity_type) then
+            rows = db.query(db_path, string.format(
+                "SELECT external_id, id FROM %s WHERE external_id IS NOT NULL AND external_id != '';", entity_type
+            ))
+            if rows != nil then
+                for _, row in ipairs(rows) do
+                    result[row.external_id] = tonumber(row.id)
+                end
+            end
+        end
+        print(json.encode(result))
+        return
+    end
+
     if action == "create-json" then
         entity_type = cmd_args[2]
         if entity_type == nil then
@@ -846,7 +882,7 @@ function entity.do_entity(cmd_args, db_path)
         return
     end
 
-    print("Usage: fossci entity <create|list|show|update|validate-json|create-json|update-json> [args]")
+    print("Usage: fossci entity <create|list|show|update|validate-json|create-json|update-json|external-ids> [args]")
 end
 
 -- CLI entry point: `fossci extension <list|show|approve|revoke|run-pending> [args]`
