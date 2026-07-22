@@ -13,6 +13,7 @@ document = require("document")
 knowledge = require("knowledge")
 agent = require("agent")
 multipart = require("multipart")
+label = require("label")
 
 cgi = {}
 
@@ -215,6 +216,19 @@ function require_csrf(cookies, form_token)
         submitted = form_token
     end
     return auth.verify_csrf(cookies.csrf, submitted)
+end
+
+-- task #73: a schema can declare admin_write_only = true (checked the
+-- same way any other entity type could -- schema.admin_write_only
+-- isn't special-cased to a specific type name here). Applied at every
+-- entity-write route (create/update/archive/unarchive), not just
+-- label_template's own -- any current or future type that sets the
+-- flag gets the same gate for free.
+function require_write_capability(db_path, capabilities, entity_type)
+    if schema.admin_write_only(db_path, entity_type) == false then
+        return true
+    end
+    return cgi.has_capability(capabilities, "a")
 end
 
 function handle_autocomplete(db_path, params)
@@ -466,6 +480,8 @@ function cgi.handle_request()
         allowed_vendor_assets = {
             ["toastui-editor-all.min.js"] = {path = "toastui/toastui-editor-all.min.js", content_type = "application/javascript"},
             ["toastui-editor.min.css"] = {path = "toastui/toastui-editor.min.css", content_type = "text/css"},
+            -- task #73
+            ["BrowserPrint-3.0.216.min.js"] = {path = "browserprint/BrowserPrint-3.0.216.min.js", content_type = "application/javascript"},
         }
         asset = allowed_vendor_assets[params.name]
         if asset == nil then
@@ -654,11 +670,35 @@ function cgi.handle_request()
         end
 
         history = ledger.history(db_path, entity_id)
-        body = html.render_detail(db_path, entity_type, layout, row, history, nonce)
+        has_label_template = label.has_template(db_path, entity_type)
+        body = html.render_detail(db_path, entity_type, layout, row, history, nonce, has_label_template)
         page_context = {page_type = "entity_detail", entity_type = entity_type, entity_id = entity_id,
                          title = entity_type .. " #" .. tostring(entity_id)}
         return print_response("200 OK", "text/html",
             html.page_shell(entity_type .. " #" .. tostring(entity_id), "data", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author, page_context))
+    end
+
+    -- task #73: same visibility as /detail (viewing/printing a label
+    -- isn't a data mutation -- only creating/editing the template
+    -- itself needs Admin, enforced on the label_template entity's own
+    -- write routes above). Plain text, not HTML -- the client JS fetches
+    -- this as a raw string and hands it straight to the printer, never
+    -- renders it.
+    if path_info == "/label" then
+        entity_type = params.type
+        entity_id = tonumber(params.entity_id)
+        if entity_type == nil or entity_type == "" or entity_id == nil then
+            return print_response("400 Bad Request", "text/plain", "Missing 'type' or 'entity_id' parameter")
+        end
+        if not schema.valid_name_syntax(entity_type) then
+            return print_response("400 Bad Request", "text/plain", "Invalid 'type' parameter")
+        end
+
+        zpl, err = label.render(db_path, entity_type, entity_id)
+        if zpl == nil then
+            return print_response("404 Not Found", "text/plain", tostring(err))
+        end
+        return print_response("200 OK", "text/plain", zpl)
     end
 
     if path_info == "/view" then
@@ -1255,6 +1295,9 @@ function cgi.handle_request()
         if not schema.valid_name_syntax(entity_type) then
             return print_response("400 Bad Request", "application/json", json.encode({error = "Invalid type"}))
         end
+        if not require_write_capability(db_path, capabilities, entity_type) then
+            return print_response("403 Forbidden", "application/json", json.encode({error = "Admin capability required to write this entity type"}))
+        end
         input = io.read("*all")
         rows_values, _, err = json.decode(input)
         if rows_values == nil then
@@ -1285,6 +1328,9 @@ function cgi.handle_request()
         end
         if not schema.valid_name_syntax(entity_type) then
             return print_response("400 Bad Request", "application/json", json.encode({error = "Invalid type"}))
+        end
+        if not require_write_capability(db_path, capabilities, entity_type) then
+            return print_response("403 Forbidden", "application/json", json.encode({error = "Admin capability required to write this entity type"}))
         end
         input = io.read("*all")
         values, _, err = json.decode(input)
@@ -1321,6 +1367,9 @@ function cgi.handle_request()
         if not schema.valid_name_syntax(entity_type) then
             return print_response("400 Bad Request", "application/json", json.encode({error = "Invalid type"}))
         end
+        if not require_write_capability(db_path, capabilities, entity_type) then
+            return print_response("403 Forbidden", "application/json", json.encode({error = "Admin capability required to write this entity type"}))
+        end
 
         archived_id, issues = entity.archive(db_path, entity_type, entity_id, author, source_from_params(params), params.reason)
         response = {issues = issues}
@@ -1344,6 +1393,9 @@ function cgi.handle_request()
         end
         if not schema.valid_name_syntax(entity_type) then
             return print_response("400 Bad Request", "application/json", json.encode({error = "Invalid type"}))
+        end
+        if not require_write_capability(db_path, capabilities, entity_type) then
+            return print_response("403 Forbidden", "application/json", json.encode({error = "Admin capability required to write this entity type"}))
         end
 
         unarchived_id, issues = entity.unarchive(db_path, entity_type, entity_id, author, source_from_params(params))

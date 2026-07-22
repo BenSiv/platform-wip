@@ -10,7 +10,7 @@ lfs = require("lfs")
 
 schema = {}
 
-FIELD_TYPES = {"text", "number", "date", "select", "reference", "multi_select", "multi_reference"}
+FIELD_TYPES = {"text", "number", "date", "select", "reference", "multi_select", "multi_reference", "sql_select"}
 
 -- Field types stored in a companion junction table (schema.
 -- ensure_multi_field_table) instead of as a column on the entity's own
@@ -187,6 +187,10 @@ SQL_TYPE = {
     date = "TEXT",
     select = "TEXT",
     reference = "INTEGER",
+    -- task #73: a plain TEXT column like "text" -- the only difference
+    -- is entity.validate's value check (must be a single plain SELECT,
+    -- see view.is_select_only), not storage.
+    sql_select = "TEXT",
 }
 
 function is_valid_field_type(t)
@@ -251,6 +255,15 @@ function schema.validate(def)
     end
     if def.require_reason_on_archive != nil and def.require_reason_on_archive != true and def.require_reason_on_archive != false then
         return string.format("schema '%s': 'require_reason_on_archive' must be true or false", def.name)
+    end
+    -- task #73: another type-level opt-in flag, same shape as the two
+    -- above -- a schema can require Admin capability to create/update/
+    -- archive rows of this type (e.g. label_template, whose `sql_select`
+    -- field is genuinely executable). Anyone can still read/view rows
+    -- of the type; this only gates writes. Enforced in cgi.lua, not
+    -- here (schema.lua has no notion of an HTTP session/capability).
+    if def.admin_write_only != nil and def.admin_write_only != true and def.admin_write_only != false then
+        return string.format("schema '%s': 'admin_write_only' must be true or false", def.name)
     end
     for i, field in ipairs(def.fields) do
         if type(field.name) != "string" or field.name == "" then
@@ -320,8 +333,8 @@ function ensure_entity_field_display_column(db_path)
 end
 
 -- entity_type predates the require_reason_on_update/require_reason_on_
--- archive flags (task #93) -- same reasoning/pattern as
--- ensure_entity_field_display_column just above.
+-- archive flags (task #93) and admin_write_only (task #73) -- same
+-- reasoning/pattern as ensure_entity_field_display_column just above.
 function ensure_entity_type_reason_flag_columns(db_path)
     existing = db.get_columns(db_path, "entity_type")
     have = {}
@@ -333,6 +346,9 @@ function ensure_entity_type_reason_flag_columns(db_path)
     end
     if have["require_reason_on_archive"] == nil then
         db.exec(db_path, "ALTER TABLE entity_type ADD COLUMN require_reason_on_archive INTEGER DEFAULT 0;")
+    end
+    if have["admin_write_only"] == nil then
+        db.exec(db_path, "ALTER TABLE entity_type ADD COLUMN admin_write_only INTEGER DEFAULT 0;")
     end
 end
 
@@ -356,9 +372,13 @@ function schema.register(db_path, def)
     if def.require_reason_on_archive == true then
         require_reason_on_archive_flag = 1
     end
+    admin_write_only_flag = 0
+    if def.admin_write_only == true then
+        admin_write_only_flag = 1
+    end
     db.exec(db_path, string.format(
-        "UPDATE entity_type SET require_reason_on_update = %d, require_reason_on_archive = %d WHERE name = %s;",
-        require_reason_on_update_flag, require_reason_on_archive_flag, db.quote(def.name)
+        "UPDATE entity_type SET require_reason_on_update = %d, require_reason_on_archive = %d, admin_write_only = %d WHERE name = %s;",
+        require_reason_on_update_flag, require_reason_on_archive_flag, admin_write_only_flag, db.quote(def.name)
     ))
 
     for i, field in ipairs(def.fields) do
@@ -839,6 +859,19 @@ function schema.reason_flags(db_path, entity_type)
         require_on_update = tonumber(rows[1].require_reason_on_update) == 1,
         require_on_archive = tonumber(rows[1].require_reason_on_archive) == 1,
     }
+end
+
+-- task #73: whether writes (create/update/archive) to this entity type
+-- require Admin capability -- checked in cgi.lua, which has the HTTP
+-- session's capabilities in scope (schema.lua/entity.lua don't).
+function schema.admin_write_only(db_path, entity_type)
+    rows = db.query(db_path, string.format(
+        "SELECT admin_write_only FROM entity_type WHERE name = %s;", db.quote(entity_type)
+    ))
+    if rows == nil or rows[1] == nil then
+        return false
+    end
+    return tonumber(rows[1].admin_write_only) == 1
 end
 
 -- The registered field list for an entity type, in declaration order --

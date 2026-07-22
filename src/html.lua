@@ -1302,7 +1302,7 @@ end
 
 -- Detail view: current field values plus the full ledger history for
 -- one entity. Also pure server-rendered HTML, no JS.
-function html.render_detail(db_path, entity_type, layout, row, history, nonce)
+function html.render_detail(db_path, entity_type, layout, row, history, nonce, has_label_template)
     if nonce == nil then
         nonce = ""
     end
@@ -1312,6 +1312,14 @@ function html.render_detail(db_path, entity_type, layout, row, history, nonce)
     title_id_part = "#" .. id_str
     if own_label != nil then
         title_id_part = html.html_escape(own_label) .. " (#" .. id_str .. ")"
+    end
+
+    print_label_html = ""
+    print_label_js_block = ""
+    if has_label_template == true then
+        print_label_html = label_print_button_html()
+        print_label_js_block = string.format("<script src=\"vendor?name=BrowserPrint-3.0.216.min.js\" nonce=\"%s\"></script>", nonce) ..
+            label_print_js(nonce, entity_type, id_str)
     end
 
     fields_html = ""
@@ -1381,12 +1389,17 @@ function html.render_detail(db_path, entity_type, layout, row, history, nonce)
         .fossci-entity-ref { color: var(--fossci-accent, #4f46e5); text-decoration: none; font-weight: 600; }
         .fossci-entity-ref::after { content: " \2197"; font-size: 0.85em; }
         .fossci-entity-ref:hover { text-decoration: underline; }
+        .fossci-print-label { display: inline-flex; align-items: center; gap: 8px; margin-left: 16px; }
+        .fossci-print-label select { padding: 6px 10px; border-radius: var(--fossci-radius-sm, 8px); border: 1px solid var(--fossci-border, #e2e8f0); }
+        #fossci-print-label-status { font-size: 0.85rem; color: var(--fossci-muted, #64748b); }
+        #fossci-print-label-status.fossci-admin-message-error { color: #991b1b; }
     </style>
     %s
     <div class="fossci-container">
         <div class="fossci-header">
             <h2>%s %s</h2>
             <a href="browse?type=%s">&larr; Back to browse</a>
+            %s
         </div>
 
         <div class="fossci-detail-fields">
@@ -1403,7 +1416,87 @@ function html.render_detail(db_path, entity_type, layout, row, history, nonce)
     </div>
 </div>
 %s
-""", escaped_type, title_id_part, fossci_container_css(1200), html.popover_css(), escaped_type, title_id_part, escaped_type, fields_html, history_rows, html.popover_js(nonce))
+%s
+""", escaped_type, title_id_part, fossci_container_css(1200), html.popover_css(), escaped_type, title_id_part, escaped_type, print_label_html, fields_html, history_rows, html.popover_js(nonce), print_label_js_block)
+end
+
+-- task #73: markup for the print-label control, only ever emitted when
+-- a label_template row exists for this entity_type (has_label_template,
+-- computed by cgi.lua's /detail route -- see label.has_template).
+function label_print_button_html()
+    return """
+<div class="fossci-print-label">
+    <select id="fossci-label-printer"></select>
+    <button type="button" id="fossci-print-label-btn" class="btn btn-secondary">Print Label</button>
+    <span id="fossci-print-label-status"></span>
+</div>
+"""
+end
+
+-- Discovers local Zebra printers via the vendored Browser Print SDK
+-- (loaded separately, see render_detail) and sends this entity's
+-- rendered ZPL (fetched from /label, task #73) to whichever one is
+-- selected. `nonce` must be Fossil's own per-request CSP nonce (see
+-- html.popover_js's own comment) since this emits an inline <script>.
+function label_print_js(nonce, entity_type, entity_id)
+    return string.format("""
+<script nonce="%s">
+(function(){
+    var select = document.getElementById('fossci-label-printer');
+    var btn = document.getElementById('fossci-print-label-btn');
+    var status = document.getElementById('fossci-print-label-status');
+    var devices = [];
+
+    function showStatus(msg, isError){
+        status.textContent = msg;
+        status.className = isError ? 'fossci-admin-message-error' : '';
+    }
+
+    if(typeof BrowserPrint === 'undefined'){
+        showStatus('Zebra Browser Print not detected -- install it from zebra.com/us/en/support-downloads/software/printer-setup-utilities/browser-print.html and reload this page.', true);
+        btn.disabled = true;
+        return;
+    }
+
+    BrowserPrint.getLocalDevices(function(deviceList){
+        devices = deviceList || [];
+        select.innerHTML = '';
+        if(devices.length === 0){
+            showStatus('No local Zebra printers found.', true);
+            btn.disabled = true;
+            return;
+        }
+        devices.forEach(function(d, i){
+            var opt = document.createElement('option');
+            opt.value = i;
+            opt.textContent = d.name;
+            select.appendChild(opt);
+        });
+    }, function(){
+        showStatus('Could not reach Zebra Browser Print -- is the app running?', true);
+        btn.disabled = true;
+    }, 'printer');
+
+    btn.addEventListener('click', function(){
+        var device = devices[parseInt(select.value, 10)];
+        if(!device){ showStatus('No printer selected.', true); return; }
+        showStatus('Printing...', false);
+        fetch('label?type=%s&entity_id=%s').then(function(resp){
+            if(!resp.ok){ throw new Error('label render failed'); }
+            return resp.text();
+        }).then(function(zpl){
+            device.send(zpl, function(){
+                showStatus('Sent to ' + device.name + '.', false);
+            }, function(err){
+                showStatus('Print failed: ' + err, true);
+            });
+        }).catch(function(){
+            showStatus('Could not fetch label content.', true);
+        });
+    });
+})();
+</script>
+""", nonce, entity_type, entity_id)
 end
 
 -- Generic view: any approved custom SQL view rendered as a table.

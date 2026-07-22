@@ -19,6 +19,14 @@ function is_mariadb(db_path)
     return type(db_path) == "table"
 end
 
+-- Public alias -- other modules that need to branch on backend (e.g.
+-- view.lua's parameterized-query dispatch, task #73) go through this
+-- rather than each re-deriving db_path's shape convention for
+-- themselves.
+function db.is_mariadb(db_path)
+    return is_mariadb(db_path)
+end
+
 function db.query(db_path, query, ...)
     if is_mariadb(db_path) then
         return database.mariadb_query(db_path, query, ...)

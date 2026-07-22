@@ -13,6 +13,7 @@ schema = require("schema")
 config = require("config")
 extension = require("extension")
 json = require("dkjson")
+view = require("view")
 
 entity = {}
 
@@ -213,6 +214,16 @@ function entity.validate(db_path, entity_type, values, old)
                     table.insert(issues, {field = field.name, severity = "error",
                         message = "references a nonexistent " .. ref_type .. " entity"})
                 end
+            end
+
+            -- task #73: genuinely executable field (label_template.sql
+            -- and any future schema that reuses this type) -- reject
+            -- anything but a single plain SELECT before it ever reaches
+            -- the ledger. Re-checked again at render time (label.lua),
+            -- not trusted from storage alone.
+            if field.type == "sql_select" and view.is_select_only(value) == false then
+                table.insert(issues, {field = field.name, severity = "error",
+                    message = "must be a single, plain SELECT statement (no ';', no DDL/DML/pragma)"})
             end
         end
     end

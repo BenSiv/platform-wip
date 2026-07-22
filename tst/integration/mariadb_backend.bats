@@ -138,6 +138,47 @@ EOF
     [[ ! "$output" =~ "bad argument" ]]
 }
 
+@test "a parameterized view runs correctly against a real MariaDB backend, not just SQLite (task #73)" {
+    # Found while building label printing (task #73): view.run's
+    # parameterized path called sqlite3.prepare/stmt.bind directly,
+    # bypassing db.lua's backend dispatch entirely -- worked for SQLite,
+    # but luam's MariaDB binding "deliberately does NOT expose a
+    # prepared-statement/cursor object" at all (lib/mariadb/lmariadb.c's
+    # own header comment), so a parameterized view had no working path
+    # on MariaDB whatsoever. No existing test caught this. Fixed via
+    # view.run_sql, dispatching by backend.
+    "$BIN" init
+    mkdir -p schemas views
+    cat > schemas/reagent.lua <<'EOF'
+return {
+  name = "reagent",
+  fields = { {name = "lot_number", type = "text", required = true} },
+}
+EOF
+    "$BIN" schema add schemas/reagent.lua
+    "$BIN" entity create reagent lot_number=LOT-1
+    "$BIN" entity create reagent lot_number=LOT-2
+
+    cat > views/by_id.lua <<'EOF'
+return {
+    name = "by_id",
+    sql = "SELECT lot_number FROM reagent WHERE id = ?",
+    columns = {{name = "lot_number"}},
+    param = {name = "entity_id", type = "integer"},
+}
+EOF
+    "$BIN" view approve by_id
+
+    read TEST_SESSION_COOKIE TEST_CSRF_TOKEN < <(login_test_user "viewuser" "is")
+    GATEWAY_INTERFACE="CGI/1.1" REQUEST_METHOD="GET" PATH_INFO="/view" QUERY_STRING="view_name=by_id&entity_id=1" \
+        HTTP_COOKIE="session=${TEST_SESSION_COOKIE}; csrf=${TEST_CSRF_TOKEN}" run "$BIN"
+    [[ "$output" =~ "200 OK" ]]
+    [[ "$output" =~ "LOT-1" ]]
+    [[ ! "$output" =~ "LOT-2" ]]
+    [[ ! "$output" =~ "Internal Server Error" ]]
+    [[ ! "$output" =~ "bad argument" ]]
+}
+
 @test "concurrent entity creates never collide on entity_id or leave one NULL against MariaDB (task #77)" {
     "$BIN" init
     mkdir -p schemas

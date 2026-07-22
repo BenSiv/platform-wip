@@ -40,6 +40,7 @@ return {
 | `reference` | points at another record by id, optionally constrained to a specific record type |
 | `multi_select` | several values from a fixed `values` list or named `dropdown` |
 | `multi_reference` | several links to another record type by id |
+| `sql_select` | a `text`-shaped value that must be a single, plain `SELECT` statement (no `;`, no DDL/DML/pragma) -- see "Label printing" below for the built-in type that uses it |
 
 A `number` field may optionally declare `min`/`max` -- wired into the
 registration form's number input (bounding its native spinner arrows),
@@ -115,6 +116,61 @@ schema file that happened to inline the same list. This is purely a
 literal-value mechanism -- no foreign key, no entity type involved --
 entirely separate from `reference`/`multi_reference`, which are real
 entity links.
+
+## Type-level flags -- `admin_write_only`
+
+A definition can opt into `admin_write_only = true` at the top level
+(alongside `name`/`fields`), requiring Admin capability to
+create/update/archive any row of that type (checked in `cgi.lua`'s
+entity-write routes, not here -- schema.lua has no notion of an HTTP
+session). Anyone can still read/view rows of the type; this only gates
+writes. Meant for record types whose data is itself sensitive or
+consequential in a way ordinary lab records aren't -- see
+`label_template` below, the first real consumer.
+
+## Label printing (`label_template`)
+
+Label printing prints a physical barcode/ID label (ZPL, Zebra
+Programming Language) for one record, via the Zebra Browser Print
+desktop app's local JS SDK. A label template is a real, ledgered
+record of a built-in type, `label_template` -- not a config file --
+created/edited the same way any other record is (`/register`,
+`/detail`), so editing a label's query or ZPL body is exactly as
+auditable as editing a sample:
+
+```lua
+-- schemas/label_template.lua
+return {
+  name = "label_template",
+  admin_write_only = true,
+  fields = {
+    {name = "for_entity_type", type = "text",       required = true},
+    {name = "sql",             type = "sql_select",  required = true},
+    {name = "zpl",             type = "text",        required = true},
+  },
+}
+```
+
+- `for_entity_type`: which record type's `/detail` page shows the
+  "Print Label" button (e.g. `"sample"` -- matches a real schema name).
+- `sql`: a single `SELECT` with exactly one `?` placeholder, bound to
+  the record's own id at print time. Column aliases become `{{token}}`
+  names the `zpl` body can reference. Any cross-record value (e.g. a
+  linked experiment's title) is just a `JOIN` in this query -- not a
+  separate mechanism, and not depth-limited the way a bespoke field-
+  path resolver would be.
+- `zpl`: raw ZPL; every `{{column_name}}` token is substituted from the
+  query's single result row. `^`/`~` are ZPL's own command-prefix
+  characters -- a substituted value containing either is stripped, not
+  left to corrupt the label (no ZPL string-escaping convention exists
+  to encode them safely instead).
+
+`sql`'s `sql_select` type means it's rejected at save time if it's
+anything but a plain `SELECT` (reusing the same check `views/*.lua`
+already uses) -- re-checked again at render time too, storage is never
+trusted alone. `admin_write_only` means only an Admin can create or
+edit a `label_template` row; anyone who can view a record's `/detail`
+page can still print it.
 
 ## Loading is sandboxed, not just a bare load
 

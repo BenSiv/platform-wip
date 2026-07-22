@@ -219,38 +219,89 @@ end
 -- view declares `param` (ignored otherwise). Returns (rows, err) --
 -- rows is a list of {column_name = value} tables either way.
 function view.run(db_path, def, param_value)
-    if view.is_select_only(def.sql) == false then
+    param_type = nil
+    if def.param != nil then
+        param_type = def.param.type
+    end
+    return view.run_sql(db_path, def.sql, param_type, param_value)
+end
+
+-- Runs a validated, parameterized SELECT: `sql_text` must contain
+-- exactly one literal '?' placeholder if `param_type` is non-nil.
+-- Returns (rows, err) -- rows is a list of {column_name = value}
+-- tables. Shared by view.run (named/approved views) and label.lua's
+-- label.render (task #73) -- one dual-backend-safe implementation,
+-- not two.
+--
+-- SQLite: real bind-parameter execution via sqlite3's own prepared-
+-- statement API -- never string-interpolated into the SQL text (db.
+-- exec/db.query's own %s substitution is fine for identifiers/
+-- literals fossci itself builds, but a runtime-supplied value needs
+-- the real thing). sqlite3 isn't shared as a global across modules in
+-- Luam (each require() gets its own reference; see src/db.lua for the
+-- same require), so it's pulled in locally here rather than assumed
+-- available.
+--
+-- MariaDB: no equivalent path exists. Confirmed directly in luam/lib/
+-- mariadb/lmariadb.c's own header comment -- the binding "deliberately
+-- does NOT expose a prepared-statement/cursor object" at all. Falls
+-- back to safely-encoded substitution instead: param_type is
+-- restricted to integer/number/text (view.validate already enforces
+-- this on param.type), so the substituted value is either a
+-- tonumber()-coerced literal (a number can never carry an injection
+-- payload, regardless of quoting) or db.quote()'d text (the same
+-- escaping helper trusted everywhere else in this codebase) --
+-- genuinely safe for these specific types, just not a real prepared
+-- statement. A real gap until this fix: parameterized views/label
+-- templates silently had no working path on MariaDB at all, and
+-- platform-prod is MariaDB-only.
+function view.run_sql(db_path, sql_text, param_type, param_value)
+    if view.is_select_only(sql_text) == false then
         return nil, "refusing to run: not a plain SELECT"
     end
 
-    if def.param == nil then
-        rows = db.query(db_path, def.sql)
+    if param_type == nil then
+        rows = db.query(db_path, sql_text)
         if rows == nil then
             return {}
         end
         return rows
     end
 
-    return run_parameterized(db_path, def, param_value)
-end
-
--- Real bind-parameter execution -- never string-interpolated into the
--- SQL text, unlike everything else in this file (db.exec/db.query's
--- own %s substitution is fine for identifiers/literals fossci itself
--- builds, but a runtime-supplied filter value needs the real thing).
--- sqlite3 isn't shared as a global across modules in Luam (each
--- require() gets its own reference; see src/db.lua for the same
--- require), so it's pulled in locally here rather than assumed
--- available.
-function run_parameterized(db_path, def, param_value)
     bind_value = param_value
-    if def.param.type == "integer" or def.param.type == "number" then
+    if param_type == "integer" or param_type == "number" then
         bind_value = tonumber(param_value)
         if bind_value == nil then
-            return nil, "parameter '" .. def.param.name .. "' must be a number"
+            return nil, "parameter must be a number"
         end
     elseif param_value == nil or param_value == "" then
-        return nil, "missing required parameter '" .. def.param.name .. "'"
+        return nil, "missing required parameter"
+    end
+
+    placeholder_count = 0
+    for _ in string.gmatch(sql_text, "%?") do
+        placeholder_count = placeholder_count + 1
+    end
+    if placeholder_count != 1 then
+        return nil, "sql doesn't have exactly one '?' placeholder"
+    end
+
+    if db.is_mariadb(db_path) then
+        literal = tostring(bind_value)
+        if param_type == "text" then
+            literal = db.quote(bind_value)
+        end
+        -- Plain (non-pattern) find + string.sub, not gsub -- gsub's
+        -- replacement argument treats a literal '%' specially (a
+        -- backreference escape), which real substituted text (e.g. a
+        -- lab_name containing '%') could easily contain.
+        pos = string.find(sql_text, "?", 1, true)
+        substituted = string.sub(sql_text, 1, pos - 1) .. literal .. string.sub(sql_text, pos + 1)
+        rows = db.query(db_path, substituted)
+        if rows == nil then
+            return {}
+        end
+        return rows
     end
 
     sqlite3 = require("sqlite3")
@@ -259,7 +310,7 @@ function run_parameterized(db_path, def, param_value)
         return nil, "cannot open database"
     end
 
-    vm, err = sqlite3.prepare(conn, def.sql)
+    vm, err = sqlite3.prepare(conn, sql_text)
     if vm == nil then
         sqlite3.close(conn)
         return nil, "invalid sql: " .. tostring(err)
@@ -267,7 +318,7 @@ function run_parameterized(db_path, def, param_value)
     if sqlite3.stmt.bind_parameter_count(vm) != 1 then
         sqlite3.stmt.finalize(vm)
         sqlite3.close(conn)
-        return nil, "view declares a param but sql doesn't have exactly one '?' placeholder"
+        return nil, "sql doesn't have exactly one '?' placeholder"
     end
 
     bind_rc = sqlite3.stmt.bind(vm, 1, bind_value)

@@ -148,6 +148,18 @@ function config.dropdowns_dir(root)
     return paths.joinpath(root, "dropdowns")
 end
 
+-- task #73: one file per entity type, each a `view`-shaped SQL query
+-- (see src/label.lua) plus a `zpl` template string. Lazily looked up by
+-- entity_type on /detail and /label, not eagerly scanned at boot the
+-- way dropdowns/schemas are -- nothing else references a label
+-- template the way a schema field references a dropdown.
+function config.label_templates_dir(root)
+    if root == nil then
+        root = config.find_root()
+    end
+    return paths.joinpath(root, "label_templates")
+end
+
 function config.session_secret_path(root)
     if root == nil then
         root = config.find_root()
