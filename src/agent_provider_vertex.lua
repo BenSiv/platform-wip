@@ -109,6 +109,25 @@ function vertex_post(model_and_method_path, payload_table)
     return response
 end
 
+-- `usageMetadata` (promptTokenCount/candidatesTokenCount/totalTokenCount)
+-- is a real field on every generateContent response -- task #87 needs
+-- real token accounting for knowledge_context, not just
+-- agent.estimate_tokens' char/4 heuristic (still used for compaction
+-- thresholding, unrelated). Absent entirely just means a nil-valued
+-- table, not an error -- older API versions or a malformed response
+-- shouldn't fail generation over accounting metadata.
+function usage_from_response(response)
+    meta = response.usageMetadata
+    if meta == nil then
+        return {prompt_tokens = nil, completion_tokens = nil, total_tokens = nil}
+    end
+    return {
+        prompt_tokens = meta.promptTokenCount,
+        completion_tokens = meta.candidatesTokenCount,
+        total_tokens = meta.totalTokenCount,
+    }
+end
+
 function agent_provider_vertex.generate(model, system_prompt, prompt)
     payload = {
         contents = {{role = "user", parts = {{text = prompt}}}},
@@ -128,7 +147,7 @@ function agent_provider_vertex.generate(model, system_prompt, prompt)
     if candidate.content == nil or candidate.content.parts == nil or candidate.content.parts[1] == nil then
         return nil, "empty response (finishReason: " .. tostring(candidate.finishReason) .. ")"
     end
-    return candidate.content.parts[1].text
+    return candidate.content.parts[1].text, nil, usage_from_response(response)
 end
 
 function agent_provider_vertex.embeddings(model, text)

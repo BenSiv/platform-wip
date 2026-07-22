@@ -1126,6 +1126,29 @@ function cgi.handle_request()
         return print_response("200 OK", "application/json", json.encode(chat_widget_state(db_path, body_data.session_id)))
     end
 
+    -- task #87: the user-feedback half of knowledge_chat_eval. Ownership-
+    -- checked the same way every other chat-widget route already is
+    -- (agent.get_session requires session.login == author) -- without
+    -- this, any authenticated user could record feedback against any
+    -- message_id just by guessing/incrementing it.
+    if path_info == "/api/chat-widget-feedback" and method == "POST" then
+        if not require_csrf(cookies) then
+            return print_response("403 Forbidden", "application/json", json.encode({error = "CSRF check failed"}))
+        end
+        input = io.read("*all")
+        body_data, _, err = json.decode(input)
+        if body_data == nil then
+            return print_response("400 Bad Request", "application/json", json.encode({error = "Invalid JSON: " .. tostring(err)}))
+        end
+        message_id = tonumber(body_data.message_id)
+        session_id = agent.message_session_id(db_path, message_id)
+        if session_id == nil or agent.get_session(db_path, session_id, author) == nil then
+            return print_response("404 Not Found", "application/json", json.encode({error = "no such message"}))
+        end
+        ok = knowledge.record_chat_feedback(db_path, message_id, body_data.feedback)
+        return print_response("200 OK", "application/json", json.encode({ok = ok}))
+    end
+
     if path_info == "/api/chat-widget-deny" and method == "POST" then
         if not require_csrf(cookies) then
             return print_response("403 Forbidden", "application/json", json.encode({error = "CSRF check failed"}))

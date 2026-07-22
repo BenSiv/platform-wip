@@ -29,6 +29,15 @@ do_document = document.do_document
 knowledge = require("knowledge")
 do_knowledge = knowledge.do_knowledge
 
+-- Required explicitly here (not left to load transitively via cgi's
+-- own require) even though knowledge.lua already depends on agent.lua
+-- for its own reasons -- knowledge.lua can't require agent.lua back
+-- itself (agent.lua requires knowledge.lua; a real circular require,
+-- not just an ordering nuisance), so the one thing that needs both --
+-- `platform knowledge review`, task #87 -- is dispatched from here
+-- instead of inside knowledge.do_knowledge.
+agent = require("agent")
+
 cgi = require("cgi")
 
 function main()
@@ -95,7 +104,28 @@ function main()
         return
     end
 
-    func(cmd_args, config.db_path("."))
+    db_path = config.db_path(".")
+
+    -- task #87: dispatched here, not inside knowledge.do_knowledge --
+    -- see the require("agent") comment above for why.
+    if command == "knowledge" and cmd_args[1] == "review" then
+        session_id, result = agent.run_knowledge_review(db_path, os.getenv("USER"), agent.default_model())
+        if session_id == nil then
+            print("Error: " .. tostring(result))
+            return
+        end
+        print("Review session: " .. tostring(session_id))
+        print("Status: " .. tostring(result.status))
+        if result.status == "pending_approval" then
+            print("Proposed: " .. tostring(result.tool) .. "." .. tostring(result.method) ..
+                " (pending action #" .. tostring(result.pending_id) .. ") -- approve/deny from the chat UI")
+        else
+            print(tostring(result.message))
+        end
+        return
+    end
+
+    func(cmd_args, db_path)
 end
 
 main()

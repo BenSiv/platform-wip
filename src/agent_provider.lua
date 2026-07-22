@@ -8,14 +8,22 @@
 
 agent_provider = {}
 
-function agent_provider.load()
+-- Same default-resolution as agent_provider.load() itself, split out
+-- so a caller that just wants the *name* (task #87's knowledge_chat_eval
+-- recording, e.g.) doesn't need to load/require the actual provider
+-- module to get it.
+function agent_provider.name()
     name = os.getenv("AGENT_PROVIDER")
     if name == nil or name == "" then
         name = "vertex"
     end
-    ok, mod = pcall(require, "agent_provider_" .. name)
+    return name
+end
+
+function agent_provider.load()
+    ok, mod = pcall(require, "agent_provider_" .. agent_provider.name())
     if ok == false or mod == nil then
-        return nil, "could not load agent provider '" .. name .. "': " .. tostring(mod)
+        return nil, "could not load agent provider '" .. agent_provider.name() .. "': " .. tostring(mod)
     end
     return mod
 end

@@ -21,6 +21,19 @@ agent = {}
 
 DEFAULT_COMPACTION_THRESHOLD = 4000
 MAX_TURNS = 10
+DEFAULT_MODEL = "gemini-2.5-flash"
+
+-- Same default cgi.lua's own chat routes already use (AGENT_MODEL env
+-- var, not hardcoded, since a real model name is a deployment choice)
+-- -- exposed here too so main.lua's CLI dispatch (task #87's `platform
+-- knowledge review`) doesn't need its own copy of the fallback.
+function agent.default_model()
+    model = os.getenv("AGENT_MODEL")
+    if model == nil or model == "" then
+        model = DEFAULT_MODEL
+    end
+    return model
+end
 
 AGENT_SCHEMA = """
 -- VARCHAR(255), not TEXT -- MariaDB/InnoDB refuses a bare TEXT column
@@ -178,6 +191,15 @@ end
 -- Messages
 --------------------------------------------------------------------------
 
+-- Fixed (task #87, in passing): this used to re-derive the new
+-- message's id via SELECT MAX(id), the exact same real concurrent-CGI
+-- race ledger.lua's append_create/append_update already had fixed
+-- under task #77 -- two simultaneous chat-message requests could both
+-- read the same MAX(id) and collide. db.exec's own second return
+-- value (last_insert_rowid()/insert_id) is read on the very same
+-- connection the insert itself just ran on, so it can't see another
+-- connection's insert regardless of timing. Needed correctly now that
+-- knowledge_context/knowledge_chat_eval key off this id directly.
 function agent.add_message(db_path, session_id, role, content, in_context)
     if in_context == nil then
         in_context = true
@@ -186,13 +208,12 @@ function agent.add_message(db_path, session_id, role, content, in_context)
     if in_context == true then
         in_context_flag = 1
     end
-    db.exec(db_path, string.format(
+    _, message_id = db.exec(db_path, string.format(
         "INSERT INTO agent_message (session_id, role, content, in_context) VALUES (%s, %s, %s, %d);",
         db.quote(session_id), db.quote(role), db.quote(content), in_context_flag
     ))
     agent.touch_session(db_path, session_id)
-    rows = db.query(db_path, "SELECT MAX(id) AS id FROM agent_message;")
-    return tonumber(rows[1].id)
+    return tonumber(message_id)
 end
 
 function agent.active_messages(db_path, session_id)
@@ -238,6 +259,21 @@ end
 
 -- Every message, active or compacted-away -- the full, never-deleted
 -- transcript, for a "show full history" view.
+-- task #87: which session a message belongs to, so /api/chat-widget-
+-- feedback can check ownership (via agent.get_session) before
+-- recording feedback -- without this, any authenticated user could
+-- submit feedback against any message_id, not just their own
+-- conversations, just by guessing/incrementing the id.
+function agent.message_session_id(db_path, message_id)
+    rows = db.query(db_path, string.format(
+        "SELECT session_id FROM agent_message WHERE id = %d;", tonumber(message_id)
+    ))
+    if rows == nil or rows[1] == nil then
+        return nil
+    end
+    return rows[1].session_id
+end
+
 function agent.all_messages(db_path, session_id)
     rows = db.query(db_path, string.format(
         "SELECT * FROM agent_message WHERE session_id = %s ORDER BY id ASC;",
@@ -311,12 +347,17 @@ function agent.compact_if_needed(db_path, session_id, system_prompt, model)
         summary_prompt = summary_prompt .. string.upper(msg.role) .. ": " .. msg.content .. "\n"
     end
 
-    summary, err = agent_provider.generate(model, "You are a concise summarizer.", summary_prompt)
+    summary, err, usage = agent_provider.generate(model, "You are a concise summarizer.", summary_prompt)
     if summary == nil or err != nil then
         return false, err
     end
 
-    agent.add_message(db_path, session_id, "compaction_summary", summary, true)
+    summary_message_id = agent.add_message(db_path, session_id, "compaction_summary", summary, true)
+    -- task #87: a real model call, same audit-trail bar as any chat
+    -- turn -- but not a knowledge_chat_eval candidate, since that
+    -- table classifies conversational *replies* the user actually
+    -- sees, and a compaction summary is never shown as one.
+    knowledge.record_context(db_path, session_id, summary_message_id, summary_prompt, model, nil, usage)
 
     ids = {}
     for _, msg in ipairs(to_compact) do
@@ -364,10 +405,15 @@ AGENT_TOOLS = {
         update = {destructive = true},
     },
     -- Read-only introspection into the knowledge pool's own tiering/
-    -- retrieval activity (see knowledge.lua) -- no destructive knowledge
-    -- tool yet, since note creation is retrieval-driven, not model-invoked.
+    -- retrieval activity (see knowledge.lua). `materialize` (task #87)
+    -- is the one destructive knowledge tool -- note creation itself is
+    -- still retrieval-driven, not model-invoked, but promoting a note
+    -- into a real durable page is a genuine write, so it needs the
+    -- same human-approval gate every other destructive tool has.
     knowledge = {
         stats = {destructive = false},
+        list = {destructive = false},
+        materialize = {destructive = true},
     },
 }
 
@@ -570,6 +616,44 @@ function agent.execute_tool(db_path, author, session_id, tool_name, method_name,
         )
     end
 
+    -- Read-only listing (task #87) -- exists so the agent-driven review
+    -- pass has a way to discover real note ids/tiers/artifact status
+    -- before ever proposing materialize; without this, materialize
+    -- would be unreachable in practice (nothing else surfaces note ids
+    -- to the model). Optional args.tier filters, same as the CLI.
+    if tool_name == "knowledge" and method_name == "list" then
+        rows = knowledge.list_notes(db_path, tonumber(args.tier))
+        if #rows == 0 then
+            return "No notes found."
+        end
+        lines = {}
+        for _, row in ipairs(rows) do
+            table.insert(lines, string.format(
+                "#%s [tier %s, %s] %s (heat=%.2f, retrievals=%s)",
+                tostring(row.id), tostring(row.tier), tostring(row.artifact_status), tostring(row.title),
+                row.effective_heat, tostring(row.retrieval_count)
+            ))
+        end
+        return table.concat(lines, "\n")
+    end
+
+    -- Destructive (task #87): materializes a knowledge_note into a
+    -- real Notebook page. A genuine write (a new document/entity_event
+    -- row), so this goes through the same pending-action approval flow
+    -- as document.create/entity.create -- the agent can propose it,
+    -- but nothing is written until a human approves.
+    if tool_name == "knowledge" and method_name == "materialize" then
+        note_id = tonumber(args.note_id)
+        if note_id == nil then
+            return nil, "materialize requires note_id"
+        end
+        document_id, err = knowledge.materialize_note(db_path, note_id, author)
+        if document_id == nil then
+            return nil, tostring(err)
+        end
+        return "Materialized note #" .. tostring(note_id) .. " as document #" .. tostring(document_id)
+    end
+
     return nil, "unknown tool: " .. tostring(tool_name) .. "." .. tostring(method_name)
 end
 
@@ -710,6 +794,8 @@ Available tools:
 - entity.create -- create a new entity row. Args: entity_type=<name>, plus one arg per field (e.g. status=open, due_date=2026-08-01)
 - entity.update -- update fields on an existing entity row. Args: entity_type=<name>, entity_id=<id>, reason=<optional: why this change is being made>, plus one arg per field to change. Some entity types require a reason -- if the tool result says one is required, ask the user why before retrying.
 - knowledge.stats -- summarize the knowledge pool's tier distribution and retrieval activity. No args.
+- knowledge.list -- list knowledge notes with their id, tier, artifact status, heat, and retrieval count. Args: tier=<optional, filter to one tier 0-3>
+- knowledge.materialize -- promote a tier 2 or 3 knowledge note into a real, durable Notebook page. Only do this for notes you're confident are genuinely useful and ready to be a durable reference, not every promotable note. Args: note_id=<id>. Requires human approval before anything is actually written.
 
 If you don't already know an entity type's fields, call entity.fields first rather than guessing field names.
 
@@ -760,18 +846,39 @@ function agent.run_turn(db_path, session_id, login, system_prompt, model, user_m
         active = agent.active_messages(db_path, session_id)
         prompt = build_history_prompt(active)
 
-        result, err = agent_provider.generate(model, system_prompt, prompt)
+        result, err, usage = agent_provider.generate(model, system_prompt, prompt)
         if result == nil then
             -- Persisted, not just returned -- every run_turn call site
             -- (chat-message, chat-widget-send/approve/deny) previously
             -- discarded this return value entirely, so a provider
             -- failure was completely invisible: the turn just vanished
             -- with no trace in the transcript.
-            agent.add_message(db_path, session_id, "tool_result", "ERROR: " .. tostring(err), true)
+            error_message_id = agent.add_message(db_path, session_id, "tool_result", "ERROR: " .. tostring(err), true)
+            -- task #87: still recorded even on failure -- what was
+            -- actually sent is exactly as much an audit fact as what
+            -- came back, and usage/reasoning simply don't apply here.
+            context_id = knowledge.record_context(db_path, session_id, error_message_id, prompt, model, nil, nil)
+            knowledge.record_chat_eval(db_path, session_id, context_id, error_message_id, agent_provider.name(), model, true, nil)
             return {status = "error", message = tostring(err)}
         end
 
-        agent.add_message(db_path, session_id, "assistant", result, true)
+        message_id = agent.add_message(db_path, session_id, "assistant", result, true)
+
+        -- task #87: persist the exact prompt/reasoning/tokens for this
+        -- turn. A reply that leaks visible reasoning (see
+        -- knowledge.reply_has_visible_reasoning) gets that reasoning
+        -- split out into its own knowledge_note (source_type=
+        -- 'reasoning') -- it then goes through the same tiering/
+        -- retrieval/decay pipeline as every other note, rather than
+        -- sitting in a second, parallel log only this table can see.
+        reasoning_note_id = nil
+        if knowledge.reply_has_visible_reasoning(result) then
+            reasoning_note_id = knowledge.create_note(db_path, 0,
+                "Chat reasoning (session " .. tostring(session_id) .. ")", result,
+                "reasoning", message_id, tostring(session_id))
+        end
+        context_id = knowledge.record_context(db_path, session_id, message_id, prompt, model, reasoning_note_id, usage)
+        knowledge.record_chat_eval(db_path, session_id, context_id, message_id, agent_provider.name(), model, false, result)
 
         done_message = string.match(result, "<done>%s*(.-)%s*</done>")
         if done_message != nil then
@@ -800,6 +907,43 @@ function agent.run_turn(db_path, session_id, login, system_prompt, model, user_m
     end
 
     return {status = "turn_limit", message = "Unable to complete tool-assisted run in " .. tostring(MAX_TURNS) .. " turns."}
+end
+
+-- task #87: the agent-driven review pass -- unlike knowledge.
+-- review_retrieval (rule-based: heading counts, content-hash matching,
+-- runs automatically after every real search), this is a genuine
+-- model call, judging which notes are actually ready to become a
+-- durable page, not just which ones cleared a numeric threshold. Not
+-- automatic on every search -- that would be a real, ongoing LLM cost
+-- for something that isn't time-critical -- triggered explicitly (CLI
+-- `platform knowledge review`, or a button on /knowledge).
+--
+-- Deliberately just a normal chat session/turn, not a separate
+-- pipeline: knowledge.materialize is a destructive tool, so a call to
+-- it here pauses for approval exactly like any user-initiated chat
+-- does (agent.run_turn's own pending_approval path) -- a human still
+-- has to approve every materialization from the resulting session in
+-- the normal chat UI, same as any other destructive tool call. This
+-- function only ever kicks the session off; it doesn't bypass
+-- approval to "run faster" as an internal process.
+KNOWLEDGE_REVIEW_SYSTEM_PROMPT = """
+You are reviewing this deployment's knowledge pool: notes captured from real retrieval activity, tiered by how often and how reliably they've proven useful (tier 0 raw intake, tier 1 working set, tier 2 curated draft, tier 3 atomic durable record). Heat decays over time, so tier and retrieval count alone don't guarantee current relevance -- effective_heat (from knowledge.list) reflects that.
+
+Use knowledge.list to see current notes: id, tier, artifact status, effective heat, retrieval count. For each tier 2 or 3 note with artifact_status "none" (not yet materialized), decide whether it is genuinely ready to become a durable Notebook page:
+- it should be atomic and well-formed, not something that still needs splitting or cleanup
+- it should be useful as a standalone reference, not just frequently retrieved by coincidence
+
+Call knowledge.materialize only for notes you're confident about. Materializing nothing this pass is a completely acceptable outcome -- do not materialize a note you're unsure about; say why you're leaving it alone instead. When you're done, summarize what you reviewed and what you did (or didn't) materialize, and end with a <done> message.
+"""
+
+function agent.run_knowledge_review(db_path, login, model)
+    session_id, err = agent.create_session(db_path, login, "Knowledge Pool Review")
+    if session_id == nil then
+        return nil, err
+    end
+    result = agent.run_turn(db_path, session_id, login, KNOWLEDGE_REVIEW_SYSTEM_PROMPT, model,
+        "Review the current knowledge pool and materialize any notes that are genuinely ready.")
+    return session_id, result
 end
 
 -- Executes an approved pending action, records its result, and resumes

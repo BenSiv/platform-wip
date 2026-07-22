@@ -3112,6 +3112,12 @@ function fossci_chat_widget_css()
 .fossci-chat-widget-empty { padding: 20px; text-align: center; color: var(--fossci-muted, #64748b); font-size: 0.85rem; }
 .fossci-chat-widget-thinking { padding: 8px 10px; color: var(--fossci-muted, #64748b); font-size: 0.85rem; font-style: italic; }
 .fossci-chat-widget-error { padding: 8px 10px; color: #991b1b; background: #fef2f2; border: 1px solid #fecaca; border-radius: var(--fossci-radius-sm, 8px); font-size: 0.85rem; margin: 4px 0; }
+.fossci-chat-feedback { display: flex; gap: 4px; margin: 2px 0 8px 0; }
+.fossci-chat-feedback button {
+    background: none; border: 1px solid transparent; border-radius: var(--fossci-radius-sm, 8px);
+    font-size: 0.85rem; padding: 1px 5px; cursor: pointer; line-height: 1.4; opacity: 0.6;
+}
+.fossci-chat-feedback button:hover { opacity: 1; border-color: var(--fossci-border, #e2e8f0); background: var(--fossci-bg-2, #f1f5f9); }
 """
 end
 
@@ -3175,6 +3181,16 @@ function html.render_chat_widget(nonce)
             state.messages.forEach(function(msg){
                 var label = ROLE_LABELS[msg.role] || msg.role;
                 html += '<div class="fossci-chat-msg fossci-chat-' + msg.role + '"><strong>' + escapeHtml(label) + ':</strong> ' + escapeHtml(msg.content) + '</div>';
+                // task #87: feedback only makes sense on a real answer --
+                // not on the user's own message, a tool result, or a
+                // compaction summary the user never actually sees as a
+                // "reply".
+                if (msg.role === 'assistant') {
+                    html += '<div class="fossci-chat-feedback" data-feedback-for="' + msg.id + '">' +
+                        '<button type="button" data-feedback-message="' + msg.id + '" data-feedback="up" title="Helpful">👍</button>' +
+                        '<button type="button" data-feedback-message="' + msg.id + '" data-feedback="down" title="Not helpful">👎</button>' +
+                        '</div>';
+                }
             });
             messagesEl.innerHTML = html;
         }
@@ -3332,6 +3348,15 @@ function html.render_chat_widget(nonce)
                 .catch(function(){ thinkingEl.remove(); showFetchError(); });
         } else if (e.target.hasAttribute('data-deny')) {
             post('api/chat-widget-deny', {pending_id: e.target.getAttribute('data-deny'), session_id: sessionId}).then(render);
+        } else if (e.target.hasAttribute('data-feedback')) {
+            var messageId = e.target.getAttribute('data-feedback-message');
+            var feedback = e.target.getAttribute('data-feedback');
+            var container = e.target.closest('.fossci-chat-feedback');
+            post('api/chat-widget-feedback', {message_id: messageId, feedback: feedback}).then(function(result){
+                if (result && result.ok && container) {
+                    container.innerHTML = feedback === 'up' ? 'Thanks for the feedback 👍' : 'Thanks for the feedback 👎';
+                }
+            });
         }
     });
 

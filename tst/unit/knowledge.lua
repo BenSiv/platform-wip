@@ -121,6 +121,80 @@ function test_content_hash_is_deterministic()
     check(knowledge.content_hash("hello world") != knowledge.content_hash("hello there"), "different content should hash differently")
 end
 
+-- task #87: heat decay, reasoning detection, chat-reply classification
+
+function timestamp_days_ago(days)
+    return os.date("%Y-%m-%d %H:%M:%S", os.time() - math.floor(days * 86400))
+end
+
+function test_days_since_computes_elapsed_days()
+    print("Testing days_since computes elapsed days from a timestamp")
+    elapsed = knowledge.days_since(timestamp_days_ago(10))
+    check(elapsed > 9.99 and elapsed < 10.01, "expected ~10 days, got " .. tostring(elapsed))
+end
+
+function test_days_since_nil_for_missing_or_unparseable()
+    print("Testing days_since returns nil for missing/unparseable timestamps")
+    check(knowledge.days_since(nil) == nil, "nil timestamp should return nil")
+    check(knowledge.days_since("") == nil, "empty timestamp should return nil")
+    check(knowledge.days_since("not-a-date") == nil, "garbage timestamp should return nil")
+end
+
+function test_effective_heat_unchanged_with_no_last_retrieved()
+    print("Testing effective_heat returns heat unchanged when last_retrieved_at is nil")
+    check(knowledge.effective_heat(2.5, nil) == 2.5, "no last_retrieved_at should mean no decay, got " .. tostring(knowledge.effective_heat(2.5, nil)))
+end
+
+function test_effective_heat_halves_at_one_half_life()
+    print("Testing effective_heat halves heat after one half-life (14 days)")
+    result = knowledge.effective_heat(2.0, timestamp_days_ago(14))
+    check(result > 0.99 and result < 1.01, "expected ~1.0 (half of 2.0) after one half-life, got " .. tostring(result))
+end
+
+function test_effective_heat_decays_heavily_over_many_half_lives()
+    print("Testing effective_heat decays heavily after many half-lives")
+    result = knowledge.effective_heat(3.0, timestamp_days_ago(140))
+    check(result < 0.01, "expected heavily decayed heat after 10 half-lives, got " .. tostring(result))
+end
+
+function test_reply_has_visible_reasoning_detects_markers()
+    print("Testing reply_has_visible_reasoning detects <think> tags and 'Thinking...' prefix")
+    check(knowledge.reply_has_visible_reasoning("<think>some reasoning</think>Final answer") == true, "should detect <think> tag")
+    check(knowledge.reply_has_visible_reasoning("Thinking...\nStep 1...") == true, "should detect 'Thinking...' marker")
+    check(knowledge.reply_has_visible_reasoning("A plain final answer.") == false, "plain text should not be flagged")
+    check(knowledge.reply_has_visible_reasoning(nil) == false, "nil should not be flagged")
+    check(knowledge.reply_has_visible_reasoning("") == false, "empty string should not be flagged")
+end
+
+function test_classify_reply_four_way_split()
+    print("Testing classify_reply's four-way classification (error/reasoning-visible/final/empty)")
+    kind, quality, reasoning = knowledge.classify_reply(true, nil)
+    check(kind == "error" and quality == "error" and reasoning == "none",
+        "error case classified wrong: " .. tostring(kind) .. "/" .. tostring(quality) .. "/" .. tostring(reasoning))
+
+    kind, quality, reasoning = knowledge.classify_reply(false, "<think>reasoning</think>answer")
+    check(kind == "reasoning-visible" and quality == "review" and reasoning == "visible",
+        "reasoning-visible case classified wrong: " .. tostring(kind) .. "/" .. tostring(quality) .. "/" .. tostring(reasoning))
+
+    kind, quality, reasoning = knowledge.classify_reply(false, "A clean final answer.")
+    check(kind == "final" and quality == "ok" and reasoning == "none",
+        "final case classified wrong: " .. tostring(kind) .. "/" .. tostring(quality) .. "/" .. tostring(reasoning))
+
+    kind, quality, reasoning = knowledge.classify_reply(false, "")
+    check(kind == "empty" and quality == "empty" and reasoning == "none",
+        "empty case classified wrong: " .. tostring(kind) .. "/" .. tostring(quality) .. "/" .. tostring(reasoning))
+end
+
+function test_promotion_demotes_when_effective_heat_has_decayed()
+    print("Testing promotion_target_tier demotes when decayed heat no longer supports the current tier (task #87)")
+    -- A note that was legitimately tier 3 once (high retrieval_count,
+    -- high heat at the time) but whose heat has since decayed toward
+    -- zero should drop back down on its next review -- retrieval_count
+    -- alone can no longer hold it at tier 3 once heat has decayed.
+    result = knowledge.promotion_target_tier(3, 10, 0.01, false, "ok")
+    check(result == 1, "high retrieval_count with heavily decayed heat should demote to tier 1, not stay at 3, got " .. tostring(result))
+end
+
 -- Run them
 test_reinforcement_delta_matches_tier_weights()
 test_promotion_tier_0_to_1_at_two_retrievals()
@@ -138,6 +212,14 @@ test_guess_title_strips_bullet_decoration()
 test_guess_title_truncates_long_lines_on_word_boundary()
 test_guess_title_empty_body_returns_untitled()
 test_content_hash_is_deterministic()
+test_days_since_computes_elapsed_days()
+test_days_since_nil_for_missing_or_unparseable()
+test_effective_heat_unchanged_with_no_last_retrieved()
+test_effective_heat_halves_at_one_half_life()
+test_effective_heat_decays_heavily_over_many_half_lives()
+test_reply_has_visible_reasoning_detects_markers()
+test_classify_reply_four_way_split()
+test_promotion_demotes_when_effective_heat_has_decayed()
 
 if FAILURES > 0 then
     print(FAILURES .. " test(s) failed")

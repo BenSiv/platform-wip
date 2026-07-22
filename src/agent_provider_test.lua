@@ -20,6 +20,19 @@ agent_provider_test = {}
 
 TEST_RESPONSE_INDEX = 0
 
+-- Same char/4 heuristic as agent.estimate_tokens (not cross-required
+-- here to avoid coupling this standalone test provider to agent.lua's
+-- own load order) -- deterministic stand-in usage numbers so
+-- knowledge_context recording (task #87) has real, testable
+-- prompt_tokens/completion_tokens even under the test provider,
+-- instead of nils that would silently skip assertions.
+function estimate_tokens_for_test(text)
+    if text == nil then
+        return 0
+    end
+    return math.ceil(string.len(text) / 4)
+end
+
 function agent_provider_test.generate(model, system_prompt, prompt)
     -- Optional: write the exact system_prompt this call received to a
     -- file, for tests asserting on it directly (e.g. task #70's
@@ -37,17 +50,24 @@ function agent_provider_test.generate(model, system_prompt, prompt)
 
     TEST_RESPONSE_INDEX = TEST_RESPONSE_INDEX + 1
     raw = os.getenv("AGENT_TEST_RESPONSES")
-    if raw == nil or raw == "" then
-        return "<done>Test response.</done>"
+    result = "<done>Test response.</done>"
+    if raw != nil and raw != "" then
+        responses = {}
+        for piece in string.gmatch(raw, "([^\1]+)") do
+            table.insert(responses, piece)
+        end
+        if responses[TEST_RESPONSE_INDEX] != nil then
+            result = responses[TEST_RESPONSE_INDEX]
+        else
+            result = responses[#responses]
+        end
     end
-    responses = {}
-    for piece in string.gmatch(raw, "([^\1]+)") do
-        table.insert(responses, piece)
-    end
-    if responses[TEST_RESPONSE_INDEX] != nil then
-        return responses[TEST_RESPONSE_INDEX]
-    end
-    return responses[#responses]
+    usage = {
+        prompt_tokens = estimate_tokens_for_test(system_prompt) + estimate_tokens_for_test(prompt),
+        completion_tokens = estimate_tokens_for_test(result),
+    }
+    usage.total_tokens = usage.prompt_tokens + usage.completion_tokens
+    return result, nil, usage
 end
 
 -- A stable, content-derived pseudo-embedding -- not a real semantic

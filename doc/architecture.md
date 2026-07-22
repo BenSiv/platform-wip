@@ -331,13 +331,15 @@ and a small, explicit tool registry the model can act through.
 
 ## Knowledge pool
 
-`src/knowledge.lua` -- retrieval logging, note tiering, and rule-based
-review, adapted (not copied verbatim) from a much larger `ai_note`/
-`ai_retrieval`/`ai_review` system in a Fossil SCM fork. Deliberately
-dropped from that source system: per-source-type authority weighting,
-a metadata-quality gate (tied to fields this codebase's notes don't
-have), and heat decay (the source system has none either -- heat only
-ever grows).
+`src/knowledge.lua` -- retrieval logging, note tiering, review, full
+prompt/reasoning persistence, and note materialization, adapted (not
+copied verbatim) from a much larger `ai_note`/`ai_retrieval`/`ai_review`/
+`ai_context`/`ai_chat_eval` system in a Fossil SCM fork (see that
+fork's own `doc/ai/knowledge-pool-post.md`, "Bubbling Context" -- hot
+information rises through use, cold information sinks, never
+disappears). Deliberately dropped from that source system:
+per-source-type authority weighting and a metadata-quality gate (tied
+to fields this codebase's notes don't have).
 
 - **Every search is logged**, whether or not anything about it ever
   becomes a note (`knowledge.search_and_log` wraps `document.search`;
@@ -347,33 +349,84 @@ ever grows).
   sweep over every page at index time.
 - **Tiers 0-3** (Raw Intake / Working Set / Curated Drafts / Atomic
   Records). A note's `heat` starts at 1.0 and grows by `0.15 +
-  tier_weight` (0/0.10/0.20/0.35 for tiers 0-3) on every retrieval hit
-  -- monotonic, no decay. Promotion is automatic and threshold-based,
-  never a human-review gate: `retrieval_count>=2` reaches tier 1;
-  `>=4` with `heat>=1.60` and non-"needs-split" atomicity reaches tier
-  2; `>=7` with `heat>=2.60` and "ok" atomicity reaches tier 3.
-  Duplicates never advance.
-- **Review is rule-based, never an LLM call.** After every retrieval
-  that hit at least one note: atomicity (heading/paragraph counts --
-  more than one heading or more than six paragraphs is "needs-split";
-  a short single paragraph is "thin"), duplication (a content hash
-  matched against a lower-id note), title quality (a generic title
-  like "Note" gets regenerated from the note's own first real line),
-  and connectivity (how many other notes were retrieved in the same
-  batch).
+  tier_weight` (0/0.10/0.20/0.35 for tiers 0-3) on every retrieval hit.
+  **Heat decays** (task #87; the source system never had this either --
+  heat only ever grew there too): an exponential half-life of 14 days
+  computed lazily wherever heat is used for a decision
+  (`knowledge.effective_heat`), not a scheduled job rewriting rows --
+  this codebase has no in-app background scheduler at all (the one
+  periodic job anywhere in the system, Benchling sync, is an external
+  systemd timer, not something `cgi.lua` runs). Promotion is automatic
+  and threshold-based, never a human-review gate, and now genuinely
+  bidirectional: recomputed fresh from current `retrieval_count` and
+  *decayed* heat every review, not ratcheted upward from the note's
+  existing tier -- a note that stops being retrieved cools off and
+  drops back down, rather than staying at whatever tier it once
+  reached forever. `retrieval_count>=2` reaches tier 1; `>=4` with
+  effective heat `>=1.60` and non-"needs-split" atomicity reaches tier
+  2; `>=7` with effective heat `>=2.60` and "ok" atomicity reaches tier
+  3. Duplicates never move.
+- **Review is rule-based, never an LLM call** for the automatic pass
+  that runs after every retrieval: atomicity (heading/paragraph counts
+  -- more than one heading or more than six paragraphs is
+  "needs-split"; a short single paragraph is "thin"), duplication (a
+  content hash matched against a lower-id note), title quality (a
+  generic title like "Note" gets regenerated from the note's own first
+  real line), and connectivity (how many other notes were retrieved in
+  the same batch).
+- **Full prompt/reasoning/token persistence** (task #87, `knowledge_context`,
+  adapted from `ai_context`): every real model call -- a chat turn,
+  compaction's own summarization call -- persists the *exact* prompt
+  actually sent (`system_prompt` + assembled history, verbatim, not
+  reconstructed later from `agent_message` rows), the model id, and
+  real token counts (`agent_provider_vertex.lua` now parses Vertex's
+  own `usageMetadata`; the deterministic test provider returns
+  matching estimated counts so the same code path is exercised under
+  tests). A reply that leaks visible reasoning (`<think>` tags,
+  "Thinking..." prefixes) gets that reasoning split out into its own
+  `knowledge_note` (`source_type = 'reasoning'`) rather than a second,
+  parallel log -- reasoning goes through the exact same tiering/
+  retrieval/decay pipeline as everything else.
+- **Chat-reply evaluation + user feedback** (task #87, `knowledge_chat_eval`,
+  adapted from `ai_chat_eval`): every chat reply is classified
+  (`final` / `reasoning-visible` / `error` / `empty`), and the chat
+  widget has a thumbs up/down on each assistant reply
+  (`/api/chat-widget-feedback`, ownership-checked the same way every
+  other chat-widget route already is -- a user can only give feedback
+  on their own conversation's replies).
+- **Materialization** (task #87, `knowledge.materialize_note`): the
+  "durable artifact" layer the source system's own design describes
+  but this port never built until now -- `promote` used to be just a
+  tier number change. A tier 2/3, non-duplicate note becomes a real
+  Notebook page (`document.create_page`), tracked back onto the note
+  (`artifact_document_id`/`artifact_status`) so it's never materialized
+  twice. This is the one genuinely mutating knowledge operation, so
+  it's a destructive `AGENT_TOOLS` entry -- the agent can propose it,
+  but nothing is written until a human approves the resulting pending
+  action, same as `entity.create`/`document.update`.
+- **Agent-driven review** (task #87, `agent.run_knowledge_review`,
+  `platform knowledge review`): unlike the automatic rule-based pass
+  above, this is a genuine, explicitly-triggered model call that
+  judges which tier 2/3 notes are actually *ready* to become a durable
+  page, not just which ones cleared a numeric threshold -- an ordinary
+  chat session under the hood, so a proposed `knowledge.materialize`
+  pauses for approval exactly like any user-initiated chat does.
 - **Hand-rolled tables, not `schema.register()` entities** --
   `knowledge_note`/`knowledge_retrieval`/`knowledge_retrieval_note`/
-  `knowledge_review` are system/derived records (own `CREATE TABLE` +
-  `init_schema`), the same treatment as `document_link`/
-  `document_embedding`/`agent_session`, not user-authored data with
-  its own field-level audit needs.
-- **Surfaced two ways**: `platform knowledge <stats|list|show|
-  promote>` (CLI, mirrors `document.do_document`'s dispatch shape),
-  and a `/knowledge` page linked from System (gated identically --
-  Setup or Admin capability) with stat tiles, the tier breakdown, and
-  a recent-retrievals list. Deliberately not its own sidebar icon --
-  chat session browsing (`/chat`) is one link away from here instead
-  of a dedicated nav-rail entry.
+  `knowledge_review`/`knowledge_context`/`knowledge_chat_eval` are
+  system/derived records (own `CREATE TABLE` + `init_schema`), the same
+  treatment as `document_link`/`document_embedding`/`agent_session`,
+  not user-authored data with its own field-level audit needs.
+- **Surfaced two ways**: `platform knowledge <stats|list|show|promote|
+  materialize|review>` (CLI, mirrors `document.do_document`'s dispatch
+  shape -- `review` is dispatched from `main.lua` directly rather than
+  `knowledge.do_knowledge` itself, since it needs `agent.lua` and
+  `agent.lua` already depends on `knowledge.lua`, a real circular
+  require otherwise), and a `/knowledge` page linked from System
+  (gated identically -- Setup or Admin capability) with stat tiles,
+  the tier breakdown, and a recent-retrievals list. Deliberately not
+  its own sidebar icon -- chat session browsing (`/chat`) is one link
+  away from here instead of a dedicated nav-rail entry.
 - **Deferred, not built**: a `knowledge-browser` filter page and an
   `ai_note_link`-style co-retrieval graph between notes -- both
   optional in the original design, neither blocking the core tiering/
