@@ -90,6 +90,106 @@ function test_every_real_field_type_individually()
     end
 end
 
+-- task #84: multi_select/multi_reference field types
+
+function test_multi_select_without_values_or_dropdown_rejected()
+    print("Testing a 'multi_select' field with neither 'values' nor 'dropdown' is rejected")
+    def = {name = "sample", fields = {{name = "process", type = "multi_select"}}}
+    err = schema.validate(def)
+    check(err != nil, "expected an error for multi_select with neither values nor dropdown")
+end
+
+function test_multi_select_with_inline_values_passes()
+    print("Testing a 'multi_select' field with an inline 'values' list passes")
+    def = {name = "sample", fields = {{name = "process", type = "multi_select", values = {"a", "b"}}}}
+    err = schema.validate(def)
+    check(err == nil, "expected no error, got: " .. tostring(err))
+end
+
+function test_multi_select_with_dropdown_reference_passes()
+    print("Testing a 'multi_select' field with a 'dropdown' reference passes (no values needed)")
+    def = {name = "sample", fields = {{name = "process", type = "multi_select", dropdown = "work_process"}}}
+    err = schema.validate(def)
+    check(err == nil, "expected no error, got: " .. tostring(err))
+end
+
+function test_multi_select_dropdown_must_be_nonempty_string()
+    print("Testing a 'multi_select' field's 'dropdown' must be a non-empty string")
+    def = {name = "sample", fields = {{name = "process", type = "multi_select", dropdown = ""}}}
+    err = schema.validate(def)
+    check(err != nil, "expected an error for an empty dropdown name")
+end
+
+function test_multi_reference_passes_with_or_without_entity_type()
+    print("Testing 'multi_reference' passes with an explicit entity_type, and without one (self-reference)")
+    def1 = {name = "sample", fields = {{name = "descendants", type = "multi_reference", entity_type = "sample"}}}
+    check(schema.validate(def1) == nil, "expected no error with explicit entity_type")
+    def2 = {name = "sample", fields = {{name = "descendants", type = "multi_reference"}}}
+    check(schema.validate(def2) == nil, "expected no error without entity_type (defaults to self)")
+end
+
+function test_multi_reference_entity_type_must_be_string()
+    print("Testing 'multi_reference' rejects a non-string entity_type")
+    def = {name = "sample", fields = {{name = "descendants", type = "multi_reference", entity_type = 42}}}
+    err = schema.validate(def)
+    check(err != nil, "expected an error for a non-string entity_type")
+end
+
+function test_is_multi_field_type()
+    print("Testing is_multi_field_type recognizes only the two multivalue types")
+    check(is_multi_field_type("multi_select") == true, "multi_select should be a multi field type")
+    check(is_multi_field_type("multi_reference") == true, "multi_reference should be a multi field type")
+    check(is_multi_field_type("select") == false, "select should not be a multi field type")
+    check(is_multi_field_type("reference") == false, "reference should not be a multi field type")
+    check(is_multi_field_type("text") == false, "text should not be a multi field type")
+end
+
+function test_multi_field_table_name()
+    print("Testing multi_field_table_name's naming convention")
+    check(schema.multi_field_table_name("sample", "source_plants") == "sample_source_plants",
+        "expected 'sample_source_plants', got '" .. schema.multi_field_table_name("sample", "source_plants") .. "'")
+end
+
+function test_normalize_multi_value_passes_through_a_real_array()
+    print("Testing normalize_multi_value passes a real Lua array through unchanged")
+    result = schema.normalize_multi_value({1, 2, 3})
+    check(#result == 3, "expected 3 items, got " .. tostring(#result))
+    check(result[1] == 1 and result[2] == 2 and result[3] == 3, "expected [1,2,3] unchanged")
+end
+
+function test_normalize_multi_value_splits_a_comma_string()
+    print("Testing normalize_multi_value splits a comma-separated string (CLI convenience)")
+    result = schema.normalize_multi_value("1, 2,3")
+    check(#result == 3, "expected 3 items, got " .. tostring(#result))
+    check(result[1] == "1" and result[2] == "2" and result[3] == "3",
+        "expected trimmed items ['1','2','3'], got ['" .. tostring(result[1]) .. "','" .. tostring(result[2]) .. "','" .. tostring(result[3]) .. "']")
+end
+
+function test_normalize_multi_value_handles_nil_and_empty()
+    print("Testing normalize_multi_value returns an empty list for nil/empty input")
+    check(#schema.normalize_multi_value(nil) == 0, "expected empty list for nil")
+    check(#schema.normalize_multi_value("") == 0, "expected empty list for empty string")
+    check(#schema.normalize_multi_value("  ,  ,") == 0, "expected empty list for all-blank comma string")
+end
+
+-- task #84: named dropdown value lists
+
+function test_dropdown_requires_name_and_nonempty_values()
+    print("Testing a dropdown definition requires a name and a non-empty values list")
+    check(schema.validate_dropdown({name = "x", values = {"a"}}) == nil, "expected a well-formed dropdown to pass")
+    check(schema.validate_dropdown({values = {"a"}}) != nil, "expected an error for a missing name")
+    check(schema.validate_dropdown({name = "x", values = {}}) != nil, "expected an error for an empty values list")
+    check(schema.validate_dropdown({name = "x"}) != nil, "expected an error for a missing values list")
+end
+
+function test_dropdown_values_must_be_nonempty_strings()
+    print("Testing a dropdown's values must all be non-empty strings")
+    err = schema.validate_dropdown({name = "x", values = {"a", ""}})
+    check(err != nil, "expected an error for an empty-string value")
+    err = schema.validate_dropdown({name = "x", values = {"a", 5}})
+    check(err != nil, "expected an error for a non-string value")
+end
+
 function test_number_field_min_max_valid()
     print("Testing a number field with valid min/max passes")
     def = {name = "task", fields = {{name = "importance", type = "number", min = 1, max = 5}}}
@@ -143,6 +243,19 @@ test_invalid_field_type_rejected()
 test_select_without_values_rejected()
 test_select_with_values_passes()
 test_every_real_field_type_individually()
+test_multi_select_without_values_or_dropdown_rejected()
+test_multi_select_with_inline_values_passes()
+test_multi_select_with_dropdown_reference_passes()
+test_multi_select_dropdown_must_be_nonempty_string()
+test_multi_reference_passes_with_or_without_entity_type()
+test_multi_reference_entity_type_must_be_string()
+test_is_multi_field_type()
+test_multi_field_table_name()
+test_normalize_multi_value_passes_through_a_real_array()
+test_normalize_multi_value_splits_a_comma_string()
+test_normalize_multi_value_handles_nil_and_empty()
+test_dropdown_requires_name_and_nonempty_values()
+test_dropdown_values_must_be_nonempty_strings()
 test_number_field_min_max_valid()
 test_number_field_min_greater_than_max_rejected()
 test_number_field_non_numeric_min_rejected()

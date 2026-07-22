@@ -29,15 +29,17 @@ return {
 }
 ```
 
-## Field types (deliberately five)
+## Field types
 
 | type | meaning |
 |---|---|
 | `text` | free string |
 | `number` | numeric, integer or float |
 | `date` | ISO 8601 date |
-| `select` | one of a fixed `values` list |
+| `select` | one of a fixed `values` list, or a shared named `dropdown` (see below) |
 | `reference` | points at another record by id, optionally constrained to a specific record type |
+| `multi_select` | several values from a fixed `values` list or named `dropdown` |
+| `multi_reference` | several links to another record type by id |
 
 A `number` field may optionally declare `min`/`max` -- wired into the
 registration form's number input (bounding its native spinner arrows),
@@ -49,12 +51,70 @@ from suggesting an obviously-invalid value. Making this a real,
 enforced constraint at the definition level is a bigger change (the
 underlying storage would need new columns) not done yet.
 
-Deferred: multi-select, attachments/files, computed/formula fields,
-enforced numeric bounds. None of these are ruled out by the design --
-they're just not needed to prove the core registration workflow end
-to end. (Rich text editing exists for the built-in Pages record type --
-see `architecture.md`'s "Pages" section -- but a schema-defined `text`
+Deferred: attachments/files, computed/formula fields, enforced numeric
+bounds. None of these are ruled out by the design -- they're just not
+needed to prove the core registration workflow end to end. (Rich text
+editing exists for the built-in Pages record type -- see
+`architecture.md`'s "Pages" section -- but a schema-defined `text`
 field on a custom record type is still a plain string, no markup.)
+
+## Multivalue fields (`multi_select`/`multi_reference`) -- a real
+## junction table, not a delimited string column
+
+```lua
+-- schemas/sample.lua
+return {
+  name = "sample",
+  fields = {
+    {name = "label",          type = "text",           required = true, display = true},
+    {name = "source_plants",  type = "multi_reference", required = false, entity_type = "plant"},
+    {name = "process",        type = "multi_select",   required = false, dropdown = "work_process"},
+  },
+}
+```
+
+A multivalue field never becomes a column on the record's own table --
+it gets its own companion junction table instead
+(`schema.ensure_multi_field_table`), named `<record_type>_<field_name>`
+(e.g. `sample_source_plants`, `sample_process`): a real many-to-many
+table with a composite primary key, the same shape `document_link`
+already uses for page-to-page links. `multi_reference`'s second column
+is a genuine foreign key into the referenced record type's table --
+never a lossy string join. A value arrives as either a real array
+(e.g. a JSON API payload) or a comma-separated string (CLI
+convenience); both normalize to the same array before validation and
+storage.
+
+Ledger history records a multivalue field's old/new as real sets, the
+same as any other field -- editing one is exactly as auditable as
+editing a scalar field, not an untracked side channel.
+
+## Named dropdown lists -- share one value list across fields
+
+A `select`/`multi_select` field can either inline its own `values` list
+(as above) or reference a shared, reusable list by name:
+
+```lua
+-- dropdowns/work_process.lua
+return {
+  name = "work_process",
+  values = {"cultivation", "harvest", "processing"},
+}
+```
+
+```lua
+{name = "process", type = "multi_select", dropdown = "work_process"}
+```
+
+Dropdown files live in `dropdowns/*.lua`, loaded the same
+config-as-code way `schemas/*.lua` is. A dropdown's current values are
+resolved into the field's own `enum_values` at schema-sync time, so
+editing `dropdowns/work_process.lua` and re-syncing updates every field
+that references it -- one edit, not a hunt-and-replace across every
+schema file that happened to inline the same list. This is purely a
+literal-value mechanism -- no foreign key, no entity type involved --
+entirely separate from `reference`/`multi_reference`, which are real
+entity links.
 
 ## Loading is sandboxed, not just a bare load
 
@@ -76,7 +136,9 @@ Loading a definition does two things:
    `reagent(id, lot_number, concentration, prepared_on, status,
    prepared_from, created_by, created_at, updated_by, updated_at,
    last_event_id, archived_at)` -- the thing a dashboard actually
-   queries.
+   queries. A `multi_select`/`multi_reference` field never becomes a
+   column here -- it gets its own companion junction table instead (see
+   above).
 
 Changes to a definition are themselves ordinary version-control
 commits: renaming or adding a field is a diff against

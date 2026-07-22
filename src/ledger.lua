@@ -169,6 +169,21 @@ function ledger.history(db_path, entity_id)
     return rows
 end
 
+-- A multivalue field's old/new (task #84) decodes from JSON as a plain
+-- Lua array, not a scalar -- tostring() on that gives an unreadable
+-- "table: 0x..." pointer, so this renders it as a real bracketed list
+-- instead. Scalars pass straight through unchanged.
+function format_change_value(v)
+    if type(v) == "table" then
+        parts = {}
+        for _, item in ipairs(v) do
+            table.insert(parts, tostring(item))
+        end
+        return "[" .. table.concat(parts, ", ") .. "]"
+    end
+    return tostring(v)
+end
+
 -- CLI entry point: `fossci ledger <show|history> <entity_id>`
 function ledger.do_ledger(cmd_args, db_path)
     action = cmd_args[1]
@@ -197,7 +212,7 @@ function ledger.do_ledger(cmd_args, db_path)
             print("    reason: " .. event.reason)
         end
         for field, change in pairs(event.field_changes) do
-            print(string.format("    %s: %s -> %s", field, tostring(change.old), tostring(change.new)))
+            print(string.format("    %s: %s -> %s", field, format_change_value(change.old), format_change_value(change.new)))
         end
     end
 end

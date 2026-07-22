@@ -741,6 +741,19 @@ function html.render(entity_type, layout_json, nonce)
                         opt.innerText = val;
                         input.appendChild(opt);
                     });
+                } else if (field.type === "multi_select") {
+                    // task #84: a native multi-select listbox -- no new
+                    // widget needed, the browser's own ctrl/cmd-click
+                    // multi-selection is enough for a fixed value list.
+                    input = document.createElement("select");
+                    input.classList.add("cell-input");
+                    input.multiple = true;
+                    field.values.forEach(val => {
+                        const opt = document.createElement("option");
+                        opt.value = val;
+                        opt.innerText = val;
+                        input.appendChild(opt);
+                    });
                 } else {
                     input = document.createElement("input");
                     input.classList.add("cell-input");
@@ -764,7 +777,15 @@ function html.render(entity_type, layout_json, nonce)
                     if (field.type === "reference") {
                         input.setAttribute("autocomplete", "off");
                         input.placeholder = "Search ID or name...";
-                        setupAutocomplete(input, field.ref_entity_type);
+                        setupAutocomplete(input, field.ref_entity_type, false);
+                    } else if (field.type === "multi_reference") {
+                        // task #84: same autocomplete search as a
+                        // singular reference field -- picking a
+                        // suggestion appends to a comma-separated list
+                        // instead of replacing the input's value.
+                        input.setAttribute("autocomplete", "off");
+                        input.placeholder = "Search ID or name, pick several...";
+                        setupAutocomplete(input, field.ref_entity_type, true);
                     }
                 }
 
@@ -826,14 +847,21 @@ function html.render(entity_type, layout_json, nonce)
             msg.style.display = "none";
         }
 
-        function setupAutocomplete(input, refType) {
+        // `multi` (task #84): for a multi_reference field, a picked
+        // suggestion appends to a comma-separated list in the input
+        // (skipping an id already present) instead of replacing the
+        // whole value the way a singular reference field's picker does.
+        // The search itself is identical either way -- same endpoint,
+        // same debounce, same results dropdown.
+        function setupAutocomplete(input, refType, multi) {
             const wrapper = input.parentElement;
             let resultsContainer = null;
             let debounceTimer;
 
             input.addEventListener("input", () => {
                 clearTimeout(debounceTimer);
-                const query = input.value.trim();
+                const raw = input.value;
+                const query = (multi ? raw.split(",").pop() : raw).trim();
                 if (resultsContainer) { resultsContainer.remove(); resultsContainer = null; }
                 if (query.length === 0) return;
 
@@ -850,7 +878,14 @@ function html.render(entity_type, layout_json, nonce)
                                 div.classList.add("autocomplete-item");
                                 div.innerText = `[#${item.id}] ${item.name}`;
                                 div.onclick = () => {
-                                    input.value = item.id;
+                                    if (multi) {
+                                        const existing = input.value.split(",").map(s => s.trim()).filter(s => s.length > 0);
+                                        existing.pop();
+                                        if (!existing.includes(String(item.id))) { existing.push(String(item.id)); }
+                                        input.value = existing.join(", ") + ", ";
+                                    } else {
+                                        input.value = item.id;
+                                    }
                                     clearCellError(input);
                                     resultsContainer.remove();
                                     resultsContainer = null;
@@ -885,6 +920,15 @@ function html.render(entity_type, layout_json, nonce)
                     if (el) {
                         let val = el.value;
                         if (field.type === "number" && val !== "") { val = parseFloat(val); }
+                        // task #84: both multivalue types send a real
+                        // JSON array in the payload, not a joined string
+                        // -- /api/submit's body is already JSON, so
+                        // there's no wire-format reason to flatten one.
+                        if (field.type === "multi_select") {
+                            val = Array.from(el.selectedOptions).map(o => o.value);
+                        } else if (field.type === "multi_reference") {
+                            val = val.split(",").map(s => s.trim()).filter(s => s.length > 0);
+                        }
                         rowData[field.name] = val;
                     }
                 });
@@ -935,7 +979,23 @@ function html.render(entity_type, layout_json, nonce)
 """, escaped_type, fossci_container_css(1200), fossci_button_css(), escaped_type, escaped_type, escaped_type, nonce, json_for_script(layout_json), js_string_literal(entity_type))
 end
 
+-- A multivalue field's value (task #84) is a plain Lua array, not a
+-- scalar -- both a row's own current value (entity.get attaches it) and
+-- a ledger history change's old/new (json-decoded from field_changes).
+-- html.html_escape on a raw table would misbehave, so this renders an
+-- empty array as the same "&mdash;" a nil/empty scalar gets, and a
+-- non-empty one as a comma-joined, individually-escaped list.
 function display_value(value)
+    if type(value) == "table" then
+        if #value == 0 then
+            return "&mdash;"
+        end
+        parts = {}
+        for _, item in ipairs(value) do
+            table.insert(parts, html.html_escape(tostring(item)))
+        end
+        return table.concat(parts, ", ")
+    end
     if value == nil or tostring(value) == "" then
         return "&mdash;"
     end
@@ -1060,11 +1120,34 @@ function render_reference_value(db_path, ref_entity_type, value)
         "\" tabindex=\"0\">" .. link_text .. "<span class=\"fossci-popover\"></span></a>"
 end
 
+-- Every linked entity in a multi_reference field's value, each rendered
+-- exactly like a real singular reference field (same popover-preview
+-- link) and comma-joined -- not a plain id list, since these are just
+-- as much real links to another row as a singular reference field's
+-- value is.
+function render_multi_reference_value(db_path, ref_entity_type, values)
+    if values == nil or #values == 0 then
+        return "&mdash;"
+    end
+    parts = {}
+    for _, v in ipairs(values) do
+        table.insert(parts, render_reference_value(db_path, ref_entity_type, v))
+    end
+    return table.concat(parts, ", ")
+end
+
 -- Picks the right renderer for a field's value, given its schema.layout()
--- metadata (type + ref_entity_type, when type=="reference").
+-- metadata (type + ref_entity_type, when type=="reference"/"multi_reference").
 function display_field_value(db_path, field, value)
     if field.type == "reference" and field.ref_entity_type != nil then
         return render_reference_value(db_path, field.ref_entity_type, value)
+    end
+    if field.type == "multi_reference" then
+        ref_type = field.ref_entity_type
+        if ref_type == nil then
+            return display_value(value)
+        end
+        return render_multi_reference_value(db_path, ref_type, value)
     end
     return display_value(value)
 end

@@ -10,7 +10,152 @@ lfs = require("lfs")
 
 schema = {}
 
-FIELD_TYPES = {"text", "number", "date", "select", "reference"}
+FIELD_TYPES = {"text", "number", "date", "select", "reference", "multi_select", "multi_reference"}
+
+-- Field types stored in a companion junction table (schema.
+-- ensure_multi_field_table) instead of as a column on the entity's own
+-- projected table -- task #84. Mirrors the singular select/reference
+-- split (a fixed-list value vs. a real link to another entity type),
+-- not one generic "multivalue" flag, since the junction table's second
+-- column differs (a literal value vs. a real FK).
+MULTI_FIELD_TYPES = {multi_select = true, multi_reference = true}
+
+function is_multi_field_type(t)
+    return MULTI_FIELD_TYPES[t] == true
+end
+
+--------------------------------------------------------------------------
+-- task #84: named, reusable dropdown value lists
+--------------------------------------------------------------------------
+--
+-- A select/multi_select field can either inline its own `values` list
+-- (unchanged, existing behavior) or reference a shared, named list via
+-- `dropdown = "<name>"` -- config-as-code files under dropdowns/*.lua,
+-- the same convention schemas/*.lua already uses. Resolved into
+-- entity_field.enum_values at schema.register time (see
+-- resolve_field_values below), so entity.validate's own enum-checking
+-- code needs no changes at all -- it already just decodes enum_values
+-- as a plain list, agnostic of whether it came from an inline list or a
+-- shared dropdown.
+DROPDOWN_SCHEMA = """
+-- VARCHAR(255), not TEXT -- same MariaDB/InnoDB key-length reasoning as
+-- ledger.lua's own entity_type/entity_field (a bare TEXT/BLOB column
+-- can't be part of a key without an explicit bounded length).
+CREATE TABLE IF NOT EXISTS dropdown_list (
+    name VARCHAR(255) PRIMARY KEY,
+    created_at TEXT DEFAULT (%s)
+);
+
+CREATE TABLE IF NOT EXISTS dropdown_value (
+    list_name VARCHAR(255) NOT NULL,
+    value VARCHAR(255) NOT NULL,
+    value_order INTEGER NOT NULL,
+    PRIMARY KEY (list_name, value),
+    FOREIGN KEY (list_name) REFERENCES dropdown_list(name)
+);
+"""
+
+function schema.init_schema(db_path)
+    db.exec(db_path, string.format(DROPDOWN_SCHEMA, db.now_expr(db_path)))
+end
+
+-- Structural validation for a dropdowns/*.lua file -- same shape/rigor
+-- as schema.validate for an entity schema file.
+function schema.validate_dropdown(def)
+    if type(def) != "table" then
+        return "dropdown definition must be a table"
+    end
+    if type(def.name) != "string" or def.name == "" then
+        return "dropdown must have a non-empty string 'name'"
+    end
+    if type(def.values) != "table" or #def.values == 0 then
+        return "dropdown '" .. tostring(def.name) .. "' must have a non-empty 'values' list"
+    end
+    for i, v in ipairs(def.values) do
+        if type(v) != "string" or v == "" then
+            return string.format("dropdown '%s' value #%d: must be a non-empty string", def.name, i)
+        end
+    end
+    return nil
+end
+
+function schema.load_dropdown_file(path)
+    file = io.open(path, "r")
+    if file == nil then
+        return nil, "cannot open dropdown file: " .. path
+    end
+    source = io.read(file, "*all")
+    io.close(file)
+
+    ok, result = sandbox.run(source, path, sandbox.data_env())
+    if ok == nil or ok == false then
+        return nil, "error loading dropdown " .. path .. ": " .. tostring(result)
+    end
+    def = result
+
+    err = schema.validate_dropdown(def)
+    if err != nil then
+        return nil, err
+    end
+    return def
+end
+
+-- Upserts one dropdown's value list -- delete-then-reinsert (same
+-- "recompute wholesale" pattern document.sync_links already uses for
+-- document_link), so removing a value from the schema file actually
+-- removes it here too, not just additive drift.
+function schema.register_dropdown(db_path, def)
+    db.exec(db_path, string.format(
+        "%s dropdown_list (name) VALUES (%s);", db.insert_ignore(db_path), db.quote(def.name)
+    ))
+    db.exec(db_path, string.format("DELETE FROM dropdown_value WHERE list_name = %s;", db.quote(def.name)))
+    for i, value in ipairs(def.values) do
+        db.exec(db_path, string.format(
+            "%s dropdown_value (list_name, value, value_order) VALUES (%s, %s, %d);",
+            db.insert_ignore(db_path), db.quote(def.name), db.quote(value), i
+        ))
+    end
+    return true
+end
+
+-- The current value list for a named dropdown, in declaration order --
+-- empty (not an error) if the name doesn't exist, so a field.dropdown
+-- typo fails the same way an empty inline `values = {}` list already
+-- would (every submitted value rejected as "not in the declared list"),
+-- not with a confusing crash.
+function schema.dropdown_values(db_path, name)
+    rows = db.query(db_path, string.format(
+        "SELECT value FROM dropdown_value WHERE list_name = %s ORDER BY value_order ASC;", db.quote(name)
+    ))
+    if rows == nil then
+        return {}
+    end
+    values = {}
+    for _, row in ipairs(rows) do
+        table.insert(values, row.value)
+    end
+    return values
+end
+
+function schema.is_dropdown_registered(db_path, name)
+    rows = db.query(db_path, string.format("SELECT 1 FROM dropdown_list WHERE name = %s;", db.quote(name)))
+    return rows != nil and #rows > 0
+end
+
+-- A select/multi_select field's resolved allowed-values list -- inline
+-- `values` if given, otherwise the current contents of the named
+-- `dropdown` it references. Called at schema.register time so
+-- entity_field.enum_values always reflects the dropdown's *current*
+-- values, the same way it already gets re-applied on every sync.
+function resolve_field_values(db_path, field)
+    if field.values != nil then
+        return field.values
+    end
+    if field.dropdown != nil then
+        return schema.dropdown_values(db_path, field.dropdown)
+    end
+    return {}
+end
 
 -- Every generated entity table's own columns (builtin_columns below,
 -- plus "id" itself) -- a field sharing one of these names fails at
@@ -117,8 +262,19 @@ function schema.validate(def)
         if is_valid_field_type(field.type) == false then
             return string.format("schema '%s' field '%s': invalid type '%s'", def.name, field.name, tostring(field.type))
         end
-        if field.type == "select" and type(field.values) != "table" then
-            return string.format("schema '%s' field '%s': type 'select' requires a 'values' list", def.name, field.name)
+        if (field.type == "select" or field.type == "multi_select") then
+            if field.values == nil and field.dropdown == nil then
+                return string.format("schema '%s' field '%s': type '%s' requires either a 'values' list or a 'dropdown' name", def.name, field.name, field.type)
+            end
+            if field.values != nil and type(field.values) != "table" then
+                return string.format("schema '%s' field '%s': 'values' must be a list", def.name, field.name)
+            end
+            if field.dropdown != nil and (type(field.dropdown) != "string" or field.dropdown == "") then
+                return string.format("schema '%s' field '%s': 'dropdown' must be a non-empty string", def.name, field.name)
+            end
+        end
+        if field.type == "multi_reference" and field.entity_type != nil and type(field.entity_type) != "string" then
+            return string.format("schema '%s' field '%s': 'entity_type' must be a string", def.name, field.name)
         end
         -- Optional bounds on a "number" field -- UI-hint only for now
         -- (wired into the registration table's <input type="number">
@@ -207,9 +363,9 @@ function schema.register(db_path, def)
 
     for i, field in ipairs(def.fields) do
         enum_json = nil
-        if field.values != nil then
+        if field.type == "select" or field.type == "multi_select" then
             json = require("dkjson")
-            enum_json = json.encode(field.values)
+            enum_json = json.encode(resolve_field_values(db_path, field))
         end
         required_flag = 0
         if field.required == true then
@@ -278,15 +434,175 @@ function builtin_columns(db_path)
     }
 end
 
+--------------------------------------------------------------------------
+-- task #84: multivalue fields -- a companion junction table per
+-- (entity_type, field_name) instead of a column on the entity's own
+-- table. Mirrors document_link's own shape (a real many-to-many table,
+-- composite PK, no surrogate id) -- the pattern this codebase already
+-- uses for "this row connects to several others."
+--------------------------------------------------------------------------
+
+function schema.multi_field_table_name(entity_type, field_name)
+    return entity_type .. "_" .. field_name
+end
+
+-- The junction table's own second column name -- "<field>_id" for a
+-- multi_reference (it holds a real FK to another entity), plain "value"
+-- for a multi_select (a literal string, no FK target to name it after).
+function multi_field_value_column(field)
+    if field.type == "multi_reference" then
+        return field.name .. "_id"
+    end
+    return "value"
+end
+
+-- Idempotent (CREATE TABLE IF NOT EXISTS) -- called both from
+-- schema.sync_table (so a schema sync alone is enough to create it) and
+-- lazily before every write, so a table created before this field
+-- existed still picks it up without a separate migration step.
+function schema.ensure_multi_field_table(db_path, entity_type, field)
+    table_name = schema.multi_field_table_name(entity_type, field.name)
+    if db.table_exists(db_path, table_name) then
+        return
+    end
+    parent_col = entity_type .. "_id"
+    value_col = multi_field_value_column(field)
+    if field.type == "multi_reference" then
+        -- `field` arrives in two different shapes depending on caller:
+        -- a raw schemas/*.lua field definition (schema.sync_table,
+        -- `.entity_type`) or an entity_field DB row (schema.
+        -- multi_fields_by_name -> entity.lua, `.ref_entity_type`).
+        -- Checking both is not redundancy for its own sake -- treating
+        -- this as one shape was a real bug (silently FK'd every
+        -- multi_reference junction table back at its own parent type).
+        ref_type = entity_type
+        if field.ref_entity_type != nil and field.ref_entity_type != "" then
+            ref_type = field.ref_entity_type
+        elseif field.entity_type != nil and field.entity_type != "" then
+            ref_type = field.entity_type
+        end
+        db.exec(db_path, string.format("""
+            CREATE TABLE %s (
+                %s INTEGER NOT NULL,
+                %s INTEGER NOT NULL,
+                PRIMARY KEY (%s, %s),
+                FOREIGN KEY (%s) REFERENCES %s(id),
+                FOREIGN KEY (%s) REFERENCES %s(id)
+            );
+        """, table_name, parent_col, value_col, parent_col, value_col,
+             parent_col, entity_type, value_col, ref_type))
+    else
+        -- VARCHAR(255), not TEXT -- same MariaDB/InnoDB key-length
+        -- reasoning as ledger.lua/document_link (a bare TEXT/BLOB
+        -- column can't be part of a key without a bounded length).
+        db.exec(db_path, string.format("""
+            CREATE TABLE %s (
+                %s INTEGER NOT NULL,
+                %s VARCHAR(255) NOT NULL,
+                PRIMARY KEY (%s, %s),
+                FOREIGN KEY (%s) REFERENCES %s(id)
+            );
+        """, table_name, parent_col, value_col, parent_col, value_col, parent_col, entity_type))
+    end
+end
+
+-- Accepts either a real Lua array (already-parsed JSON, or a
+-- programmatic caller) or a comma-separated string (CLI convenience --
+-- every other CLI field value already arrives as a plain string) and
+-- normalizes both into a plain array of trimmed, non-empty items.
+function schema.normalize_multi_value(value)
+    if value == nil then
+        return {}
+    end
+    if type(value) == "table" then
+        return value
+    end
+    items = {}
+    for item in string.gmatch(tostring(value), "[^,]+") do
+        trimmed = (string.gsub(item, "^%s*(.-)%s*$", "%1"))
+        if trimmed != "" then
+            table.insert(items, trimmed)
+        end
+    end
+    return items
+end
+
+-- Replaces the full current set for one entity's multivalue field --
+-- delete-then-reinsert (same "recompute wholesale" pattern document.
+-- sync_links already uses for document_link), not an incremental
+-- add/remove -- simpler, and correct either way since the caller always
+-- submits the complete intended set, not a delta.
+function schema.write_multi_field(db_path, entity_type, entity_id, field, value)
+    schema.ensure_multi_field_table(db_path, entity_type, field)
+    table_name = schema.multi_field_table_name(entity_type, field.name)
+    parent_col = entity_type .. "_id"
+    value_col = multi_field_value_column(field)
+    db.exec(db_path, string.format(
+        "DELETE FROM %s WHERE %s = %d;", table_name, parent_col, tonumber(entity_id)
+    ))
+    for _, item in ipairs(schema.normalize_multi_value(value)) do
+        if field.type == "multi_reference" then
+            db.exec(db_path, string.format(
+                "%s %s (%s, %s) VALUES (%d, %d);",
+                db.insert_ignore(db_path), table_name, parent_col, value_col, tonumber(entity_id), tonumber(item)
+            ))
+        else
+            db.exec(db_path, string.format(
+                "%s %s (%s, %s) VALUES (%d, %s);",
+                db.insert_ignore(db_path), table_name, parent_col, value_col, tonumber(entity_id), db.quote(tostring(item))
+            ))
+        end
+    end
+end
+
+-- The current set for one entity's multivalue field, as a plain array
+-- (of ids for multi_reference, of strings for multi_select).
+function schema.read_multi_field(db_path, entity_type, entity_id, field)
+    table_name = schema.multi_field_table_name(entity_type, field.name)
+    if db.table_exists(db_path, table_name) == false then
+        return {}
+    end
+    parent_col = entity_type .. "_id"
+    value_col = multi_field_value_column(field)
+    rows = db.query(db_path, string.format(
+        "SELECT %s AS v FROM %s WHERE %s = %d;", value_col, table_name, parent_col, tonumber(entity_id)
+    ))
+    if rows == nil then
+        return {}
+    end
+    values = {}
+    for _, row in ipairs(rows) do
+        table.insert(values, row.v)
+    end
+    return values
+end
+
+-- Every multivalue field on `entity_type`, keyed by field name -- the
+-- lookup entity.create/update/get all need to tell a multivalue field
+-- apart from a plain column.
+function schema.multi_fields_by_name(db_path, entity_type)
+    result = {}
+    for _, field in ipairs(schema.fields(db_path, entity_type)) do
+        if is_multi_field_type(field.type) then
+            result[field.name] = field
+        end
+    end
+    return result
+end
+
 -- Creates the projected table if it doesn't exist, or adds any columns
 -- for fields/builtins that aren't present yet. Never drops or renames a
 -- column -- that's a deliberately manual, reviewed operation, not an
--- automatic one.
+-- automatic one. Multivalue fields (task #84) never become a column
+-- here at all -- schema.ensure_multi_field_table gives them their own
+-- companion junction table instead.
 function schema.sync_table(db_path, def)
     if db.table_exists(db_path, def.name) == false then
         columns = {"id INTEGER PRIMARY KEY " .. db.autoincrement_keyword(db_path)}
         for _, field in ipairs(def.fields) do
-            table.insert(columns, db.quote_ident(field.name) .. " " .. SQL_TYPE[field.type])
+            if is_multi_field_type(field.type) == false then
+                table.insert(columns, db.quote_ident(field.name) .. " " .. SQL_TYPE[field.type])
+            end
         end
         for _, builtin in ipairs(builtin_columns(db_path)) do
             table.insert(columns, db.quote_ident(builtin.name) .. " " .. builtin.sql_type)
@@ -301,6 +617,11 @@ function schema.sync_table(db_path, def)
                 index_name, def.name, db.text_index_column(db_path, "external_id")
             ))
         end
+        for _, field in ipairs(def.fields) do
+            if is_multi_field_type(field.type) then
+                schema.ensure_multi_field_table(db_path, def.name, field)
+            end
+        end
         return
     end
 
@@ -310,7 +631,9 @@ function schema.sync_table(db_path, def)
         have[name] = true
     end
     for _, field in ipairs(def.fields) do
-        if have[field.name] == nil then
+        if is_multi_field_type(field.type) then
+            schema.ensure_multi_field_table(db_path, def.name, field)
+        elseif have[field.name] == nil then
             db.exec(db_path, string.format(
                 "ALTER TABLE %s ADD COLUMN %s %s;", def.name, db.quote_ident(field.name), SQL_TYPE[field.type]
             ))
@@ -334,8 +657,30 @@ end
 
 -- Scans the schemas directory, registers any schema files found,
 -- and ensures all projected tables are synced/created.
+-- Dropdowns first, always -- an entity schema field can reference a
+-- named dropdown (`dropdown = "..."`), and schema.register resolves
+-- that reference's *current* values immediately (into entity_field.
+-- enum_values), so the dropdown must already be registered by the time
+-- any schema file referencing it is processed. dropdowns/ missing
+-- entirely is fine (no dropdowns defined yet) -- only schemas/ missing
+-- is a real error, since every deployment has at least that directory.
 function schema.sync_all(db_path, root)
     config = require("config")
+
+    dropdowns_dir = config.dropdowns_dir(root)
+    attr = lfs.attributes(dropdowns_dir)
+    if attr != nil and attr.mode == "directory" then
+        for file_name in lfs.dir(dropdowns_dir) do
+            if string.match(file_name, "%.lua$") != nil then
+                full_path = paths.joinpath(dropdowns_dir, file_name)
+                def, err = schema.load_dropdown_file(full_path)
+                if def != nil then
+                    schema.register_dropdown(db_path, def)
+                end
+            end
+        end
+    end
+
     schemas_dir = config.schemas_dir(root)
     attr = lfs.attributes(schemas_dir)
     if attr == nil or attr.mode != "directory" then
@@ -520,7 +865,7 @@ function schema.relationships(db_path)
     for _, t in ipairs(types) do
         fields = schema.fields(db_path, t.name)
         for _, field in ipairs(fields) do
-            if field.type == "reference" and field.ref_entity_type != nil and field.ref_entity_type != "" then
+            if (field.type == "reference" or field.type == "multi_reference") and field.ref_entity_type != nil and field.ref_entity_type != "" then
                 table.insert(edges, {from_type = t.name, to_type = field.ref_entity_type, field_name = field.name})
             end
         end

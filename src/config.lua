@@ -137,6 +137,17 @@ function config.templates_dir(root)
     return paths.joinpath(root, "templates")
 end
 
+-- task #84: named, reusable value lists a select/multi_select field can
+-- reference (`dropdown = "work_process"`) instead of inlining its own
+-- `values` list -- so several fields (or several entity types) can
+-- share one list and a single edit updates every field referencing it.
+function config.dropdowns_dir(root)
+    if root == nil then
+        root = config.find_root()
+    end
+    return paths.joinpath(root, "dropdowns")
+end
+
 function config.session_secret_path(root)
     if root == nil then
         root = config.find_root()

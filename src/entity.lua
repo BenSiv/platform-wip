@@ -138,7 +138,44 @@ function entity.validate(db_path, entity_type, values, old)
     for _, field in ipairs(fields) do
         value = values[field.name]
 
-        if (value == nil or value == "") then
+        if field.type == "multi_select" or field.type == "multi_reference" then
+            items = schema.normalize_multi_value(value)
+            if #items == 0 then
+                if tonumber(field.required) == 1 then
+                    table.insert(issues, {field = field.name, severity = "error",
+                        message = "required field is missing"})
+                end
+            elseif field.type == "multi_select" then
+                allowed = json.decode(field.enum_values)
+                if allowed == nil then
+                    allowed = {}
+                end
+                for _, item in ipairs(items) do
+                    ok = false
+                    for _, v in ipairs(allowed) do
+                        if tostring(v) == tostring(item) then
+                            ok = true
+                        end
+                    end
+                    if ok == false then
+                        table.insert(issues, {field = field.name, severity = "error",
+                            message = "contains a value not in the declared list: " .. tostring(item)})
+                    end
+                end
+            else
+                ref_type = entity_type
+                if field.ref_entity_type != nil then
+                    ref_type = field.ref_entity_type
+                end
+                for _, item in ipairs(items) do
+                    found = entity.get(db_path, ref_type, tonumber(item))
+                    if found == nil then
+                        table.insert(issues, {field = field.name, severity = "error",
+                            message = "references a nonexistent " .. ref_type .. " entity: " .. tostring(item)})
+                    end
+                end
+            end
+        elseif (value == nil or value == "") then
             if tonumber(field.required) == 1 then
                 table.insert(issues, {field = field.name, severity = "error",
                     message = "required field is missing"})
@@ -201,20 +238,42 @@ function has_error(issues)
 end
 
 -- Creates an entity. Returns (entity_id, issues) on success, or
--- (nil, issues) if validation failed.
+-- (nil, issues) if validation failed. Multivalue fields (task #84)
+-- never become a column in the main INSERT -- they're written to their
+-- own companion junction table (schema.write_multi_field) once the
+-- row's own id exists. A create's own field_changes (ledger.
+-- append_create, below) needs no special handling for them: JSON
+-- already represents an array fine as the "new" value.
 function entity.create(db_path, entity_type, values, author, source)
     issues = entity.validate(db_path, entity_type, values)
     if has_error(issues) then
         return nil, issues
     end
 
-    entity_id = ledger.append_create(db_path, entity_type, values, author, source)
+    multi_fields = schema.multi_fields_by_name(db_path, entity_type)
+
+    -- The ledger's own audit copy normalizes a multivalue field to a
+    -- real array (matching entity.update's own field_changes shape)
+    -- rather than whatever raw form the caller submitted (a CLI's
+    -- comma-separated string, an already-real JSON array, ...) -- audit
+    -- history should read the same way regardless of create vs. update.
+    ledger_values = {}
+    for name, value in pairs(values) do
+        if multi_fields[name] != nil then
+            ledger_values[name] = schema.normalize_multi_value(value)
+        else
+            ledger_values[name] = value
+        end
+    end
+    entity_id = ledger.append_create(db_path, entity_type, ledger_values, author, source)
 
     columns = {"id"}
     literals = {tostring(entity_id)}
     for name, value in pairs(values) do
-        table.insert(columns, db.quote_ident(name))
-        table.insert(literals, db.literal(value))
+        if multi_fields[name] == nil then
+            table.insert(columns, db.quote_ident(name))
+            table.insert(literals, db.literal(value))
+        end
     end
     table.insert(columns, "created_by")
     table.insert(literals, db.literal(author))
@@ -226,10 +285,36 @@ function entity.create(db_path, entity_type, values, author, source)
         entity_type, table.concat(columns, ", "), table.concat(literals, ", ")
     ))
 
+    for name, field in pairs(multi_fields) do
+        if values[name] != nil then
+            schema.write_multi_field(db_path, entity_type, entity_id, field, values[name])
+        end
+    end
+
     extension.enqueue_after_hooks(db_path, config.extensions_dir(),
         "entity.after_create", entity_type, entity_id, values, nil)
 
     return entity_id, issues
+end
+
+-- Whether two multivalue sets are the same, order-independent (a
+-- junction table's own SELECT has no guaranteed row order, and neither
+-- does the caller's own submitted list necessarily) -- a real set
+-- comparison, not a positional one.
+function multi_values_equal(a, b)
+    if #a != #b then
+        return false
+    end
+    seen = {}
+    for _, v in ipairs(a) do
+        seen[tostring(v)] = true
+    end
+    for _, v in ipairs(b) do
+        if seen[tostring(v)] == nil then
+            return false
+        end
+    end
+    return true
 end
 
 -- Updates an entity. Computes the old/new diff itself (from the current
@@ -237,6 +322,13 @@ end
 -- schema set require_reason_on_update -- checked here, not in
 -- ledger.lua, since the ledger itself has no opinion on any particular
 -- type's own policy.
+--
+-- Multivalue fields (task #84) are diffed as real old/new *sets* here,
+-- not just a scalar inequality check, and resynced into their own
+-- companion junction table (schema.write_multi_field) after the row's
+-- own UPDATE -- without this, editing a multi_reference/multi_select
+-- field would be completely invisible to ledger history, undermining
+-- this platform's core "every change is ledgered" guarantee.
 function entity.update(db_path, entity_type, entity_id, values, author, source, reason)
     current = entity.get(db_path, entity_type, entity_id)
     if current == nil then
@@ -260,17 +352,32 @@ function entity.update(db_path, entity_type, entity_id, values, author, source, 
         return nil, issues
     end
 
+    multi_fields = schema.multi_fields_by_name(db_path, entity_type)
+
     field_changes = {}
     assignments = {}
+    multi_changed = false
     for name, new_value in pairs(values) do
-        old_value = current[name]
-        if tostring(old_value) != tostring(new_value) then
-            field_changes[name] = {old = old_value, new = new_value}
-            table.insert(assignments, db.quote_ident(name) .. " = " .. db.literal(new_value))
+        if multi_fields[name] != nil then
+            new_items = schema.normalize_multi_value(new_value)
+            old_items = current[name]
+            if old_items == nil then
+                old_items = {}
+            end
+            if multi_values_equal(old_items, new_items) == false then
+                field_changes[name] = {old = old_items, new = new_items}
+                multi_changed = true
+            end
+        else
+            old_value = current[name]
+            if tostring(old_value) != tostring(new_value) then
+                field_changes[name] = {old = old_value, new = new_value}
+                table.insert(assignments, db.quote_ident(name) .. " = " .. db.literal(new_value))
+            end
         end
     end
 
-    if #assignments == 0 then
+    if #assignments == 0 and multi_changed == false then
         return entity_id, issues
     end
 
@@ -281,6 +388,12 @@ function entity.update(db_path, entity_type, entity_id, values, author, source, 
     db.exec(db_path, string.format(
         "UPDATE %s SET %s WHERE id = %d;", entity_type, table.concat(assignments, ", "), entity_id
     ))
+
+    for name, field in pairs(multi_fields) do
+        if values[name] != nil and field_changes[name] != nil then
+            schema.write_multi_field(db_path, entity_type, entity_id, field, values[name])
+        end
+    end
 
     extension.enqueue_after_hooks(db_path, config.extensions_dir(),
         "entity.after_update", entity_type, entity_id, merged, current)
@@ -392,6 +505,15 @@ function entity.create_batch(db_path, entity_type, rows_values, author, source)
     return created_ids, batch_issues
 end
 
+-- Attaches every multivalue field's current set to the returned row
+-- (task #84) -- one extra schema.fields lookup plus one query per
+-- multivalue field on this entity type, on every single call, including
+-- the "does this referenced row exist" checks entity.validate itself
+-- makes. Accepted as-is for correctness (a caller reading a row should
+-- see its true complete shape) rather than optimized away -- revisit
+-- only if this entity type's real read volume makes it actually show
+-- up, the same "no premature optimization" bar this codebase already
+-- applies elsewhere (e.g. document.search's own O(n) scan).
 function entity.get(db_path, entity_type, entity_id)
     if db.table_exists(db_path, entity_type) == false then
         return nil
@@ -402,7 +524,13 @@ function entity.get(db_path, entity_type, entity_id)
     if rows == nil then
         return nil
     end
-    return rows[1]
+    row = rows[1]
+    if row != nil then
+        for name, field in pairs(schema.multi_fields_by_name(db_path, entity_type)) do
+            row[name] = schema.read_multi_field(db_path, entity_type, entity_id, field)
+        end
+    end
+    return row
 end
 
 -- `limit`/`offset` are both optional; omit either (or both) for the
@@ -494,6 +622,20 @@ function entity.run_pending_jobs(db_path, limit)
         end
     end
     return {ran = ran, failed = failed}
+end
+
+-- A multivalue field's value (task #84) is a plain Lua array -- tostring()
+-- on that gives an unreadable "table: 0x..." pointer, so this renders it
+-- as a real bracketed, comma-joined list instead. Scalars pass through.
+function format_cli_value(v)
+    if type(v) == "table" then
+        parts = {}
+        for _, item in ipairs(v) do
+            table.insert(parts, tostring(item))
+        end
+        return "[" .. table.concat(parts, ", ") .. "]"
+    end
+    return tostring(v)
 end
 
 function print_issues(issues)
@@ -627,7 +769,7 @@ function entity.do_entity(cmd_args, db_path)
             return
         end
         for k, v in pairs(row) do
-            print(string.format("%-20s %s", k, tostring(v)))
+            print(string.format("%-20s %s", k, format_cli_value(v)))
         end
         return
     end
