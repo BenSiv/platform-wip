@@ -172,6 +172,60 @@ trusted alone. `admin_write_only` means only an Admin can create or
 edit a `label_template` row; anyone who can view a record's `/detail`
 page can still print it.
 
+## Master/detail: a record type with a variable-length list of children
+
+Some records are naturally a fixed set of fields plus however many
+child rows a user adds -- e.g. a `composite` record built from however
+many `component` rows describe it (task #112). No new storage concept
+is needed for this: `component` is just its own record type with a
+plain `reference` field pointing at `composite`, exactly like any other
+`reference`. Children aren't picked from a pre-existing list the way a
+`multi_reference` value would be -- each one is entered fresh alongside
+its parent -- so the junction-table mechanism above doesn't apply here
+at all.
+
+```lua
+-- schemas/composite.lua
+return {
+  name = "composite",
+  fields = { {name = "lab_name", type = "text", required = true, display = true} },
+}
+```
+```lua
+-- schemas/component.lua
+return {
+  name = "component",
+  fields = {
+    {name = "composite", type = "reference", required = true, entity_type = "composite"},
+    {name = "amount", type = "number", required = false},
+  },
+}
+```
+
+Three generic mechanisms, computed from `schema.relationships()` (every
+`reference`/`multi_reference` edge across all record types) rather than
+declared per pair of types, make the actual workflow work:
+
+- **`/detail` shows a "Related records" section** for every plain
+  `reference` field elsewhere that points back at this record (e.g.
+  `component.composite -> composite`) -- a short preview of the actual
+  rows, an "+ Add component" link, and a "View all N" link once there
+  are more than the preview cap. Automatic for *any* record type with
+  an incoming `reference` -- `experiment`'s `/detail` page would start
+  showing "samples referencing this experiment" the same way, with no
+  extra schema declaration.
+- **`/register?lock_<field_name>=<value>`** fixes one field to a
+  constant across every row of the batch-entry table -- the "+ Add
+  component" link above points here with the parent's id, so adding
+  several components for one composite means never re-picking (or
+  risking mis-picking) which composite they belong to. The locked
+  field renders as a read-only display (a `reference` field resolves
+  the parent's own display label, not a bare id), not an editable
+  input.
+- **`/browse?filter_field=<field_name>&filter_value=<value>`** is the
+  same generic filter, reused for the "View all" link -- a real,
+  paginated list, not a second pagination scheme bolted onto `/detail`.
+
 ## Loading is sandboxed, not just a bare load
 
 A definition file is executable, not inert data the way a YAML/JSON

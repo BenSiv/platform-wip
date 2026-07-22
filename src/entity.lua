@@ -590,6 +590,47 @@ function entity.count(db_path, entity_type, include_archived)
     return tonumber(rows[1].n)
 end
 
+-- task #112: filtered siblings of entity.list/entity.count, for
+-- "every X that references this Y" (e.g. a mixture's ingredients) --
+-- field_name/value are trusted the same way entity_type already is
+-- throughout this file (schema-registered names from cgi.lua, not raw
+-- user input), quoted for safety regardless.
+function entity.list_by_field(db_path, entity_type, field_name, value, limit, offset, include_archived)
+    if db.table_exists(db_path, entity_type) == false then
+        return {}
+    end
+    query = "SELECT * FROM " .. entity_type .. " WHERE " .. db.quote_ident(field_name) .. " = " .. db.literal(value)
+    if include_archived != true then
+        query = query .. " AND archived_at IS NULL"
+    end
+    if limit != nil then
+        query = query .. " LIMIT " .. tostring(tonumber(limit))
+        if offset != nil then
+            query = query .. " OFFSET " .. tostring(tonumber(offset))
+        end
+    end
+    rows = db.query(db_path, query .. ";")
+    if rows == nil then
+        return {}
+    end
+    return rows
+end
+
+function entity.count_by_field(db_path, entity_type, field_name, value, include_archived)
+    if db.table_exists(db_path, entity_type) == false then
+        return 0
+    end
+    query = "SELECT COUNT(*) AS n FROM " .. entity_type .. " WHERE " .. db.quote_ident(field_name) .. " = " .. db.literal(value)
+    if include_archived != true then
+        query = query .. " AND archived_at IS NULL"
+    end
+    rows = db.query(db_path, query .. ";")
+    if rows == nil or rows[1] == nil then
+        return 0
+    end
+    return tonumber(rows[1].n)
+end
+
 -- Drains the after-hook job queue: runs each pending job (oldest first,
 -- up to `limit`), marking it done or failed. A job that errors stays
 -- 'pending' (and gets retried on the next run) until it has failed

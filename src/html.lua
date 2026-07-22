@@ -490,8 +490,13 @@ end
 -- Fossil's page wrapper sets a strict `script-src 'self' 'nonce-...'`
 -- CSP, so an inline <script> without the matching nonce is silently
 -- blocked by the browser: the page loads, but no JS in it ever runs.
-function html.render(entity_type, layout_json, nonce)
+function html.render(entity_type, layout_json, nonce, locked_fields)
     escaped_type = html.html_escape(entity_type)
+    if locked_fields == nil then
+        locked_fields = {}
+    end
+    json = require("dkjson")
+    locked_fields_json = json.encode(locked_fields)
     return string.format("""
 <div class="fossil-doc" data-title="Register %s">
     <style>
@@ -556,6 +561,13 @@ function html.render(entity_type, layout_json, nonce)
             color: #ef4444;
         }
         .cell-input-wrapper { position: relative; }
+        .cell-locked-value {
+            display: inline-block;
+            padding: 9px 12px;
+            font-size: 0.9rem;
+            color: var(--fossci-muted, #64748b);
+            font-style: italic;
+        }
         .cell-input {
             width: 100%%;
             padding: 9px 12px;
@@ -675,6 +687,7 @@ function html.render(entity_type, layout_json, nonce)
     <script nonce="%s">
         const layout = %s;
         const entityType = "%s";
+        const lockedFields = %s;
         const baseUrl = window.location.pathname.replace(/\/register\/?$/, "");
         let rowCounter = 0;
 
@@ -726,6 +739,28 @@ function html.render(entity_type, layout_json, nonce)
                 const td = document.createElement("td");
                 const wrapper = document.createElement("div");
                 wrapper.classList.add("cell-input-wrapper");
+
+                // task #112: a locked field (?lock_<name>=<value>) shows
+                // a fixed, read-only display -- e.g. which mixture these
+                // ingredients belong to -- plus a same-named hidden
+                // input so submitBatch()'s existing
+                // querySelector(`[name="..."]`) collection picks up the
+                // value with no changes needed there at all.
+                const locked = lockedFields[field.name];
+                if (locked !== undefined) {
+                    const display = document.createElement("span");
+                    display.className = "cell-locked-value";
+                    display.innerText = locked.label;
+                    wrapper.appendChild(display);
+                    const hidden = document.createElement("input");
+                    hidden.type = "hidden";
+                    hidden.name = field.name;
+                    hidden.value = locked.value;
+                    wrapper.appendChild(hidden);
+                    td.appendChild(wrapper);
+                    tr.appendChild(td);
+                    return;
+                }
 
                 let input;
                 if (field.type === "select") {
@@ -976,7 +1011,7 @@ function html.render(entity_type, layout_json, nonce)
         document.getElementById("btn-submit-batch").addEventListener("click", submitBatch);
     </script>
 </div>
-""", escaped_type, fossci_container_css(1200), fossci_button_css(), escaped_type, escaped_type, escaped_type, nonce, json_for_script(layout_json), js_string_literal(entity_type))
+""", escaped_type, fossci_container_css(1200), fossci_button_css(), escaped_type, escaped_type, escaped_type, nonce, json_for_script(layout_json), js_string_literal(entity_type), json_for_script(locked_fields_json))
 end
 
 -- A multivalue field's value (task #84) is a plain Lua array, not a
@@ -1156,11 +1191,20 @@ end
 -- each one's detail page. Pure server-rendered HTML -- no JS, so none
 -- of the CSP/nonce concerns the registration table's client-side JS
 -- has (see html.render's header comment for why that one needs one).
-function html.render_browse(db_path, entity_type, layout, rows, page, page_size, total, nonce)
+function html.render_browse(db_path, entity_type, layout, rows, page, page_size, total, nonce, filter_field, filter_value)
     if nonce == nil then
         nonce = ""
     end
     escaped_type = html.html_escape(entity_type)
+
+    -- task #112: preserves an active ?filter_field=&filter_value=
+    -- across Prev/Next -- otherwise paging past page 1 on a filtered
+    -- view (e.g. "this mixture's ingredients") would silently drop
+    -- back to the unfiltered list.
+    filter_query_suffix = ""
+    if filter_field != nil then
+        filter_query_suffix = "&filter_field=" .. html.html_escape(filter_field) .. "&filter_value=" .. html.html_escape(tostring(filter_value))
+    end
 
     header_cells = "<th>ID</th>"
     for _, field in ipairs(layout.fields) do
@@ -1198,11 +1242,11 @@ function html.render_browse(db_path, entity_type, layout, rows, page, page_size,
             " of " .. tostring(total) .. "</span>"
         pager = pager .. "<span class=\"fossci-pager-links\">"
         if page > 1 then
-            pager = pager .. "<a href=\"browse?type=" .. escaped_type .. "&page=" .. tostring(page - 1) .. "\">&laquo; Prev</a>"
+            pager = pager .. "<a href=\"browse?type=" .. escaped_type .. "&page=" .. tostring(page - 1) .. filter_query_suffix .. "\">&laquo; Prev</a>"
         end
         pager = pager .. "<span>Page " .. tostring(page) .. " of " .. tostring(last_page) .. "</span>"
         if page < last_page then
-            pager = pager .. "<a href=\"browse?type=" .. escaped_type .. "&page=" .. tostring(page + 1) .. "\">Next &raquo;</a>"
+            pager = pager .. "<a href=\"browse?type=" .. escaped_type .. "&page=" .. tostring(page + 1) .. filter_query_suffix .. "\">Next &raquo;</a>"
         end
         pager = pager .. "</span></div>"
     end
@@ -1302,7 +1346,7 @@ end
 
 -- Detail view: current field values plus the full ledger history for
 -- one entity. Also pure server-rendered HTML, no JS.
-function html.render_detail(db_path, entity_type, layout, row, history, nonce, has_label_template)
+function html.render_detail(db_path, entity_type, layout, row, history, nonce, has_label_template, related)
     if nonce == nil then
         nonce = ""
     end
@@ -1328,6 +1372,8 @@ function html.render_detail(db_path, entity_type, layout, row, history, nonce, h
             html.html_escape(field.label) .. "</span><span class=\"detail-value\">" ..
             display_field_value(db_path, field, row[field.name]) .. "</span></div>"
     end
+
+    related_html = related_records_html(db_path, related, row.id)
 
     history_rows = ""
     for _, event in ipairs(history) do
@@ -1393,6 +1439,18 @@ function html.render_detail(db_path, entity_type, layout, row, history, nonce, h
         .fossci-print-label select { padding: 6px 10px; border-radius: var(--fossci-radius-sm, 8px); border: 1px solid var(--fossci-border, #e2e8f0); }
         #fossci-print-label-status { font-size: 0.85rem; color: var(--fossci-muted, #64748b); }
         #fossci-print-label-status.fossci-admin-message-error { color: #991b1b; }
+        .fossci-related { display: flex; flex-direction: column; gap: 16px; }
+        .fossci-related-group {
+            padding: 16px 20px;
+            background: var(--fossci-bg, #f8fafc);
+            border: 1px solid var(--fossci-border, #e2e8f0);
+            border-radius: var(--fossci-radius-md, 12px);
+        }
+        .fossci-related-group h4 { margin: 0 0 10px 0; font-size: 0.95rem; color: var(--fossci-heading, #0f172a); }
+        .fossci-related-group ul { margin: 0 0 10px 0; padding-left: 20px; }
+        .fossci-related-group li { font-size: 0.9rem; margin-bottom: 4px; }
+        .fossci-related-actions { display: flex; gap: 16px; font-size: 0.85rem; }
+        .fossci-related-empty { color: var(--fossci-muted, #64748b); font-style: italic; font-size: 0.9rem; margin: 0 0 10px 0; }
     </style>
     %s
     <div class="fossci-container">
@@ -1406,6 +1464,8 @@ function html.render_detail(db_path, entity_type, layout, row, history, nonce, h
             %s
         </div>
 
+        %s
+
         <h3 class="fossci-subheading">Ledger history</h3>
         <div class="fossci-table-wrapper">
             <table id="history-table">
@@ -1417,7 +1477,53 @@ function html.render_detail(db_path, entity_type, layout, row, history, nonce, h
 </div>
 %s
 %s
-""", escaped_type, title_id_part, fossci_container_css(1200), html.popover_css(), escaped_type, title_id_part, escaped_type, print_label_html, fields_html, history_rows, html.popover_js(nonce), print_label_js_block)
+""", escaped_type, title_id_part, fossci_container_css(1200), html.popover_css(), escaped_type, title_id_part, escaped_type, print_label_html, fields_html, related_html, history_rows, html.popover_js(nonce), print_label_js_block)
+end
+
+-- task #112: "Related records" -- every real, plain `reference` field
+-- elsewhere that points back at this row (e.g. ingredient.mixture ->
+-- this mixture), computed generically by cgi.lua's related_records
+-- (schema.relationships(), not specific to any one pair of types).
+-- `related` is a list of {from_type, field_name, total, rows} (rows
+-- already capped to cgi.lua's RELATED_RECORDS_PREVIEW_LIMIT); empty
+-- list means this entity_type has no reverse references at all, not
+-- rendered.
+function related_records_html(db_path, related, entity_id)
+    if related == nil or #related == 0 then
+        return ""
+    end
+    groups_html = ""
+    for _, group in ipairs(related) do
+        escaped_from = html.html_escape(group.from_type)
+        escaped_field = html.html_escape(group.field_name)
+        rows_html = ""
+        for _, r in ipairs(group.rows) do
+            own_label = html.own_row_label(db_path, group.from_type, r)
+            link_text = "#" .. tostring(r.id)
+            if own_label != nil then
+                link_text = html.html_escape(own_label) .. " (#" .. tostring(r.id) .. ")"
+            end
+            rows_html = rows_html .. "<li><a href=\"detail?type=" .. escaped_from .. "&entity_id=" .. tostring(r.id) .. "\">" .. link_text .. "</a></li>"
+        end
+        if rows_html == "" then
+            rows_html = "<p class=\"fossci-related-empty\">None yet.</p>"
+        else
+            rows_html = "<ul>" .. rows_html .. "</ul>"
+        end
+
+        view_all = ""
+        if group.total > #group.rows then
+            view_all = "<a href=\"browse?type=" .. escaped_from .. "&filter_field=" .. escaped_field ..
+                "&filter_value=" .. tostring(entity_id) .. "\">View all " .. tostring(group.total) .. "</a>"
+        end
+        add_link = "<a href=\"register?type=" .. escaped_from .. "&lock_" .. escaped_field .. "=" .. tostring(entity_id) ..
+            "\">+ Add " .. escaped_from .. "</a>"
+
+        groups_html = groups_html .. "<div class=\"fossci-related-group\"><h4>" .. escaped_from .. " (" ..
+            tostring(group.total) .. ")</h4>" .. rows_html .. "<div class=\"fossci-related-actions\">" ..
+            add_link .. view_all .. "</div></div>"
+    end
+    return "<h3 class=\"fossci-subheading\">Related records</h3><div class=\"fossci-related\">" .. groups_html .. "</div>"
 end
 
 -- task #73: markup for the print-label control, only ever emitted when

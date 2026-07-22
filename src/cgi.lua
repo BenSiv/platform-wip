@@ -131,6 +131,65 @@ function filter_layout_columns(layout, columns_param)
     return {name = layout.name, fields = filtered_fields}
 end
 
+-- task #112: a `?lock_<field_name>=<value>` query param fixes that
+-- field's value across every row of the batch-entry table (e.g.
+-- `?lock_mixture=5` when adding several ingredients for one mixture)
+-- -- generic, not specific to any one schema/field. Only single-value
+-- fields (not multi_select/multi_reference) are supported; nothing
+-- currently needs a locked *list*. For a `reference` field, resolves a
+-- real display label (the same one entity links render elsewhere)
+-- instead of showing the user a bare id.
+function collect_locked_fields(db_path, layout, params)
+    locked = {}
+    for key, value in pairs(params) do
+        if string.sub(key, 1, 5) == "lock_" then
+            field_name = string.sub(key, 6)
+            for _, field in ipairs(layout.fields) do
+                if field.name == field_name and field.type != "multi_select" and field.type != "multi_reference" then
+                    -- NOT named `label` -- that bare global is the
+                    -- required `label` module (src/label.lua, task
+                    -- #73); reassigning it here would silently break
+                    -- any later `label.xxx` call in this same request.
+                    display_label = value
+                    if field.type == "reference" and field.ref_entity_type != nil then
+                        resolved = html.entity_display_label(db_path, field.ref_entity_type, tonumber(value))
+                        if resolved != nil then
+                            display_label = resolved
+                        end
+                    end
+                    locked[field_name] = {value = value, label = display_label}
+                end
+            end
+        end
+    end
+    return locked
+end
+
+-- task #112: how many preview rows (mixture -> its own ingredients,
+-- etc.) render inline on /detail before pointing at the full,
+-- paginated /browse view instead.
+RELATED_RECORDS_PREVIEW_LIMIT = 10
+
+-- Every real, plain `reference` field elsewhere that points back at
+-- this entity_type -- e.g. ingredient.mixture -> mixture -- with a
+-- short preview of the actual rows. Fully generic: computed from
+-- schema.relationships(), not specific to any one pair of types.
+-- multi_reference edges are skipped -- those live in a companion
+-- junction table (task #84), not a plain column on the referencing
+-- type's own table, so entity.list_by_field's WHERE <field> = <id>
+-- wouldn't apply to them the same way.
+function related_records(db_path, entity_type, entity_id)
+    result = {}
+    for _, edge in ipairs(schema.relationships(db_path)) do
+        if edge.to_type == entity_type and edge.field_type == "reference" then
+            total = entity.count_by_field(db_path, edge.from_type, edge.field_name, entity_id)
+            rows = entity.list_by_field(db_path, edge.from_type, edge.field_name, entity_id, RELATED_RECORDS_PREVIEW_LIMIT)
+            table.insert(result, {from_type = edge.from_type, field_name = edge.field_name, total = total, rows = rows})
+        end
+    end
+    return result
+end
+
 -- The `entry` query param is the embedding notebook entry's identifier,
 -- whatever the client sent. Optional.
 function source_from_params(params)
@@ -558,7 +617,8 @@ function cgi.handle_request()
         layout = filter_layout_columns(layout, params.columns)
         layout_json = json.encode(layout)
 
-        body = html.render(entity_type, layout_json, nonce)
+        locked_fields = collect_locked_fields(db_path, layout, params)
+        body = html.render(entity_type, layout_json, nonce, locked_fields)
         page_context = {page_type = "entity_register", entity_type = entity_type, title = entity_type .. " · Register"}
         return print_response("200 OK", "text/html",
             html.page_shell(entity_type .. " · Register", "data", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author, page_context))
@@ -578,14 +638,36 @@ function cgi.handle_request()
             return print_response("404 Not Found", "text/html", "<h3>Error: " .. tostring(err) .. "</h3>")
         end
 
+        -- task #112: optional generic filter, e.g.
+        -- ?filter_field=mixture&filter_value=5 for "this mixture's
+        -- ingredients" -- reuses /browse's own existing pagination
+        -- rather than a bespoke list inside /detail. filter_field must
+        -- name a real field on this type (same reasoning `columns` is
+        -- checked against layout.fields in filter_layout_columns).
+        filter_field = nil
+        if params.filter_field != nil and params.filter_field != "" and params.filter_value != nil then
+            for _, field in ipairs(layout.fields) do
+                if field.name == params.filter_field then
+                    filter_field = params.filter_field
+                end
+            end
+        end
+
         page = tonumber(params.page)
         if page == nil or page < 1 then
             page = 1
         end
-        total = entity.count(db_path, entity_type)
         offset = (page - 1) * BROWSE_PAGE_SIZE
-        rows = entity.list(db_path, entity_type, BROWSE_PAGE_SIZE, offset)
-        body = html.render_browse(db_path, entity_type, layout, rows, page, BROWSE_PAGE_SIZE, total, nonce)
+        total = nil
+        rows = nil
+        if filter_field != nil then
+            total = entity.count_by_field(db_path, entity_type, filter_field, params.filter_value)
+            rows = entity.list_by_field(db_path, entity_type, filter_field, params.filter_value, BROWSE_PAGE_SIZE, offset)
+        else
+            total = entity.count(db_path, entity_type)
+            rows = entity.list(db_path, entity_type, BROWSE_PAGE_SIZE, offset)
+        end
+        body = html.render_browse(db_path, entity_type, layout, rows, page, BROWSE_PAGE_SIZE, total, nonce, filter_field, params.filter_value)
         page_context = {page_type = "entity_browse", entity_type = entity_type, title = entity_type .. " · Browse"}
         return print_response("200 OK", "text/html",
             html.page_shell(entity_type .. " · Browse", "data", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author, page_context))
@@ -671,7 +753,8 @@ function cgi.handle_request()
 
         history = ledger.history(db_path, entity_id)
         has_label_template = label.has_template(db_path, entity_type)
-        body = html.render_detail(db_path, entity_type, layout, row, history, nonce, has_label_template)
+        related = related_records(db_path, entity_type, entity_id)
+        body = html.render_detail(db_path, entity_type, layout, row, history, nonce, has_label_template, related)
         page_context = {page_type = "entity_detail", entity_type = entity_type, entity_id = entity_id,
                          title = entity_type .. " #" .. tostring(entity_id)}
         return print_response("200 OK", "text/html",

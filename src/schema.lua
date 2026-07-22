@@ -899,7 +899,13 @@ function schema.relationships(db_path)
         fields = schema.fields(db_path, t.name)
         for _, field in ipairs(fields) do
             if (field.type == "reference" or field.type == "multi_reference") and field.ref_entity_type != nil and field.ref_entity_type != "" then
-                table.insert(edges, {from_type = t.name, to_type = field.ref_entity_type, field_name = field.name})
+                -- task #112: field_type lets a caller tell a plain
+                -- `reference` (a real column on from_type -- reverse-
+                -- queryable directly, see cgi.lua's related_records)
+                -- apart from `multi_reference` (stored in a separate
+                -- junction table instead, schema.ensure_multi_field_table
+                -- -- not reverse-queryable the same way).
+                table.insert(edges, {from_type = t.name, to_type = field.ref_entity_type, field_name = field.name, field_type = field.type})
             end
         end
     end
