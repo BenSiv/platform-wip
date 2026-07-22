@@ -61,11 +61,20 @@ CREATE TABLE IF NOT EXISTS document_link (
 );
 """
 
--- A document's cached semantic-search embedding -- computed and stored
--- explicitly (document.reindex_embedding/_all), never automatically on
--- every save, since that would mean every save costs a real embedding
--- API call. Search itself only ever *reads* this cache; it never
--- computes a document's embedding on the fly.
+-- A document's cached semantic-search embedding. Recomputed on every
+-- create_page/update_page (task #105) -- one embedding API call per
+-- save, not a corpus reindex, cheap in both latency and cost (the same
+-- order of magnitude as any other external API call this codebase
+-- already makes synchronously). Best-effort: document.reindex_embedding
+-- already returns nil/err rather than throwing on failure (an
+-- unconfigured provider, a network hiccup, ...), and create_page/
+-- update_page ignore that return value entirely -- a page save must
+-- never fail just because the embedding call did. document.reindex_all_
+-- embeddings/the CLI's own `reindex-embeddings` command still exist for
+-- bulk backfilling a store whose documents predate this (or after a
+-- provider outage), not as the only way to populate this cache anymore.
+-- Search itself only ever *reads* this cache; it never computes a
+-- document's embedding on the fly.
 DOCUMENT_EMBEDDING_SCHEMA = """
 CREATE TABLE IF NOT EXISTS document_embedding (
     document_id INTEGER PRIMARY KEY,
@@ -361,6 +370,7 @@ function document.create_page(db_path, author, title, parent_id, content, source
         return nil, issues
     end
     document.sync_links(db_path, created_id, content)
+    document.reindex_embedding(db_path, created_id)
     return created_id, issues
 end
 
@@ -371,6 +381,7 @@ function document.update_page(db_path, author, document_id, title, parent_id, co
         return nil, issues
     end
     document.sync_links(db_path, updated_id, content)
+    document.reindex_embedding(db_path, updated_id)
     return updated_id, issues
 end
 
@@ -660,14 +671,17 @@ end
 -- The scoring formula is adapted from brain-ex's
 -- knowledge_pool.search_score -- ported the reusable core (field-
 -- weighted lexical matching, a whole-query substring bonus, blended
--- embedding cosine-similarity, a relevance floor) and dropped what
--- doesn't apply to Pages: there's no curation-tier, heat/retrieval-
--- count reinforcement, or duplicate-suppression concept the way
--- brain-ex's knowledge_pool has for notes.
+-- embedding cosine-similarity, a relevance floor). Originally dropped
+-- curation-tier/heat-retrieval reinforcement and duplicate-suppression
+-- as not applicable to Pages -- task #106 added them back in, once
+-- tier/heat/duplicate_of/merged_into became real columns on `document`
+-- itself (see this section's own tier/heat block in search_score/
+-- search below).
 
--- Computes and caches one document's embedding -- an explicit,
--- deliberate action (CLI/route-triggered), never a side effect of
--- saving a document (see DOCUMENT_EMBEDDING_SCHEMA's own comment).
+-- Computes and caches one document's embedding -- best-effort, called
+-- from create_page/update_page on every save (task #105) as well as
+-- explicitly via the CLI/document.reindex_all_embeddings for bulk
+-- backfill (see DOCUMENT_EMBEDDING_SCHEMA's own comment).
 function document.reindex_embedding(db_path, document_id)
     agent_provider = require("agent_provider")
     json = require("dkjson")
@@ -882,10 +896,9 @@ function document.search(db_path, query_text, limit, use_semantic)
 end
 
 -- CLI entry point: `platform document reindex-embeddings [entity_id]`
--- -- the only way (short of calling document.reindex_embedding/_all
--- directly) to actually populate document_embedding, since computing
--- an embedding costs a real API call and must never happen as an
--- automatic side effect of saving a page.
+-- -- for bulk backfill (documents saved before task #105, or after a
+-- provider outage silently dropped some best-effort saves) now that
+-- create_page/update_page already reindex on every save.
 function document.do_document(cmd_args, db_path)
     action = cmd_args[1]
 

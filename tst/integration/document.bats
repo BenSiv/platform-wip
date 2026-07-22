@@ -175,13 +175,46 @@ raw_document_preview() {
     [[ "$output" =~ "No pages yet" ]]
 }
 
-@test "document reindex-embeddings CLI populates cached embeddings, explicitly not on every save" {
-    save_document "csrf_token=${CSRF}&title=Home&parent_id=&content=hello" >/dev/null
+save_document_as() {
+    local provider="$1" body="$2"
+    printf '%s' "$body" | AGENT_PROVIDER="$provider" \
+        GATEWAY_INTERFACE="CGI/1.1" REQUEST_METHOD="POST" PATH_INFO="/document-save" QUERY_STRING="" \
+        HTTP_COOKIE="$COOKIE" "$BIN"
+}
+
+@test "creating and updating a page auto-computes its embedding (task #105)" {
+    save_document_as "test" "csrf_token=${CSRF}&title=Home&parent_id=&content=hello" >/dev/null
+    run bash -c "cd '$TEST_DIR' && sqlite3 .store/store.db 'SELECT COUNT(*) FROM document_embedding;'"
+    [ "$output" = "1" ]
+
+    # Updating recomputes it too, not just create -- still exactly one
+    # row (REPLACE INTO document_embedding, keyed on document_id), not a
+    # second stale one left behind.
+    save_document_as "test" "csrf_token=${CSRF}&entity_id=1&title=Home&parent_id=&content=updated content" >/dev/null
+    run bash -c "cd '$TEST_DIR' && sqlite3 .store/store.db 'SELECT COUNT(*) FROM document_embedding;'"
+    [ "$output" = "1" ]
+}
+
+@test "an unconfigured/failing embedding provider never fails the page save itself (best-effort)" {
+    # No AGENT_PROVIDER set -> defaults to vertex -> VERTEX_PROJECT is
+    # unset in this test environment -> agent_provider_vertex.embeddings
+    # returns nil, err gracefully (never throws) -- document.
+    # create_page must still succeed and never propagate that failure.
+    run save_document "csrf_token=${CSRF}&title=Home&parent_id=&content=hello"
+    [[ "$output" =~ "302 Found" ]]
 
     run "$BIN" entity list document
-    # Saving a page never computes an embedding as a side effect --
-    # only the explicit reindex command does (see document.lua's own
-    # comment on why: it's a real, avoidable API cost per save).
+    [[ "$output" =~ "#1" ]]
+    run bash -c "cd '$TEST_DIR' && sqlite3 .store/store.db 'SELECT COUNT(*) FROM document_embedding;'"
+    [ "$output" = "0" ]
+}
+
+@test "document reindex-embeddings CLI still exists, for bulk backfill after a save-time provider failure" {
+    save_document "csrf_token=${CSRF}&title=Home&parent_id=&content=hello" >/dev/null
+    # The save above ran with no configured provider, so it never got
+    # an embedding (see the previous test) -- reindex-embeddings is how
+    # a store backfills those after the fact, or after a provider
+    # outage silently dropped some best-effort saves.
     run bash -c "cd '$TEST_DIR' && sqlite3 .store/store.db 'SELECT COUNT(*) FROM document_embedding;'"
     [ "$output" = "0" ]
 
