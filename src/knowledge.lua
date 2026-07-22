@@ -197,6 +197,35 @@ function knowledge.create_document_note(db_path, author, title, body, source_typ
     return document_id
 end
 
+-- task #107: the agent-driven counterpart to knowledge.create_document_
+-- note's reasoning-note path -- a genuinely new, concise, single-idea
+-- document distilled from a source (an existing page, a chat
+-- exchange), not a raw mirror of it. Always starts at tier 0 like any
+-- new pool document -- earns its way up through the same heat/
+-- retrieval mechanism as everything else, never pre-promoted just
+-- because an agent wrote it. Flattens entity.create's own {field,
+-- severity, message} issues shape into a plain string, same as the old
+-- materialize_note did -- both the CLI and the agent tool dispatch
+-- just want a message, not that shape.
+function knowledge.distill_document(db_path, author, source_document_id, title, body)
+    document_id, issues = knowledge.create_document_note(db_path, author, title, body, "distilled", source_document_id, nil)
+    if document_id == nil then
+        messages = {}
+        if issues != nil then
+            for _, issue in ipairs(issues) do
+                if issue.severity == "error" then
+                    table.insert(messages, tostring(issue.message))
+                end
+            end
+        end
+        if #messages == 0 then
+            return nil, "failed to create the distilled document"
+        end
+        return nil, table.concat(messages, "; ")
+    end
+    return document_id
+end
+
 --------------------------------------------------------------------------
 -- Retrieval logging
 --------------------------------------------------------------------------
@@ -656,7 +685,7 @@ function knowledge.do_knowledge(cmd_args, db_path)
         return
     end
 
-    print("Usage: platform knowledge <stats|list [tier]|show <document_id>|promote <document_id> <tier>>")
+    print("Usage: platform knowledge <stats|list [tier]|show <document_id>|promote <document_id> <tier>|distill>")
 end
 
 return knowledge

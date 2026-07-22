@@ -405,15 +405,15 @@ AGENT_TOOLS = {
         update = {destructive = true},
     },
     -- Read-only introspection into the knowledge pool's own tiering/
-    -- retrieval activity (see knowledge.lua). task #106: no destructive
-    -- knowledge tool exists any more -- tier/heat live directly on
-    -- `document`, so there's no separate "materialize a note into a
-    -- real page" step left to gate; every pool record already is a
-    -- real page. A real distillation tool (task #107) will land here
-    -- once it exists.
+    -- retrieval activity (see knowledge.lua), plus one destructive tool
+    -- (task #107): `distill` writes a genuinely new, single-idea
+    -- document extracted from a source -- a real write (a new
+    -- document/entity_event row), so it needs the same human-approval
+    -- gate every other destructive tool has.
     knowledge = {
         stats = {destructive = false},
         list = {destructive = false},
+        distill = {destructive = true},
     },
 }
 
@@ -644,9 +644,12 @@ function agent.execute_tool(db_path, author, session_id, tool_name, method_name,
         )
     end
 
-    -- Read-only listing (task #87, updated #106) -- surfaces the pool's
-    -- real document ids/tiers/sources to the model. Optional args.tier
-    -- filters, same as the CLI.
+    -- Read-only listing (task #87, updated #106/#107) -- surfaces the
+    -- pool's real document ids/tiers/atomicity to the model. Atomicity
+    -- (task #107) is what the distillation pass reads to decide what's
+    -- actually worth distilling from -- "ok" already covers one focused
+    -- idea, nothing to extract that isn't already there. Optional
+    -- args.tier filters, same as the CLI.
     if tool_name == "knowledge" and method_name == "list" then
         rows = knowledge.list_documents(db_path, tonumber(args.tier))
         if #rows == 0 then
@@ -654,13 +657,34 @@ function agent.execute_tool(db_path, author, session_id, tool_name, method_name,
         end
         lines = {}
         for _, row in ipairs(rows) do
+            body = row.content
+            if body == nil then
+                body = ""
+            end
             table.insert(lines, string.format(
-                "#%s [tier %s] %s (heat=%.2f, retrievals=%s)",
-                tostring(row.id), tostring(row.tier), tostring(row.title),
+                "#%s [tier %s, %s] %s (heat=%.2f, retrievals=%s)",
+                tostring(row.id), tostring(row.tier), document.atomicity_status(body), tostring(row.title),
                 row.effective_heat, tostring(row.retrieval_count)
             ))
         end
         return table.concat(lines, "\n")
+    end
+
+    -- Destructive (task #107): writes a new, concise, single-idea
+    -- document distilled from a source the agent has read -- the real
+    -- counterpart to knowledge.create_document_note's reasoning-note
+    -- path. A genuine write (a new document/entity_event row), so this
+    -- goes through the same pending-action approval flow as
+    -- document.create/entity.create.
+    if tool_name == "knowledge" and method_name == "distill" then
+        if args.title == nil or args.content == nil then
+            return nil, "distill requires title and content"
+        end
+        document_id, err = knowledge.distill_document(db_path, author, tonumber(args.source_document_id), args.title, args.content)
+        if document_id == nil then
+            return nil, tostring(err)
+        end
+        return "Distilled document #" .. tostring(document_id) .. " (source #" .. tostring(args.source_document_id) .. ")"
     end
 
     return nil, "unknown tool: " .. tostring(tool_name) .. "." .. tostring(method_name)
@@ -803,7 +827,8 @@ Available tools:
 - entity.create -- create a new entity row. Args: entity_type=<name>, plus one arg per field (e.g. status=open, due_date=2026-08-01)
 - entity.update -- update fields on an existing entity row. Args: entity_type=<name>, entity_id=<id>, reason=<optional: why this change is being made>, plus one arg per field to change. Some entity types require a reason -- if the tool result says one is required, ask the user why before retrying.
 - knowledge.stats -- summarize the knowledge pool's tier distribution and retrieval activity. No args.
-- knowledge.list -- list knowledge pool documents with their id, tier, heat, and retrieval count. Args: tier=<optional, filter to one tier 0-3>
+- knowledge.list -- list knowledge pool documents with their id, tier, atomicity (ok/thin/needs-split), heat, and retrieval count. Args: tier=<optional, filter to one tier 0-3>
+- knowledge.distill -- write a new, concise, single-idea document distilled from a source you've actually read (e.g. via entity.get). Not a raw copy -- extract the one core idea in your own words. Only do this for a source that's genuinely not already atomic ("thin"/"ok" sources have nothing worth extracting). Args: title=<title>, content=<the distilled markdown text>, source_document_id=<optional: the existing document this was distilled from>. Requires human approval before anything is actually written.
 
 If you don't already know an entity type's fields, call entity.fields first rather than guessing field names.
 
@@ -919,13 +944,41 @@ function agent.run_turn(db_path, session_id, login, system_prompt, model, user_m
     return {status = "turn_limit", message = "Unable to complete tool-assisted run in " .. tostring(MAX_TURNS) .. " turns."}
 end
 
--- task #106: the old agent-driven review pass (agent.run_knowledge_
--- review / KNOWLEDGE_REVIEW_SYSTEM_PROMPT) was removed here -- its one
--- job was deciding which notes were ready for knowledge.materialize,
--- which no longer exists (every pool record already is a real page;
--- see document.lua/knowledge.lua headers). Real agent-driven
--- distillation -- generating genuinely atomic derivative notes, not
--- just promoting a tier number -- is task #107's job, not this one's.
+-- task #107: the agent-driven distillation pass -- unlike knowledge.
+-- review_retrieval (rule-based, runs automatically after every real
+-- search), this is a genuine model call: actually read a candidate
+-- document's full content (via entity.get, not just knowledge.list's
+-- own summary) and write a new, concise, single-idea document distilled
+-- from it, rather than just promoting a tier number the way the old
+-- (task #106-removed) materialize pass did. Not automatic on every
+-- search -- a real, ongoing LLM cost for something that isn't
+-- time-critical -- triggered explicitly (CLI `platform knowledge
+-- distill`; task #108's queue is the actual automated trigger once it
+-- exists).
+--
+-- Deliberately just a normal chat session/turn, not a separate
+-- pipeline: knowledge.distill is a destructive tool, so a call to it
+-- here pauses for approval exactly like any user-initiated chat does
+-- (agent.run_turn's own pending_approval path) -- a human still has to
+-- approve every distillation from the resulting session in the normal
+-- chat UI, same as any other destructive tool call.
+KNOWLEDGE_DISTILL_SYSTEM_PROMPT = """
+You are reviewing this deployment's knowledge pool: documents captured from real retrieval activity, tiered by how often and how reliably they've proven useful (tier 0 raw intake, tier 1 working set, tier 2 curated draft, tier 3 atomic durable record). Heat decays over time, so tier and retrieval count alone don't guarantee current relevance -- effective_heat (from knowledge.list) reflects that.
+
+Use knowledge.list to see current pool documents: id, tier, atomicity (ok / thin / needs-split), effective heat, retrieval count. For a document flagged "needs-split" (covers more than one real idea, or is unusually long/unfocused), read its full content with entity.get (entity_type=document) and write ONE genuinely atomic, single-idea document distilled from it with knowledge.distill -- concise, self-contained, in your own words, not a verbatim copy of the source. Do not distill from a document that's already "ok" or "thin" -- there's nothing worth extracting that isn't already there as-is.
+
+Distilling nothing this pass is a completely acceptable outcome -- do not distill from a document you're unsure about; say why you're leaving it alone instead. When you're done, summarize what you reviewed and what you did (or didn't) distill, and end with a <done> message.
+"""
+
+function agent.run_knowledge_distillation(db_path, login, model)
+    session_id, err = agent.create_session(db_path, login, "Knowledge Pool Distillation")
+    if session_id == nil then
+        return nil, err
+    end
+    result = agent.run_turn(db_path, session_id, login, KNOWLEDGE_DISTILL_SYSTEM_PROMPT, model,
+        "Review the current knowledge pool and distill any documents that are genuinely ready.")
+    return session_id, result
+end
 
 -- Executes an approved pending action, records its result, and resumes
 -- the turn loop from there.

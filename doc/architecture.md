@@ -440,9 +440,25 @@ in `document.lua` now, alongside the columns they score --
   record into a real page" step left to gate. The old agent-driven
   review pass (`agent.run_knowledge_review`, `platform knowledge
   review`) was removed for the same reason -- its one job was deciding
-  what to materialize. Real agent-driven distillation -- generating
-  genuinely atomic derivative notes, not just promoting a tier number --
-  is task #107's job, not a revival of this one.
+  what to materialize.
+- **Real agent-driven distillation** (task #107, `knowledge.distill`):
+  a destructive `AGENT_TOOLS` entry that writes a genuinely new,
+  concise, single-idea document extracted from a source the agent has
+  actually read (via `entity.get`), not a raw mirror of it -- the real
+  replacement for the old materialize/review pass, doing what that pass
+  never actually could (it only ever promoted a tier number). Always
+  starts at tier 0 like any new pool document, filed under the
+  Knowledge Pool folder with `source_type = 'distilled'` pointing back
+  at its source. `knowledge.list`'s tool output now includes each
+  document's `atomicity_status` (`ok`/`thin`/`needs-split`) so the
+  model can tell what's actually worth distilling from -- an already-
+  atomic document has nothing left to extract. Triggered explicitly
+  (`platform knowledge distill`, dispatched from `main.lua` directly
+  rather than `knowledge.do_knowledge` itself, for the same
+  knowledge/agent circular-require reason `review` used to be) or by
+  task #108's queue once it exists -- not automatic on every search,
+  same reasoning as the old review pass. A genuine write, so it pauses
+  for human approval exactly like `document.create`/`entity.create`.
 - **Hand-rolled tables, not `schema.register()` entities** --
   `knowledge_retrieval`/`knowledge_retrieval_document`/
   `knowledge_review`/`knowledge_context`/`knowledge_chat_eval` are
@@ -452,9 +468,9 @@ in `document.lua` now, alongside the columns they score --
   audit needs -- these are about retrieval/review *events*, not pool
   content itself, so they reference `document.id` directly rather than
   living on `document`.
-- **Surfaced two ways**: `platform knowledge <stats|list|show|promote>`
-  (CLI, mirrors `document.do_document`'s dispatch shape), and a
-  `/knowledge` page linked from System (gated identically -- Setup or
+- **Surfaced two ways**: `platform knowledge <stats|list|show|promote|
+  distill>` (CLI, mirrors `document.do_document`'s dispatch shape), and
+  a `/knowledge` page linked from System (gated identically -- Setup or
   Admin capability) with stat tiles, the tier breakdown, and a
   recent-retrievals list. Deliberately not its own sidebar icon -- chat
   session browsing (`/chat`) is one link away from here instead of a
@@ -478,6 +494,6 @@ in `document.lua` now, alongside the columns they score --
   `document_link` connections between related documents it notices,
   not just passively scoring the links a user already wrote. That's
   real new write surface (almost certainly a destructive, approval-
-  gated `AGENT_TOOLS` entry, same bar as `document.create`/`update`),
-  worth scoping properly alongside task #107's real distillation work
-  rather than building ad hoc.
+  gated `AGENT_TOOLS` entry, same bar as `knowledge.distill`/
+  `document.create`), worth scoping properly on its own rather than
+  building ad hoc.

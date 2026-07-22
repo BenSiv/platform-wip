@@ -103,6 +103,65 @@ send_message() {
     [[ "$output" =~ "error|error" ]]
 }
 
+@test "knowledge.distill proposes a new distilled document, gated behind approval, then creates it under the Knowledge Pool folder once approved" {
+    # Created via the real entity path (not a raw SQL insert) -- document
+    # rows get their id from ledger.append_create's own auto-increment
+    # sequence, so a hand-inserted row with an explicit id would collide
+    # with the next entity.create call's id.
+    "$BIN" entity create document title="Sprawling page" content="Long unfocused content."
+    source_id=$(sqlite3 .store/store.db "SELECT id FROM document WHERE title = 'Sprawling page';")
+
+    read session csrf < <(session_for admin secret123)
+    chat_session=$(start_chat "$session" "$csrf" "Test")
+    scripted="<tool>knowledge</tool><method>distill</method><args>title=Core idea
+content=The one core idea, distilled.
+source_document_id=${source_id}</args>"
+    send_message "$session" "$csrf" "$chat_session" "distill the sprawling page" "$scripted" > /dev/null
+
+    run sqlite3 .store/store.db "SELECT status, tool, method FROM agent_pending_action;"
+    [[ "$output" =~ "pending|knowledge|distill" ]]
+    # Nothing written yet -- still just a pending action.
+    run sqlite3 .store/store.db "SELECT COUNT(*) FROM document WHERE title = 'Core idea';"
+    [ "$output" -eq 0 ]
+
+    pending_id=$(sqlite3 .store/store.db "SELECT id FROM agent_pending_action;")
+    printf 'csrf_token=%s&pending_id=%s&session_id=%s' "$csrf" "$pending_id" "$chat_session" | \
+        AGENT_PROVIDER=test AGENT_TEST_RESPONSES=$'<done>Distilled.</done>' \
+        GATEWAY_INTERFACE="CGI/1.1" REQUEST_METHOD="POST" PATH_INFO="/chat-approve" QUERY_STRING="" \
+        HTTP_COOKIE="session=${session}; csrf=${csrf}" "$BIN" > /dev/null
+
+    run sqlite3 .store/store.db "SELECT tier, source_type, source_id FROM document WHERE title = 'Core idea';"
+    [[ "$output" =~ "0|distilled|${source_id}" ]]
+
+    # Lands under the Knowledge Pool folder, not at the top level.
+    run sqlite3 .store/store.db "SELECT d.title FROM document d JOIN document parent ON parent.id = d.parent_id WHERE d.title = 'Core idea' AND parent.title = 'Knowledge Pool';"
+    [[ "$output" =~ "Core idea" ]]
+}
+
+@test "platform knowledge distill runs an agent turn that proposes distill, gated behind approval" {
+    # Created via the real entity path (not a raw SQL insert) -- document
+    # rows get their id from ledger.append_create's own auto-increment
+    # sequence, so a hand-inserted row with an explicit id would collide
+    # with the next entity.create call's id.
+    "$BIN" entity create document title="Sprawling page" content="Long unfocused content."
+    source_id=$(sqlite3 .store/store.db "SELECT id FROM document WHERE title = 'Sprawling page';")
+
+    USER=admin AGENT_PROVIDER=test \
+        AGENT_TEST_RESPONSES="<tool>knowledge</tool><method>distill</method><args>title=Core idea
+content=The one core idea, distilled.
+source_document_id=${source_id}</args>" \
+        run "$BIN" knowledge distill
+    [[ "$output" =~ "Status: pending_approval" ]]
+    [[ "$output" =~ "knowledge.distill" ]]
+
+    # Nothing written yet -- still just a pending action, same as any
+    # other destructive tool call.
+    run sqlite3 .store/store.db "SELECT COUNT(*) FROM document WHERE title = 'Core idea';"
+    [ "$output" -eq 0 ]
+    run sqlite3 .store/store.db "SELECT status FROM agent_pending_action;"
+    [[ "$output" == "pending" ]]
+}
+
 @test "chat feedback is recorded for the owning user and rejected for anyone else" {
     read session csrf < <(session_for admin secret123)
     chat_session=$(start_chat "$session" "$csrf" "Test")
