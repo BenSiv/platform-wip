@@ -879,6 +879,30 @@ function entity.do_entity(cmd_args, db_path)
         return
     end
 
+    -- task #113: lets an external importer find every existing row
+    -- referencing a given parent (e.g. an entity_type with no stable
+    -- per-row external_id of its own, like a Mixture ingredient line
+    -- item) so it can archive-then-recreate them safely instead of
+    -- accumulating duplicates on every re-sync. Thin CLI wrapper
+    -- around the existing entity.list_by_field (task #112) -- no new
+    -- logic, just a new entry point for it.
+    if action == "list-by-field" then
+        entity_type = cmd_args[2]
+        field_name = cmd_args[3]
+        value = cmd_args[4]
+        if entity_type == nil or field_name == nil or value == nil then
+            print("Usage: fossci entity list-by-field <type> <field> <value>")
+            return
+        end
+        rows = entity.list_by_field(db_path, entity_type, field_name, value)
+        ids = {}
+        for _, row in ipairs(rows) do
+            table.insert(ids, tonumber(row.id))
+        end
+        print(json.encode(ids))
+        return
+    end
+
     if action == "create-json" then
         entity_type = cmd_args[2]
         if entity_type == nil then
@@ -934,7 +958,7 @@ function entity.do_entity(cmd_args, db_path)
         return
     end
 
-    print("Usage: fossci entity <create|list|show|update|validate-json|create-json|update-json|external-ids> [args]")
+    print("Usage: fossci entity <create|list|show|update|validate-json|create-json|update-json|external-ids|list-by-field> [args]")
 end
 
 -- CLI entry point: `fossci extension <list|show|approve|revoke|run-pending> [args]`
