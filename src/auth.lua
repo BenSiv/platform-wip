@@ -36,10 +36,22 @@ CREATE TABLE IF NOT EXISTS user (
     created_at TEXT DEFAULT (%s),
     archived_at TEXT
 );
+
+-- task #114: external-integration auth, independent of any human user
+-- -- a key's capabilities are its own, not derived from whoever created
+-- it. `label` (not a synthetic id) is the primary key, same convention
+-- as user.login -- an operator-chosen, human-meaningful, unique name.
+CREATE TABLE IF NOT EXISTS api_key (
+    label VARCHAR(255) PRIMARY KEY,
+    key_hash TEXT NOT NULL,
+    cap VARCHAR(32) NOT NULL DEFAULT '',
+    created_at TEXT DEFAULT (%s),
+    archived_at TEXT
+);
 """
 
 function auth.init_schema(db_path)
-    return db.exec(db_path, string.format(auth.SCHEMA, db.now_expr(db_path)))
+    return db.exec(db_path, string.format(auth.SCHEMA, db.now_expr(db_path), db.now_expr(db_path)))
 end
 
 -- A per-store HMAC secret, generated once from /dev/urandom and never
@@ -226,6 +238,117 @@ function auth.unarchive_user(db_path, login)
         "UPDATE user SET archived_at = NULL WHERE login = %s;", db.quote(login)
     ))
     return true
+end
+
+--------------------------------------------------------------------------
+-- API keys (task #114)
+--------------------------------------------------------------------------
+
+-- auth.create_api_key(db_path, label, cap) -> raw_key_string | nil, err
+-- Returns the raw key exactly once -- only its bcrypt hash is ever
+-- stored, the same guarantee password_hash gives for user passwords.
+function auth.create_api_key(db_path, label, cap)
+    if label == nil or label == "" then
+        return nil, "label is required"
+    end
+    if cap == nil then
+        cap = ""
+    end
+
+    existing = auth.get_api_key(db_path, label)
+    if existing != nil then
+        return nil, "api key already exists: " .. label
+    end
+
+    raw_key, err = random_hex_token(32)
+    if raw_key == nil then
+        return nil, err
+    end
+    hash = bcrypt.hash(raw_key, 12)
+    db.exec(db_path, string.format(
+        "INSERT INTO api_key (label, key_hash, cap) VALUES (%s, %s, %s);",
+        db.quote(label), db.quote(hash), db.quote(cap)
+    ))
+    return raw_key
+end
+
+function auth.get_api_key(db_path, label)
+    rows = db.query(db_path, string.format(
+        "SELECT * FROM api_key WHERE label = %s;", db.quote(label)
+    ))
+    if rows == nil or rows[1] == nil then
+        return nil
+    end
+    return rows[1]
+end
+
+function auth.list_api_keys(db_path, include_archived)
+    q = "SELECT label, cap, created_at, archived_at FROM api_key"
+    if include_archived != true then
+        q = q .. " WHERE archived_at IS NULL"
+    end
+    q = q .. " ORDER BY label ASC;"
+    rows = db.query(db_path, q)
+    if rows == nil then
+        return {}
+    end
+    return rows
+end
+
+function auth.set_api_key_capabilities(db_path, label, cap)
+    key = auth.get_api_key(db_path, label)
+    if key == nil then
+        return nil, "no such api key: " .. label
+    end
+    db.exec(db_path, string.format(
+        "UPDATE api_key SET cap = %s WHERE label = %s;", db.quote(cap), db.quote(label)
+    ))
+    return true
+end
+
+-- Archive/unarchive, not delete -- same convention as archive_user; an
+-- archived key just can no longer authenticate (see auth.verify_api_key).
+function auth.archive_api_key(db_path, label)
+    key = auth.get_api_key(db_path, label)
+    if key == nil then
+        return nil, "no such api key: " .. label
+    end
+    db.exec(db_path, string.format(
+        "UPDATE api_key SET archived_at = %s WHERE label = %s;", db.now_expr(db_path), db.quote(label)
+    ))
+    return true
+end
+
+function auth.unarchive_api_key(db_path, label)
+    key = auth.get_api_key(db_path, label)
+    if key == nil then
+        return nil, "no such api key: " .. label
+    end
+    db.exec(db_path, string.format(
+        "UPDATE api_key SET archived_at = NULL WHERE label = %s;", db.quote(label)
+    ))
+    return true
+end
+
+-- auth.verify_api_key(db_path, raw_key) -> api_key_row | nil
+-- The key is hashed, so (unlike auth.login, which looks up a known
+-- login) there's no indexed lookup by value -- every active row's hash
+-- is checked in turn. Fine at this platform's real scale (a small
+-- number of trusted integrations, not a public API).
+function auth.verify_api_key(db_path, raw_key)
+    if raw_key == nil or raw_key == "" then
+        return nil
+    end
+    rows = db.query(db_path, "SELECT * FROM api_key WHERE archived_at IS NULL;")
+    if rows == nil then
+        return nil
+    end
+    for _, row in ipairs(rows) do
+        if bcrypt.verify(raw_key, row.key_hash) then
+            return row
+        end
+    end
+    return nil
 end
 
 --------------------------------------------------------------------------
@@ -429,6 +552,97 @@ function auth.do_user(cmd_args, db_path)
     end
 
     print("Usage: platform user <add|passwd|capabilities|list|archive|unarchive> ...")
+end
+
+--------------------------------------------------------------------------
+-- CLI: `platform api-key <create|list|capabilities|archive|unarchive> ...`
+--------------------------------------------------------------------------
+
+function auth.do_api_key(cmd_args, db_path)
+    action = cmd_args[1]
+
+    if action == "create" then
+        label = cmd_args[2]
+        cap = cmd_args[3]
+        if label == nil then
+            print("Usage: platform api-key create <label> [cap]")
+            return
+        end
+        raw_key, err = auth.create_api_key(db_path, label, cap)
+        if raw_key == nil then
+            print("Error: " .. tostring(err))
+            return
+        end
+        print("Created api key " .. label .. " -- save this now, it cannot be shown again:")
+        print(raw_key)
+        return
+    end
+
+    if action == "capabilities" then
+        label = cmd_args[2]
+        cap = cmd_args[3]
+        if label == nil or cap == nil then
+            print("Usage: platform api-key capabilities <label> <cap_string>")
+            return
+        end
+        ok, err = auth.set_api_key_capabilities(db_path, label, cap)
+        if ok == nil then
+            print("Error: " .. tostring(err))
+            return
+        end
+        print("Capabilities updated for " .. label .. ": " .. cap)
+        return
+    end
+
+    if action == "list" then
+        include_archived = false
+        for _, a in ipairs(cmd_args) do
+            if a == "--include-archived" then
+                include_archived = true
+            end
+        end
+        keys = auth.list_api_keys(db_path, include_archived)
+        for _, k in ipairs(keys) do
+            status = "active"
+            if k.archived_at != nil and k.archived_at != "" then
+                status = "archived"
+            end
+            print(string.format("%s  cap=%s  %s", k.label, k.cap, status))
+        end
+        return
+    end
+
+    if action == "archive" then
+        label = cmd_args[2]
+        if label == nil then
+            print("Usage: platform api-key archive <label>")
+            return
+        end
+        ok, err = auth.archive_api_key(db_path, label)
+        if ok == nil then
+            print("Error: " .. tostring(err))
+            return
+        end
+        print("Archived api key " .. label)
+        return
+    end
+
+    if action == "unarchive" then
+        label = cmd_args[2]
+        if label == nil then
+            print("Usage: platform api-key unarchive <label>")
+            return
+        end
+        ok, err = auth.unarchive_api_key(db_path, label)
+        if ok == nil then
+            print("Error: " .. tostring(err))
+            return
+        end
+        print("Unarchived api key " .. label)
+        return
+    end
+
+    print("Usage: platform api-key <create|list|capabilities|archive|unarchive> ...")
 end
 
 return auth

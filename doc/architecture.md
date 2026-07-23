@@ -246,6 +246,12 @@ holding expires on its own schedule.
 - **Permissions** are short capability strings on the account (a
   baseline capability everyone needs, plus elevated ones for
   higher-privilege actions like ad hoc querying), checked per route.
+- **API keys** are a second, independent auth path for external/
+  programmatic callers (scripts, other systems) -- their own account-
+  like row, own capabilities, verified the same slow-hash way as a
+  password, but with no session/cookie/CSRF machinery at all: a key is
+  attached to each request directly, not carried ambiently the way a
+  cookie is. See `doc/api.md`.
 
 ## Chat
 

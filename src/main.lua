@@ -22,6 +22,7 @@ do_view = view.do_view
 
 auth = require("auth")
 do_user = auth.do_user
+do_api_key = auth.do_api_key
 
 document = require("document")
 do_document = document.do_document
@@ -63,6 +64,7 @@ function main()
         ["extension"] = do_extension,
         ["view"] = do_view,
         ["user"] = do_user,
+        ["api-key"] = do_api_key,
         ["document"] = do_document,
         ["knowledge"] = do_knowledge,
     }
@@ -77,7 +79,7 @@ function main()
     end
 
     if command == nil or command == "-h" or command == "--help" then
-        print("Usage: platform <init|schema|entity|ledger|extension|view|user|document|knowledge> ...")
+        print("Usage: platform <init|schema|entity|ledger|extension|view|user|api-key|document|knowledge> ...")
         return
     end
 

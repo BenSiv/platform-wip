@@ -560,26 +560,51 @@ function cgi.handle_request()
         return handle_login(root, db_path, method, nonce, theme)
     end
 
+    -- task #114: API-key auth for external/programmatic clients, as an
+    -- alternative to the session cookie below. A custom X-Api-Key
+    -- header, not "Authorization: Bearer" -- Apache's mod_cgid (the
+    -- real production front end, per doc/architecture.md) does NOT
+    -- forward the Authorization header into a CGI script's environment
+    -- unless the vhost explicitly sets "CGIPassAuth On" (it assumes
+    -- Apache's own auth modules consume that header otherwise); any
+    -- other header passes through as HTTP_* with no server config
+    -- needed at all, so X-Api-Key avoids that deployment trap entirely.
+    capabilities = nil
+    author = nil
+    via_api_key = false
+    api_key_header = os.getenv("HTTP_X_API_KEY")
+    if api_key_header != nil and api_key_header != "" then
+        key_row = auth.verify_api_key(db_path, api_key_header)
+        if key_row == nil then
+            return print_response("401 Unauthorized", "application/json", json.encode({error = "Invalid API key"}))
+        end
+        capabilities = key_row.cap
+        author = "api:" .. key_row.label
+        via_api_key = true
+    end
+
     -- Real session verification, replacing the old Phase 0
     -- AUTH_USER/AUTH_CAPABILITIES/AUTH_NONCE env-var stub. Capabilities
     -- are looked up fresh from the user table on every request rather
     -- than trusted from the cookie itself -- see auth.lua's own header
     -- comment for why.
-    user = nil
-    session_login = auth.verify_session_cookie(root, cookies.session)
-    if session_login != nil then
-        candidate = auth.get_user(db_path, session_login)
-        if candidate != nil and (candidate.archived_at == nil or candidate.archived_at == "") then
-            user = candidate
+    if not via_api_key then
+        user = nil
+        session_login = auth.verify_session_cookie(root, cookies.session)
+        if session_login != nil then
+            candidate = auth.get_user(db_path, session_login)
+            if candidate != nil and (candidate.archived_at == nil or candidate.archived_at == "") then
+                user = candidate
+            end
         end
-    end
 
-    if user == nil then
-        return print_response("302 Found", "text/plain", "", {"Location: /login"})
-    end
+        if user == nil then
+            return print_response("302 Found", "text/plain", "", {"Location: /login"})
+        end
 
-    capabilities = user.cap
-    author = user.login
+        capabilities = user.cap
+        author = user.login
+    end
     show_sql_nav = cgi.has_capability(capabilities, "s") or cgi.has_capability(capabilities, "a")
     show_admin_nav = cgi.has_capability(capabilities, "a")
     -- Nav-rail "Tasks" icon and Home's matching quick-link are only
@@ -598,6 +623,9 @@ function cgi.handle_request()
     end
 
     if not cgi.has_capability(capabilities, REQUIRED_CAPABILITY) then
+        if via_api_key then
+            return print_response("403 Forbidden", "application/json", json.encode({error = "Insufficient capability"}))
+        end
         return print_response("403 Forbidden", "text/html", "<h3>Forbidden: requires check-in capability</h3>")
     end
 
@@ -1014,6 +1042,71 @@ function cgi.handle_request()
                 html.page_shell("Users", "system", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author))
         end
         return print_response("302 Found", "text/plain", "", {"Location: admin-users"})
+    end
+
+    -- task #114: admin UI for the api_key table, mirroring /admin-users
+    -- above exactly, with one difference -- a successful create renders
+    -- the list directly (not a redirect) so the one-time raw key can be
+    -- shown; a redirect would lose it, since it's never stored anywhere
+    -- to retrieve on a later request.
+    if path_info == "/admin-api-keys" then
+        if not cgi.has_capability(capabilities, "a") then
+            return print_response("403 Forbidden", "text/html", "<h3>Forbidden: requires Admin capability</h3>")
+        end
+        keys = auth.list_api_keys(db_path, true)
+        body = html.render_admin_api_keys(keys, default_value(cookies.csrf, ""), nil, false, nil)
+        return print_response("200 OK", "text/html",
+            html.page_shell("API keys", "system", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author))
+    end
+
+    is_admin_api_key_action = path_info == "/admin-api-keys-create" or
+        path_info == "/admin-api-keys-capabilities" or
+        path_info == "/admin-api-keys-archive" or
+        path_info == "/admin-api-keys-unarchive"
+    if is_admin_api_key_action and method == "POST" then
+        if not cgi.has_capability(capabilities, "a") then
+            return print_response("403 Forbidden", "text/html", "<h3>Forbidden: requires Admin capability</h3>")
+        end
+
+        form = parse_query(io.read("*all"))
+        if not require_csrf(cookies, form.csrf_token) then
+            keys = auth.list_api_keys(db_path, true)
+            body = html.render_admin_api_keys(keys, default_value(cookies.csrf, ""), "CSRF check failed.", true, nil)
+            return print_response("403 Forbidden", "text/html",
+                html.page_shell("API keys", "system", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author))
+        end
+
+        if path_info == "/admin-api-keys-create" then
+            raw_key, err = auth.create_api_key(db_path, form.label, form.cap)
+            keys = auth.list_api_keys(db_path, true)
+            if raw_key == nil then
+                body = html.render_admin_api_keys(keys, default_value(cookies.csrf, ""), tostring(err), true, nil)
+                return print_response("200 OK", "text/html",
+                    html.page_shell("API keys", "system", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author))
+            end
+            body = html.render_admin_api_keys(keys, default_value(cookies.csrf, ""), nil, false, raw_key)
+            return print_response("200 OK", "text/html",
+                html.page_shell("API keys", "system", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author))
+        end
+
+        ok = nil
+        err = nil
+
+        if path_info == "/admin-api-keys-capabilities" then
+            ok, err = auth.set_api_key_capabilities(db_path, form.label, form.cap)
+        elseif path_info == "/admin-api-keys-archive" then
+            ok, err = auth.archive_api_key(db_path, form.label)
+        elseif path_info == "/admin-api-keys-unarchive" then
+            ok, err = auth.unarchive_api_key(db_path, form.label)
+        end
+
+        if ok == nil then
+            keys = auth.list_api_keys(db_path, true)
+            body = html.render_admin_api_keys(keys, default_value(cookies.csrf, ""), tostring(err), true, nil)
+            return print_response("200 OK", "text/html",
+                html.page_shell("API keys", "system", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author))
+        end
+        return print_response("302 Found", "text/plain", "", {"Location: admin-api-keys"})
     end
 
     if path_info == "/settings" then
@@ -1490,6 +1583,185 @@ function cgi.handle_request()
             response.success = false
         end
         return print_response("200 OK", "application/json", json.encode(response))
+    end
+
+    -- task #114: versioned, external-facing API -- deliberately
+    -- separate from the unversioned /api/* routes above (the browser
+    -- UI's own internal contract, not meant for outside consumers).
+    -- Every response shape mirrors those routes exactly (`{error=...}`
+    -- on failure; `{success, issues, ...}` on writes) -- no new
+    -- convention invented. Key-authed requests (via_api_key, set above
+    -- alongside the session-cookie check) skip CSRF -- a bearer key is
+    -- deliberately attached by the client, not ambient like a cookie,
+    -- so the exact property CSRF protection guards against doesn't
+    -- apply; a session-cookie caller hitting these routes still needs
+    -- CSRF, same as every other write route in this file.
+    v1_type, v1_id, v1_action = string.match(path_info, "^/api/v1/([a-z_][a-z0-9_]*)/(%d+)/([a-z_]+)$")
+    if v1_type == nil then
+        v1_type, v1_id = string.match(path_info, "^/api/v1/([a-z_][a-z0-9_]*)/(%d+)$")
+    end
+    if v1_type == nil then
+        v1_type = string.match(path_info, "^/api/v1/([a-z_][a-z0-9_]*)$")
+    end
+
+    if v1_type != nil then
+        if not schema.valid_name_syntax(v1_type) then
+            return print_response("400 Bad Request", "application/json", json.encode({error = "Invalid type"}))
+        end
+        if not schema.is_registered(db_path, v1_type) then
+            return print_response("404 Not Found", "application/json", json.encode({error = "Unknown type: " .. v1_type}))
+        end
+
+        v1_entity_id = tonumber(v1_id)
+        v1_source = source_from_params(params)
+        if via_api_key then
+            v1_source = {api_key = author}
+        end
+
+        -- GET /api/v1/<type> -- list, optionally filtered (task #112's
+        -- own list_by_field/count_by_field mechanism, used as-is).
+        if v1_id == nil and method == "GET" then
+            layout = schema.layout(db_path, v1_type)
+            v1_filter_field = nil
+            if params.filter_field != nil and params.filter_field != "" and params.filter_value != nil and layout != nil then
+                for _, field in ipairs(layout.fields) do
+                    if field.name == params.filter_field then
+                        v1_filter_field = params.filter_field
+                    end
+                end
+            end
+            v1_limit = tonumber(params.limit)
+            if v1_limit == nil then
+                v1_limit = BROWSE_PAGE_SIZE
+            end
+            v1_offset = tonumber(params.offset)
+            if v1_offset == nil then
+                v1_offset = 0
+            end
+            v1_total = nil
+            v1_rows = nil
+            if v1_filter_field != nil then
+                v1_total = entity.count_by_field(db_path, v1_type, v1_filter_field, params.filter_value)
+                v1_rows = entity.list_by_field(db_path, v1_type, v1_filter_field, params.filter_value, v1_limit, v1_offset)
+            else
+                v1_total = entity.count(db_path, v1_type)
+                v1_rows = entity.list(db_path, v1_type, v1_limit, v1_offset)
+            end
+            return print_response("200 OK", "application/json", json.encode({rows = v1_rows, total = v1_total}))
+        end
+
+        -- POST /api/v1/<type> -- create. A JSON array body creates a
+        -- batch (entity.create_batch, matching /api/submit's own
+        -- convention); a single JSON object creates one row -- the
+        -- natural shape for an external client posting to a collection.
+        if v1_id == nil and method == "POST" then
+            if not via_api_key and not require_csrf(cookies) then
+                return print_response("403 Forbidden", "application/json", json.encode({error = "CSRF check failed"}))
+            end
+            if not require_write_capability(db_path, capabilities, v1_type) then
+                return print_response("403 Forbidden", "application/json", json.encode({error = "Admin capability required to write this entity type"}))
+            end
+            input = io.read("*all")
+            decoded, _, err = json.decode(input)
+            if decoded == nil then
+                return print_response("400 Bad Request", "application/json", json.encode({error = "Invalid JSON: " .. tostring(err)}))
+            end
+
+            if decoded[1] != nil then
+                created_ids, batch_issues = entity.create_batch(db_path, v1_type, decoded, author, v1_source)
+                response = {issues = batch_issues}
+                if created_ids != nil then
+                    response.created_ids = created_ids
+                    response.success = true
+                else
+                    response.success = false
+                end
+                return print_response("200 OK", "application/json", json.encode(response))
+            end
+
+            created_id, issues = entity.create(db_path, v1_type, decoded, author, v1_source)
+            response = {issues = issues}
+            if created_id != nil then
+                response.created_id = created_id
+                response.success = true
+            else
+                response.success = false
+            end
+            return print_response("200 OK", "application/json", json.encode(response))
+        end
+
+        -- GET /api/v1/<type>/<id> -- get one
+        if v1_entity_id != nil and v1_action == nil and method == "GET" then
+            row = entity.get(db_path, v1_type, v1_entity_id)
+            if row == nil then
+                return print_response("404 Not Found", "application/json", json.encode({error = "Not found"}))
+            end
+            return print_response("200 OK", "application/json", json.encode({row = row}))
+        end
+
+        -- PATCH /api/v1/<type>/<id> -- update
+        if v1_entity_id != nil and v1_action == nil and method == "PATCH" then
+            if not via_api_key and not require_csrf(cookies) then
+                return print_response("403 Forbidden", "application/json", json.encode({error = "CSRF check failed"}))
+            end
+            if not require_write_capability(db_path, capabilities, v1_type) then
+                return print_response("403 Forbidden", "application/json", json.encode({error = "Admin capability required to write this entity type"}))
+            end
+            input = io.read("*all")
+            values, _, err = json.decode(input)
+            if values == nil then
+                return print_response("400 Bad Request", "application/json", json.encode({error = "Invalid JSON: " .. tostring(err)}))
+            end
+            updated_id, issues = entity.update(db_path, v1_type, v1_entity_id, values, author, v1_source, params.reason)
+            response = {issues = issues}
+            if updated_id != nil then
+                response.updated_id = updated_id
+                response.success = true
+            else
+                response.success = false
+            end
+            return print_response("200 OK", "application/json", json.encode(response))
+        end
+
+        -- POST /api/v1/<type>/<id>/archive
+        if v1_entity_id != nil and v1_action == "archive" and method == "POST" then
+            if not via_api_key and not require_csrf(cookies) then
+                return print_response("403 Forbidden", "application/json", json.encode({error = "CSRF check failed"}))
+            end
+            if not require_write_capability(db_path, capabilities, v1_type) then
+                return print_response("403 Forbidden", "application/json", json.encode({error = "Admin capability required to write this entity type"}))
+            end
+            archived_id, issues = entity.archive(db_path, v1_type, v1_entity_id, author, v1_source, params.reason)
+            response = {issues = issues}
+            if archived_id != nil then
+                response.archived_id = archived_id
+                response.success = true
+            else
+                response.success = false
+            end
+            return print_response("200 OK", "application/json", json.encode(response))
+        end
+
+        -- POST /api/v1/<type>/<id>/unarchive
+        if v1_entity_id != nil and v1_action == "unarchive" and method == "POST" then
+            if not via_api_key and not require_csrf(cookies) then
+                return print_response("403 Forbidden", "application/json", json.encode({error = "CSRF check failed"}))
+            end
+            if not require_write_capability(db_path, capabilities, v1_type) then
+                return print_response("403 Forbidden", "application/json", json.encode({error = "Admin capability required to write this entity type"}))
+            end
+            unarchived_id, issues = entity.unarchive(db_path, v1_type, v1_entity_id, author, v1_source)
+            response = {issues = issues}
+            if unarchived_id != nil then
+                response.unarchived_id = unarchived_id
+                response.success = true
+            else
+                response.success = false
+            end
+            return print_response("200 OK", "application/json", json.encode(response))
+        end
+
+        return print_response("405 Method Not Allowed", "application/json", json.encode({error = "Method not allowed"}))
     end
 
     return print_response("404 Not Found", "text/plain", "Not Found")

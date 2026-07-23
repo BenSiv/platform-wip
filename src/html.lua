@@ -2043,6 +2043,115 @@ function html.render_admin_users(users, csrf_token, message, is_error)
 """, fossci_container_css(1000), fossci_button_css(), message_html, escaped_csrf, rows_html)
 end
 
+-- Admin UI for task #114's api_key table, mirroring render_admin_users
+-- exactly. `new_raw_key` is only ever set immediately after a
+-- successful create -- the raw key is never stored, so this is the one
+-- and only time it can be shown; it's rendered in its own prominent,
+-- one-time banner rather than folded into `message`.
+function html.render_admin_api_keys(keys, csrf_token, message, is_error, new_raw_key)
+    escaped_csrf = html.html_escape(csrf_token)
+
+    message_html = ""
+    if message != nil and message != "" then
+        css_class = "fossci-admin-message"
+        if is_error == true then
+            css_class = "fossci-admin-message fossci-admin-message-error"
+        end
+        message_html = "<div class=\"" .. css_class .. "\">" .. html.html_escape(message) .. "</div>"
+    end
+
+    new_key_html = ""
+    if new_raw_key != nil and new_raw_key != "" then
+        new_key_html = string.format("""
+        <div class="fossci-admin-message fossci-admin-new-key">
+            <strong>Save this key now -- it cannot be shown again:</strong>
+            <code>%s</code>
+        </div>
+""", html.html_escape(new_raw_key))
+    end
+
+    rows_html = ""
+    for _, k in ipairs(keys) do
+        escaped_label = html.html_escape(k.label)
+        status = "active"
+        if k.archived_at != nil and k.archived_at != "" then
+            status = "archived"
+        end
+        archive_action = "archive"
+        archive_label = "Archive"
+        if status == "archived" then
+            archive_action = "unarchive"
+            archive_label = "Unarchive"
+        end
+
+        rows_html = rows_html .. string.format("""
+        <tr>
+            <td>%s</td>
+            <td>
+                <form method="POST" action="admin-api-keys-capabilities" class="fossci-admin-inline-form">
+                    <input type="hidden" name="csrf_token" value="%s">
+                    <input type="hidden" name="label" value="%s">
+                    <input type="text" name="cap" value="%s" size="6">
+                    <button type="submit" class="btn btn-secondary">Set</button>
+                </form>
+            </td>
+            <td>%s</td>
+            <td>
+                <form method="POST" action="admin-api-keys-%s" class="fossci-admin-inline-form">
+                    <input type="hidden" name="csrf_token" value="%s">
+                    <input type="hidden" name="label" value="%s">
+                    <button type="submit" class="btn btn-secondary">%s</button>
+                </form>
+            </td>
+        </tr>
+""", escaped_label, escaped_csrf, escaped_label, html.html_escape(k.cap), status,
+     archive_action, escaped_csrf, escaped_label, archive_label)
+    end
+
+    return string.format("""
+<div class="fossil-doc" data-title="Manage API keys">
+    <style>
+%s
+%s
+        .fossci-header { margin-bottom: 20px; border-bottom: 1px solid var(--fossci-bg-2, #f1f5f9); padding-bottom: 16px; }
+        .fossci-header h2 { margin: 0 0 6px 0; font-size: 1.6rem; font-weight: 700; color: var(--fossci-heading, #0f172a); letter-spacing: -0.02em; }
+        .fossci-admin-message { padding: 10px 12px; margin-bottom: 16px; border-radius: var(--fossci-radius-item, 10px); background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; font-size: 0.9rem; }
+        .fossci-admin-message-error { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+        .fossci-admin-new-key code { display: inline-block; margin-left: 8px; padding: 2px 8px; background: #fff; border: 1px solid #bbf7d0; border-radius: 6px; font-size: 0.9rem; }
+        .fossci-admin-create-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 24px; padding: 16px; background: var(--fossci-bg, #f8fafc); border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-md, 12px); }
+        .fossci-admin-create-form input[type=text] {
+            padding: 8px 10px; border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-sm, 8px); font-size: 0.9rem;
+        }
+        table.fossci-admin-users { width: 100%%; border-collapse: collapse; }
+        table.fossci-admin-users th, table.fossci-admin-users td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--fossci-border, #e2e8f0); font-size: 0.9rem; vertical-align: middle; }
+        .fossci-admin-inline-form { display: inline-flex; gap: 6px; align-items: center; margin-right: 8px; }
+        .fossci-admin-inline-form input[type=text] {
+            padding: 6px 8px; border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-sm, 8px); font-size: 0.85rem;
+        }
+    </style>
+    <div class="fossci-container">
+        <div class="fossci-header">
+            <h2>Manage API keys</h2>
+        </div>
+        %s
+        %s
+        <form method="POST" action="admin-api-keys-create" class="fossci-admin-create-form">
+            <input type="hidden" name="csrf_token" value="%s">
+            <input type="text" name="label" placeholder="label (e.g. Benchling automation)" required>
+            <input type="text" name="cap" placeholder="capabilities (e.g. i)" size="10">
+            <button type="submit" class="btn btn-primary">Create key</button>
+        </form>
+        <table class="fossci-admin-users">
+            <thead><tr><th>Label</th><th>Capabilities</th><th>Status</th><th>Actions</th></tr></thead>
+            <tbody>
+%s
+            </tbody>
+        </table>
+    </div>
+</div>
+""", fossci_container_css(1000), fossci_button_css(), message_html, new_key_html, escaped_csrf, rows_html)
+end
+
 -- Settings (task #89): a real UI for theme.json's own fields, instead
 -- of hand-editing the file and redeploying. Covers every field
 -- config.load_theme/save_theme round-trip -- site_name, the color
@@ -2263,6 +2372,7 @@ function html.render_system(show_sql, show_admin)
     end
     if show_admin then
         items = items .. "<li><a href=\"admin-users\">Users</a><p>Manage accounts and capabilities.</p></li>"
+        items = items .. "<li><a href=\"admin-api-keys\">API keys</a><p>Manage external-integration API keys.</p></li>"
         items = items .. "<li><a href=\"settings\">Settings</a><p>Site name, branding, colors, and chat prompt.</p></li>"
     end
     items = items .. "<li><a href=\"templates\">Templates</a><p>Reusable entry templates for new pages.</p></li>"
