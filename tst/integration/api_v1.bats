@@ -212,9 +212,9 @@ raw_api_write() {
 }
 
 @test "a write made via an API key is recorded on the ledger with api:<label> as the author" {
-    key=$("$BIN" api-key create benchling-automation i | tail -1)
+    key=$("$BIN" api-key create nightly-sync-job i | tail -1)
     raw_api_write POST "/api/v1/widget" "" "$key" '{"label":"A"}' >/dev/null
 
     run "$BIN" ledger show 1
-    [[ "$output" =~ "by api:benchling-automation" ]]
+    [[ "$output" =~ "by api:nightly-sync-job" ]]
 }

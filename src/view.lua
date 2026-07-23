@@ -121,6 +121,21 @@ function view.validate(def)
     if view.is_select_only(def.sql) == false then
         return "view '" .. tostring(def.name) .. "': sql must be a single, plain SELECT statement (no ';', no DDL/DML/pragma)"
     end
+    -- task #116: an optional MariaDB-specific variant, for the rare
+    -- view whose SQL genuinely can't be written as one expression
+    -- valid on both backends (e.g. SQLite's julianday() vs. MariaDB's
+    -- DATEDIFF() -- no common function/operator exists for real
+    -- date-difference arithmetic across the two dialects). Absent for
+    -- every other view; only needed when a portable expression
+    -- doesn't exist at all, not as a general escape hatch.
+    if def.sql_mariadb != nil then
+        if type(def.sql_mariadb) != "string" or def.sql_mariadb == "" then
+            return "view '" .. tostring(def.name) .. "': sql_mariadb must be a non-empty string if present"
+        end
+        if view.is_select_only(def.sql_mariadb) == false then
+            return "view '" .. tostring(def.name) .. "': sql_mariadb must be a single, plain SELECT statement (no ';', no DDL/DML/pragma)"
+        end
+    end
     if type(def.columns) != "table" or #def.columns == 0 then
         return "view '" .. tostring(def.name) .. "' must have a non-empty 'columns' list"
     end
@@ -184,6 +199,30 @@ function view.all(views_dir)
     return result
 end
 
+-- task #116: the SQL text that actually runs for this backend --
+-- def.sql_mariadb when running under MariaDB and present, def.sql
+-- otherwise. The one place `def.sql` gets read directly for execution
+-- is replaced by this everywhere below.
+function view.effective_sql(db_path, def)
+    if db.is_mariadb(db_path) and def.sql_mariadb != nil then
+        return def.sql_mariadb
+    end
+    return def.sql
+end
+
+-- What gets recorded/compared for approval -- both variants combined
+-- into one string when sql_mariadb is present, so editing *either* one
+-- (not just whichever currently runs on this deployment's own backend)
+-- invalidates approval. A dev iterating against SQLite locally should
+-- still be forced to re-approve after touching the MariaDB-only half
+-- of a view they can't even exercise locally.
+function view.approval_identity(def)
+    if def.sql_mariadb == nil then
+        return def.sql
+    end
+    return def.sql .. "\n--- sql_mariadb ---\n" .. def.sql_mariadb
+end
+
 function view.approved_sql(db_path, name)
     view.init_schema(db_path)
     rows = db.query(db_path, "SELECT sql_text FROM view_approval WHERE name = " .. db.quote(name) .. ";")
@@ -198,7 +237,7 @@ function view.is_approved(db_path, def)
     if approved == nil then
         return false
     end
-    return approved == def.sql
+    return approved == view.approval_identity(def)
 end
 
 function view.approve(db_path, def, approved_by)
@@ -206,7 +245,7 @@ function view.approve(db_path, def, approved_by)
     db.exec(db_path, string.format(
         "%s view_approval (name, sql_text, approved_by, approved_at) VALUES (%s, %s, %s, %s);",
         db.replace_into(db_path),
-        db.quote(def.name), db.quote(def.sql), db.literal(approved_by), db.now_expr(db_path)
+        db.quote(def.name), db.quote(view.approval_identity(def)), db.literal(approved_by), db.now_expr(db_path)
     ))
 end
 
@@ -223,7 +262,7 @@ function view.run(db_path, def, param_value)
     if def.param != nil then
         param_type = def.param.type
     end
-    return view.run_sql(db_path, def.sql, param_type, param_value)
+    return view.run_sql(db_path, view.effective_sql(db_path, def), param_type, param_value)
 end
 
 -- Runs a validated, parameterized SELECT: `sql_text` must contain
@@ -464,7 +503,11 @@ function view.do_view(cmd_args, db_path)
                 if view.is_approved(db_path, entry.def) then
                     status = "approved"
                 end
-                print(string.format("%-20s %-14s %s", entry.name, status, entry.def.sql))
+                sql_note = entry.def.sql
+                if entry.def.sql_mariadb != nil then
+                    sql_note = sql_note .. " (+ sql_mariadb variant)"
+                end
+                print(string.format("%-20s %-14s %s", entry.name, status, sql_note))
             end
         end
         return
@@ -483,6 +526,9 @@ function view.do_view(cmd_args, db_path)
         end
         print("name: " .. def.name)
         print("sql:  " .. def.sql)
+        if def.sql_mariadb != nil then
+            print("sql_mariadb: " .. def.sql_mariadb)
+        end
         if view.is_approved(db_path, def) then
             print("status: approved")
         elseif view.approved_sql(db_path, name) == nil then

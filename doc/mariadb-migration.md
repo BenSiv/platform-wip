@@ -75,6 +75,24 @@ needed anywhere.
 | `INSERT OR REPLACE INTO ...` | 6 (`document.lua` x2, `extension.lua`, `view.lua`, `schema.lua` x2, `knowledge.lua`) | `INSERT ... ON DUPLICATE KEY UPDATE ...` (semantically closer -- `REPLACE INTO` is actually DELETE+INSERT under the hood, which would needlessly burn AUTOINCREMENT ids and could disturb foreign-key cascade behavior these tables don't have yet but might) |
 | `INSERT OR IGNORE INTO ...` | a few, same files | `INSERT IGNORE INTO ...` |
 
+**A named view's own `sql` text is a separate case from the above --
+these are content, not platform code**, so this table's substitutions
+don't apply to whatever SQL a view author writes. Most portability gaps
+there are avoidable in the query text itself (e.g. `strftime`/
+`DATE_FORMAT`, `INSERT OR REPLACE`-style constructs a view shouldn't be
+using anyway since `view.is_select_only` forbids DML). Task #116 found
+a genuine exception: SQLite's `julianday()` and MariaDB's `DATEDIFF()`/
+`GREATEST()` (real date-difference arithmetic) share no common function
+name at all, so no single portable expression exists. `view.lua` now
+supports an optional `sql_mariadb` field on a view definition -- the
+MariaDB-native rewrite, used instead of `sql` whenever
+`db.is_mariadb(db_path)` is true (`view.effective_sql`). Approval is
+keyed off both variants combined (`view.approval_identity`), so editing
+either one requires re-approval, not just whichever a given deployment
+happens to run. Meant as a narrow escape hatch for cases like this one,
+not a general per-view dual-maintenance pattern -- most views should
+still just be one portable query.
+
 `SQL_TYPE` (`schema.lua:15`) is a simple 5-entry map (`text→TEXT,
 number→REAL, date→TEXT, select→TEXT, reference→INTEGER`) -- clean,
 disciplined usage, maps to MariaDB's `TEXT/DOUBLE/TEXT/TEXT/INT`

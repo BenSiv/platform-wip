@@ -418,18 +418,32 @@ function document.inline_links_to_markdown(db_path, content)
     end))
 end
 
--- Shells out to cmark (CommonMark, not vendored/hand-rolled) rather
--- than writing a Markdown parser -- same reasoning as bcrypt/hmac:
--- prefer a small, battle-tested existing implementation. Content goes
--- through a temp file, not shell-interpolated directly -- the only
--- shell-interpolated value is a path this process generated itself,
--- never anything from the document's own content. Requires `cmark` on
--- PATH at runtime (not statically linked into this binary the way
--- bcrypt/hmac are -- a real external dependency, not bundled).
--- cmark's default (non---unsafe) mode strips raw HTML blocks/inline
--- HTML from the input, which is exactly the safety property wanted
--- here: document content is user-authored and shown to other users, so
--- it must never be able to inject a raw <script> or event handler.
+-- Shells out to cmark-gfm (CommonMark + GitHub's table/strikethrough/
+-- autolink extensions, not vendored/hand-rolled) rather than writing a
+-- Markdown parser -- same reasoning as bcrypt/hmac: prefer a small,
+-- battle-tested existing implementation. Content goes through a temp
+-- file, not shell-interpolated directly -- the only shell-interpolated
+-- value is a path this process generated itself, never anything from
+-- the document's own content. Requires `cmark-gfm` on PATH at runtime
+-- (not statically linked into this binary the way bcrypt/hmac are --
+-- a real external dependency, not bundled).
+--
+-- task #117: plain `cmark` (the bare CommonMark reference
+-- implementation) was used here originally -- confirmed directly
+-- (piped a real pipe-table through it) that it has no table support at
+-- all, table syntax being a GFM *extension*, not core CommonMark, and
+-- that specific binary has no `-e`/extension flag available to add it.
+-- `cmark-gfm` is a strict superset (full CommonMark compatible, same
+-- default output for everything already relied on) that adds table/
+-- strikethrough/autolink support when explicitly enabled via `-e`.
+--
+-- Extensions deliberately NOT enabled: `--unsafe` (raw HTML rendering)
+-- and its own `tagfilter` extension (which only filters *within*
+-- `--unsafe` mode) -- cmark-gfm's default (non-unsafe) mode still
+-- strips raw HTML blocks/inline HTML from the input, exactly the
+-- safety property wanted here: document content is user-authored and
+-- shown to other users, so it must never be able to inject a raw
+-- <script> or event handler.
 function document.render_markdown(content)
     if content == nil or content == "" then
         return ""
@@ -442,7 +456,7 @@ function document.render_markdown(content)
     io.write(file, content)
     io.close(file)
 
-    handle = io.popen("cmark " .. shell_quote(tmp_path), "r")
+    handle = io.popen("cmark-gfm -e table -e strikethrough -e autolink " .. shell_quote(tmp_path), "r")
     html = ""
     if handle != nil then
         html = io.read(handle, "*all")

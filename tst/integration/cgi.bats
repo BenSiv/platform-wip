@@ -170,6 +170,20 @@ EOF
     [[ "$output" =~ "--fossci-accent: #C97F1E;" ]]
 }
 
+@test "/sql's popover JS repositions via fixed viewport coordinates, not left CSS clipped by the scrolling table wrapper (task #111)" {
+    # The result table is wrapped in .fossci-table-wrapper (overflow-x:
+    # auto), which per the CSS Overflow spec forces overflow-y to auto
+    # too -- clipping/trapping the default position:absolute popover at
+    # the wrapper's edge once the table is long enough to overflow.
+    # Fixed by repositioning via JS (getBoundingClientRect + position:
+    # fixed) on hover instead of relying on CSS positioning alone.
+    run_cgi_admin "/sql" "q=SELECT+id%2C+lot_number%2C+experiment+FROM+sample%3B"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "data-fossci-popover-src" ]]
+    [[ "$output" =~ "getBoundingClientRect" ]]
+    [[ "$output" =~ "pop.style.position = 'fixed'" ]]
+}
+
 @test "/sql resolves a reference column on the FROM table" {
     # /sql requires Setup or Admin capability (not just baseline "i").
     run_cgi_admin "/sql" "q=SELECT+id%2C+lot_number%2C+experiment+FROM+sample%3B"

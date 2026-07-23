@@ -179,6 +179,47 @@ EOF
     [[ ! "$output" =~ "bad argument" ]]
 }
 
+@test "a view's sql_mariadb variant runs on MariaDB where sql (SQLite-only) would fail (task #116)" {
+    # Found via a real production 500 on /view?view_name=prioritized_tasks:
+    # SQLite's julianday() and MariaDB's DATEDIFF()/GREATEST() share no
+    # common function name, so no single sql string is portable for real
+    # date-difference arithmetic. view.effective_sql now picks sql_mariadb
+    # over sql whenever db.is_mariadb is true.
+    "$BIN" init
+    mkdir -p schemas views
+    cat > schemas/task.lua <<'EOF'
+return {
+  name = "task",
+  fields = {
+    {name = "due_to", type = "date", required = false},
+    {name = "urgency", type = "number", required = true},
+  },
+}
+EOF
+    "$BIN" schema add schemas/task.lua
+    "$BIN" entity create task due_to=2026-01-01 urgency=1
+
+    cat > views/due_soon.lua <<'EOF'
+return {
+    name = "due_soon",
+    -- Deliberately SQLite-only -- this must NOT be what actually runs
+    -- against MariaDB; if effective_sql picked this one, the query
+    -- would fail outright (no julianday() on MariaDB).
+    sql = "SELECT id, urgency, julianday(due_to) AS jd FROM task;",
+    sql_mariadb = "SELECT id, urgency, DATEDIFF(due_to, '2000-01-01') AS jd FROM task;",
+    columns = {{name = "id"}, {name = "urgency"}, {name = "jd"}},
+}
+EOF
+    "$BIN" view approve due_soon
+
+    read TEST_SESSION_COOKIE TEST_CSRF_TOKEN < <(login_test_user "viewuser2" "is")
+    GATEWAY_INTERFACE="CGI/1.1" REQUEST_METHOD="GET" PATH_INFO="/view" QUERY_STRING="view_name=due_soon" \
+        HTTP_COOKIE="session=${TEST_SESSION_COOKIE}; csrf=${TEST_CSRF_TOKEN}" run "$BIN"
+    [[ "$output" =~ "200 OK" ]]
+    [[ ! "$output" =~ "Internal Server Error" ]]
+    [[ ! "$output" =~ "no such function" ]]
+}
+
 @test "concurrent entity creates never collide on entity_id or leave one NULL against MariaDB (task #77)" {
     "$BIN" init
     mkdir -p schemas

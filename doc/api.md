@@ -161,10 +161,10 @@ the same convention the internal UI-facing routes already use.
 ## Provenance
 
 Every write made through a key is recorded on that entity's ledger
-history with the key's label as the author (e.g. `api:Benchling
-automation`), so it reads unambiguously as key-driven -- not a real
-user's own edit -- in `/detail`'s history and anywhere else ledger
-entries are shown.
+history with the key's label as the author (e.g. `api:nightly sync
+job`), so it reads unambiguously as key-driven -- not a real user's
+own edit -- in `/detail`'s history and anywhere else ledger entries
+are shown.
 
 ## Out of scope (v1)
 

@@ -183,3 +183,13 @@ source_document_id=${source_id}</args>" \
     run sqlite3 .store/store.db "SELECT user_feedback FROM knowledge_chat_eval WHERE message_id = ${message_id};"
     [[ "$output" == "up" ]]
 }
+
+@test "chat feedback buttons get an immediate pressed state and a real error message on failure, not silent no-op (task #115)" {
+    read session csrf < <(session_for admin secret123)
+    GATEWAY_INTERFACE="CGI/1.1" REQUEST_METHOD="GET" PATH_INFO="/" QUERY_STRING="" \
+        HTTP_COOKIE="session=${session}; csrf=${csrf}" run "$BIN"
+    [[ "$output" =~ "e.target.classList.add('fossci-feedback-pressed')" ]]
+    [[ "$output" =~ "b.disabled = true" ]]
+    [[ "$output" =~ "showFeedbackError" ]]
+    [[ "$output" =~ "Couldn\\'t record feedback." ]]
+}

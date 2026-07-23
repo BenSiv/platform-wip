@@ -53,6 +53,15 @@ CREATE TABLE IF NOT EXISTS dropdown_value (
     PRIMARY KEY (list_name, value),
     FOREIGN KEY (list_name) REFERENCES dropdown_list(name)
 );
+
+-- task #118: single-row table recording a cheap signature of the
+-- schemas/dropdowns directories' content as of the last real
+-- schema.sync_all pass -- see schema.content_signature's own comment
+-- for why this exists at all.
+CREATE TABLE IF NOT EXISTS schema_sync_state (
+    id INTEGER PRIMARY KEY,
+    content_signature TEXT
+);
 """
 
 function schema.init_schema(db_path)
@@ -104,15 +113,26 @@ end
 -- "recompute wholesale" pattern document.sync_links already uses for
 -- document_link), so removing a value from the schema file actually
 -- removes it here too, not just additive drift.
+-- task #118: one multi-row INSERT for every value, not one INSERT per
+-- value -- confirmed directly against a real MariaDB backend that the
+-- per-value form is the dominant cost in schema.sync_all's own
+-- per-request overhead once a deployment has enough dropdowns/values.
+-- schema.validate_dropdown already requires a non-empty `values` list,
+-- so the #def.values == 0 guard here is just defensive, not a real
+-- case for a well-formed file.
 function schema.register_dropdown(db_path, def)
     db.exec(db_path, string.format(
         "%s dropdown_list (name) VALUES (%s);", db.insert_ignore(db_path), db.quote(def.name)
     ))
     db.exec(db_path, string.format("DELETE FROM dropdown_value WHERE list_name = %s;", db.quote(def.name)))
-    for i, value in ipairs(def.values) do
+    if #def.values > 0 then
+        value_tuples = {}
+        for i, value in ipairs(def.values) do
+            table.insert(value_tuples, string.format("(%s, %s, %d)", db.quote(def.name), db.quote(value), i))
+        end
         db.exec(db_path, string.format(
-            "%s dropdown_value (list_name, value, value_order) VALUES (%s, %s, %d);",
-            db.insert_ignore(db_path), db.quote(def.name), db.quote(value), i
+            "%s dropdown_value (list_name, value, value_order) VALUES %s;",
+            db.insert_ignore(db_path), table.concat(value_tuples, ", ")
         ))
     end
     return true
@@ -675,6 +695,54 @@ function schema.sync_table(db_path, def)
     end
 end
 
+-- task #118: a cheap-to-compute stand-in for "have the schemas/
+-- dropdowns directories changed at all since the last real sync" --
+-- name + mtime + size per .lua file (sorted, so file iteration order
+-- never matters), concatenated. Confirmed directly that actually
+-- re-running the sync (schema.sync_all's own loops below) costs real,
+-- multi-second time once a deployment has enough schema/dropdown
+-- files against a real remote database -- a plain filesystem stat of
+-- every file is negligible by comparison, so this lets sync_all skip
+-- the expensive work entirely on the overwhelming majority of requests
+-- in steady-state traffic (nothing changed since last time).
+function schema.content_signature(root)
+    config = require("config")
+    parts = {}
+    for _, dir in ipairs({config.dropdowns_dir(root), config.schemas_dir(root)}) do
+        attr = lfs.attributes(dir)
+        if attr != nil and attr.mode == "directory" then
+            names = {}
+            for file_name in lfs.dir(dir) do
+                if string.match(file_name, "%.lua$") != nil then
+                    table.insert(names, file_name)
+                end
+            end
+            table.sort(names)
+            for _, file_name in ipairs(names) do
+                file_attr = lfs.attributes(paths.joinpath(dir, file_name))
+                table.insert(parts, dir .. "/" .. file_name .. ":" ..
+                    tostring(file_attr.modification) .. ":" .. tostring(file_attr.size))
+            end
+        end
+    end
+    return table.concat(parts, "|")
+end
+
+function schema.stored_sync_signature(db_path)
+    rows = db.query(db_path, "SELECT content_signature FROM schema_sync_state WHERE id = 1;")
+    if rows == nil or rows[1] == nil then
+        return nil
+    end
+    return rows[1].content_signature
+end
+
+function schema.store_sync_signature(db_path, signature)
+    db.exec(db_path, string.format(
+        "%s schema_sync_state (id, content_signature) VALUES (1, %s);",
+        db.replace_into(db_path), db.quote(signature)
+    ))
+end
+
 -- Scans the schemas directory, registers any schema files found,
 -- and ensures all projected tables are synced/created.
 -- Dropdowns first, always -- an entity schema field can reference a
@@ -684,8 +752,16 @@ end
 -- any schema file referencing it is processed. dropdowns/ missing
 -- entirely is fine (no dropdowns defined yet) -- only schemas/ missing
 -- is a real error, since every deployment has at least that directory.
+--
+-- task #118: skipped entirely when content_signature matches what was
+-- stored after the last real pass -- see that function's own comment.
 function schema.sync_all(db_path, root)
     config = require("config")
+
+    signature = schema.content_signature(root)
+    if signature == schema.stored_sync_signature(db_path) then
+        return true
+    end
 
     dropdowns_dir = config.dropdowns_dir(root)
     attr = lfs.attributes(dropdowns_dir)
@@ -715,6 +791,7 @@ function schema.sync_all(db_path, root)
             end
         end
     end
+    schema.store_sync_signature(db_path, signature)
     return true
 end
 

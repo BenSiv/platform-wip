@@ -206,6 +206,27 @@ function html.popover_js(nonce)
         var timer = null;
         var loaded = false;
         trigger.addEventListener('mouseenter', function(){
+            // task #111: .fossci-popover's default CSS is `position:
+            // absolute` relative to the trigger -- fine standalone, but
+            // a long result table is wrapped in `.fossci-table-wrapper
+            // { overflow-x: auto }`, and per the CSS Overflow spec
+            // setting only one axis forces the *other* axis to compute
+            // as auto too (an explicit `overflow-y: visible` on the
+            // wrapper would still get overridden back to auto by that
+            // same rule -- confirmed, not a viable CSS-only fix), so
+            // the wrapper clips/traps the popover instead of letting it
+            // float free. Repositioned to `position: fixed` with real
+            // viewport coordinates here escapes that clipping
+            // entirely, since a fixed-position element is placed
+            // relative to the viewport, not any scrolling ancestor.
+            var rect = trigger.getBoundingClientRect();
+            var popWidth = 320; // matches .fossci-popover's max-width
+            var left = Math.min(rect.left, window.innerWidth - popWidth - 12);
+            left = Math.max(left, 8);
+            pop.style.position = 'fixed';
+            pop.style.left = left + 'px';
+            pop.style.top = (rect.bottom + 6) + 'px';
+            pop.style.margin = '0';
             timer = setTimeout(function(){
                 if(!loaded){ loaded = true; loadInto(trigger, pop); }
             }, 200);
@@ -2137,7 +2158,7 @@ function html.render_admin_api_keys(keys, csrf_token, message, is_error, new_raw
         %s
         <form method="POST" action="admin-api-keys-create" class="fossci-admin-create-form">
             <input type="hidden" name="csrf_token" value="%s">
-            <input type="text" name="label" placeholder="label (e.g. Benchling automation)" required>
+            <input type="text" name="label" placeholder="label (e.g. nightly sync job)" required>
             <input type="text" name="cap" placeholder="capabilities (e.g. i)" size="10">
             <button type="submit" class="btn btn-primary">Create key</button>
         </form>
@@ -3510,6 +3531,9 @@ function fossci_chat_widget_css()
     font-size: 0.85rem; padding: 1px 5px; cursor: pointer; line-height: 1.4; opacity: 0.6;
 }
 .fossci-chat-feedback button:hover { opacity: 1; border-color: var(--fossci-border, #e2e8f0); background: var(--fossci-bg-2, #f1f5f9); }
+.fossci-chat-feedback button.fossci-feedback-pressed { opacity: 1; border-color: var(--fossci-border, #e2e8f0); background: var(--fossci-bg-2, #f1f5f9); }
+.fossci-chat-feedback button:disabled { cursor: default; }
+.fossci-chat-feedback-error { color: #991b1b; font-size: 0.85rem; }
 """
 end
 
@@ -3744,11 +3768,26 @@ function html.render_chat_widget(nonce)
             var messageId = e.target.getAttribute('data-feedback-message');
             var feedback = e.target.getAttribute('data-feedback');
             var container = e.target.closest('.fossci-chat-feedback');
+            // task #115: mark the clicked button as pressed and disable
+            // both immediately, before the request even resolves --
+            // previously nothing happened visually until (and unless)
+            // the async call both succeeded and resolved, which read as
+            // "the button does nothing" even when it was working.
+            if (container) {
+                container.querySelectorAll('button').forEach(function(b){ b.disabled = true; });
+                e.target.classList.add('fossci-feedback-pressed');
+            }
+            function showFeedbackError() {
+                if (container) { container.innerHTML = '<span class="fossci-chat-feedback-error">Couldn\'t record feedback.</span>'; }
+            }
             post('api/chat-widget-feedback', {message_id: messageId, feedback: feedback}).then(function(result){
-                if (result && result.ok && container) {
+                if (!container) return;
+                if (result && result.ok) {
                     container.innerHTML = feedback === 'up' ? 'Thanks for the feedback 👍' : 'Thanks for the feedback 👎';
+                } else {
+                    showFeedbackError();
                 }
-            });
+            }).catch(showFeedbackError);
         }
     });
 

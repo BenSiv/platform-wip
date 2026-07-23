@@ -164,6 +164,18 @@ raw_document_preview() {
     [[ "$output" =~ "<strong>bold</strong>" ]]
 }
 
+@test "Markdown GFM tables and strikethrough render as real HTML, not raw pipe/tilde text (task #117)" {
+    body='{"content": "| A | B |\n|---|---|\n| 1 | 2 |\n\n~~struck~~ text."}'
+
+    run raw_document_preview "$body" "$CSRF"
+    [[ "$output" =~ "200 OK" ]]
+    [[ "$output" =~ "<table>" ]]
+    [[ "$output" =~ "<th>A</th>" ]]
+    [[ "$output" =~ "<td>1</td>" ]]
+    [[ "$output" =~ "<del>struck</del>" ]]
+    [[ ! "$output" =~ '|---|---|' ]]
+}
+
 @test "archiving a document (via the generic /api/archive route) removes it from the /documents tree" {
     save_document "csrf_token=${CSRF}&title=Home&parent_id=&content=" >/dev/null
 
