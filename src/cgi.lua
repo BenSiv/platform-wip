@@ -730,7 +730,7 @@ function cgi.handle_request()
             return a.name < b.name
         end)
         edges = schema.relationships(db_path)
-        body = html.render_index(entity_types, edges, nonce)
+        body = html.render_index(db_path, entity_types, edges, nonce)
         return print_response("200 OK", "text/html",
             html.page_shell("Data", "data", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author))
     end

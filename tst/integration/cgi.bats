@@ -64,6 +64,26 @@ teardown() {
     [[ "$output" =~ "fossci-diagram-edge\" data-from=\"sample\" data-to=\"experiment\"" ]]
 }
 
+@test "/data's diagram is a real ERD: boxes show real field name/type rows, edges carry cardinality labels (task #86)" {
+    run_cgi "/data" ""
+    [ "$status" -eq 0 ]
+    # sample's own real fields, not just its name -- a required text
+    # field and the reference field that becomes the experiment edge.
+    [[ "$output" =~ '>lot_number<' ]]
+    [[ "$output" =~ 'fossci-diagram-row-type" x="'[0-9.]*'" y="'[0-9.]*'">text<' ]]
+    [[ "$output" =~ 'fossci-diagram-row-type" x="'[0-9.]*'" y="'[0-9.]*'">reference<' ]]
+    # every box gets a synthetic PK id row, not itself a real schema field
+    [[ "$output" =~ "fossci-diagram-row-name fossci-diagram-row-pk\" x=\"" ]]
+    [[ "$output" =~ '>id<' ]]
+    # the experiment -> person edge is a plain reference: cardinality
+    # "*" on the referencing (experiment) end, "1" on the referenced
+    # (person/id) end -- not just an unlabeled connectivity line. Only
+    # one reference edge exists in this fixture, so a page-wide check
+    # for both label texts is unambiguous.
+    [[ "$output" =~ '>*</text>' ]]
+    [[ "$output" =~ '>1</text>' ]]
+}
+
 @test "/data sorts entity types by row count descending, alphabetical tiebreak, with data-count for the hide-empty toggle" {
     "$BIN" entity create person full_name="Dr. Amare"
     "$BIN" entity create person full_name="Dr. Beadle"

@@ -1724,95 +1724,221 @@ function html.render_view(view_def, rows, param_value)
 """, escaped_title, fossci_container_css(1200), escaped_title, subtitle, register_link, table_or_empty)
 end
 
+-- ERD box geometry (task #86) -- fixed width rather than measured text,
+-- since computing real SVG text metrics server-side isn't available;
+-- 200px comfortably fits "some_field_name : multi_reference", the
+-- longest realistic name:type pair in this codebase's own schemas.
+DIAGRAM_BOX_WIDTH = 200
+DIAGRAM_HEADER_HEIGHT = 26
+DIAGRAM_ROW_HEIGHT = 18
+DIAGRAM_COLUMN_GAP = 70
+DIAGRAM_ROW_GAP = 34
+DIAGRAM_PADDING = 40
+
+-- One row per real field (schema.fields()) plus a synthetic leading
+-- `id` row -- every entity has one, but it's a builtin column, never
+-- itself an entity_field row, so it has to be added here to match how
+-- a real ERD always shows the primary key.
+function diagram_box_rows(db_path, entity_type)
+    rows = {{name = "id", type_label = "integer", is_pk = true, required = true}}
+    for _, field in ipairs(schema.fields(db_path, entity_type)) do
+        table.insert(rows, {
+            name = field.name, type_label = field.type, is_pk = false,
+            required = (tonumber(field.required) == 1)
+        })
+    end
+    return rows
+end
+
+-- A specific row's vertical center, box-relative.
+function diagram_row_center_y(box, row_index)
+    return box.y + DIAGRAM_HEADER_HEIGHT + (row_index - 1) * DIAGRAM_ROW_HEIGHT + (DIAGRAM_ROW_HEIGHT / 2)
+end
+
 -- Renders `entity_types`/`edges` (schema.relationships()'s output) as an
--- inline SVG relation diagram -- nodes on a circle (a simple, stable
--- layout: no physics simulation to converge, no risk of nodes drifting
--- off-canvas), sized to the node count so labels don't crowd each other
--- as a deployment registers more entity types. All positioning is
--- computed server-side in Luam; the only client-side JS (diagram_js) is
--- hover-highlight and click-to-browse, the same "server renders, client
--- just does the interaction" split the popover feature already uses.
-function html.render_relation_diagram(entity_types, edges)
+-- inline SVG ERD, dbdiagram.io-inspired: each entity type is a box
+-- listing its real fields (name : type, PK/required marked), and each
+-- reference/multi_reference edge connects the *specific* referencing
+-- field's row to the target type's `id` row, labeled with cardinality
+-- (`1`/`*`) -- not bare type-to-type lines. Layout is a simple packed
+-- grid (shortest-column-first, like a masonry layout), not a physics
+-- simulation: box heights vary with field count, so a uniform circle/
+-- grid would waste space or crowd; this stays a deterministic, single-
+-- pass computation, same "server computes positions, client only does
+-- hover/click" split the previous circular layout already used.
+function html.render_relation_diagram(db_path, entity_types, edges)
     n = #entity_types
     if n == 0 then
         return "<p class=\"fossci-empty\">No entity types registered yet.</p>"
     end
 
-    -- Radius grows with node count so per-node arc length (and so label
-    -- spacing) stays roughly constant instead of every node crowding
-    -- toward the center as more entity types get registered.
-    radius = 180
-    if n * 12 > radius then
-        radius = n * 12
-    end
-    cx = radius + 90
-    cy = radius + 40
-    size = radius * 2 + 180
-
     index_by_name = {}
-    positions = {}
     for i, row in ipairs(entity_types) do
         index_by_name[row.name] = i
-        angle = (2 * math.pi * (i - 1)) / n - (math.pi / 2)
-        positions[i] = {x = cx + radius * math.cos(angle), y = cy + radius * math.sin(angle)}
     end
+
+    -- Precompute every box's real rows + height up front (needed both
+    -- for layout packing below and for locating a specific field's row
+    -- when drawing edges).
+    boxes = {}
+    for i, row in ipairs(entity_types) do
+        box_rows = diagram_box_rows(db_path, row.name)
+        row_index_by_field = {}
+        for j, box_row in ipairs(box_rows) do
+            row_index_by_field[box_row.name] = j
+        end
+        boxes[i] = {
+            name = row.name, rows = box_rows, row_index_by_field = row_index_by_field,
+            width = DIAGRAM_BOX_WIDTH,
+            height = DIAGRAM_HEADER_HEIGHT + (#box_rows * DIAGRAM_ROW_HEIGHT)
+        }
+    end
+
+    -- Shortest-column-first packing: each box goes into whichever
+    -- column currently has the smallest accumulated height, keeping
+    -- the overall layout roughly square without a real force-directed
+    -- solver.
+    columns = math.ceil(math.sqrt(n))
+    column_height = {}
+    for c = 1, columns do
+        column_height[c] = DIAGRAM_PADDING
+    end
+    max_height = DIAGRAM_PADDING
+    for i = 1, n do
+        target_col = 1
+        for c = 2, columns do
+            if column_height[c] < column_height[target_col] then
+                target_col = c
+            end
+        end
+        boxes[i].x = DIAGRAM_PADDING + (target_col - 1) * (DIAGRAM_BOX_WIDTH + DIAGRAM_COLUMN_GAP)
+        boxes[i].y = column_height[target_col]
+        column_height[target_col] = column_height[target_col] + boxes[i].height + DIAGRAM_ROW_GAP
+        if column_height[target_col] > max_height then
+            max_height = column_height[target_col]
+        end
+    end
+    total_width = DIAGRAM_PADDING * 2 + columns * DIAGRAM_BOX_WIDTH + (columns - 1) * DIAGRAM_COLUMN_GAP
+    total_height = max_height + DIAGRAM_PADDING
 
     edges_svg = ""
     for _, edge in ipairs(edges) do
         from_i = index_by_name[edge.from_type]
         to_i = index_by_name[edge.to_type]
         if from_i != nil and to_i != nil and from_i != to_i then
-            p1 = positions[from_i]
-            p2 = positions[to_i]
-            edges_svg = edges_svg .. string.format(
-                "<line class=\"fossci-diagram-edge\" data-from=\"%s\" data-to=\"%s\" x1=\"%.1f\" y1=\"%.1f\" x2=\"%.1f\" y2=\"%.1f\" marker-end=\"url(#fossci-diagram-arrow)\"></line>",
-                html.html_escape(edge.from_type), html.html_escape(edge.to_type), p1.x, p1.y, p2.x, p2.y
-            )
+            from_box = boxes[from_i]
+            to_box = boxes[to_i]
+            from_row_index = from_box.row_index_by_field[edge.field_name]
+            if from_row_index != nil then
+                to_row_index = to_box.row_index_by_field["id"]
+                from_y = diagram_row_center_y(from_box, from_row_index)
+                to_y = diagram_row_center_y(to_box, to_row_index)
+                -- Pre-declared, not just assigned inside the branches
+                -- below -- Luam requires a variable's first assignment
+                -- to happen before an if/else block if it's referenced
+                -- after it (same rule hit earlier in cgi.lua's /browse
+                -- route).
+                from_x = nil
+                to_x = nil
+                -- Connect whichever sides actually face each other --
+                -- otherwise a target box positioned to the *left* of
+                -- its source would draw a line crossing clean through
+                -- both boxes instead of approaching from the near side.
+                if to_box.x >= from_box.x then
+                    from_x = from_box.x + from_box.width
+                    to_x = to_box.x
+                else
+                    from_x = from_box.x
+                    to_x = to_box.x + to_box.width
+                end
+                to_label = "1"
+                from_label = "*"
+                if edge.field_type == "multi_reference" then
+                    from_label = "*"
+                    to_label = "*"
+                end
+                label_dx = 14
+                if to_x < from_x then
+                    label_dx = -14
+                end
+                edges_svg = edges_svg .. string.format(
+                    "<g class=\"fossci-diagram-edge\" data-from=\"%s\" data-to=\"%s\">" ..
+                    "<line x1=\"%.1f\" y1=\"%.1f\" x2=\"%.1f\" y2=\"%.1f\"></line>" ..
+                    "<text class=\"fossci-diagram-card\" x=\"%.1f\" y=\"%.1f\">%s</text>" ..
+                    "<text class=\"fossci-diagram-card\" x=\"%.1f\" y=\"%.1f\">%s</text>" ..
+                    "</g>",
+                    html.html_escape(edge.from_type), html.html_escape(edge.to_type),
+                    from_x, from_y, to_x, to_y,
+                    from_x + label_dx, from_y - 4, from_label,
+                    to_x - label_dx, to_y - 4, to_label
+                )
+            end
         end
     end
 
-    nodes_svg = ""
+    boxes_svg = ""
     for i, row in ipairs(entity_types) do
+        box = boxes[i]
         escaped_name = html.html_escape(row.name)
-        p = positions[i]
-        nodes_svg = nodes_svg .. string.format(
+        rows_svg = ""
+        for j, box_row in ipairs(box.rows) do
+            row_y = box.y + DIAGRAM_HEADER_HEIGHT + (j - 1) * DIAGRAM_ROW_HEIGHT
+            name_class = "fossci-diagram-row-name"
+            if box_row.is_pk then
+                name_class = name_class .. " fossci-diagram-row-pk"
+            elseif box_row.required then
+                name_class = name_class .. " fossci-diagram-row-required"
+            end
+            rows_svg = rows_svg .. string.format(
+                "<text class=\"%s\" x=\"%.1f\" y=\"%.1f\">%s</text>" ..
+                "<text class=\"fossci-diagram-row-type\" x=\"%.1f\" y=\"%.1f\">%s</text>",
+                name_class, box.x + 8, row_y + DIAGRAM_ROW_HEIGHT - 5, html.html_escape(box_row.name),
+                box.x + box.width - 8, row_y + DIAGRAM_ROW_HEIGHT - 5, html.html_escape(box_row.type_label)
+            )
+        end
+        boxes_svg = boxes_svg .. string.format(
             "<g class=\"fossci-diagram-node\" data-entity-type=\"%s\" tabindex=\"0\">" ..
-            "<circle cx=\"%.1f\" cy=\"%.1f\" r=\"9\"></circle>" ..
-            "<text x=\"%.1f\" y=\"%.1f\">%s</text>" ..
+            "<rect class=\"fossci-diagram-box\" x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\"></rect>" ..
+            "<rect class=\"fossci-diagram-box-header\" x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%d\"></rect>" ..
+            "<text class=\"fossci-diagram-box-title\" x=\"%.1f\" y=\"%.1f\">%s</text>" ..
+            "%s" ..
             "</g>",
-            escaped_name, p.x, p.y, p.x, p.y - 14, escaped_name
+            escaped_name, box.x, box.y, box.width, box.height,
+            box.x, box.y, box.width, DIAGRAM_HEADER_HEIGHT,
+            box.x + box.width / 2, box.y + DIAGRAM_HEADER_HEIGHT - 8, escaped_name,
+            rows_svg
         )
     end
 
     return string.format("""
-<div class="fossci-diagram-hint">Hover an entity to see its relations; click to browse it.</div>
+<div class="fossci-diagram-hint">Hover an entity to see its relations; click its header to browse it.</div>
 <div class="fossci-diagram-scroll">
 <svg id="fossci-diagram-svg" viewBox="0 0 %d %d" width="%d" height="%d">
-    <defs>
-        <marker id="fossci-diagram-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-            <path d="M 0 0 L 10 5 L 0 10 z"></path>
-        </marker>
-    </defs>
     %s
     %s
 </svg>
 </div>
-""", size, size, size, size, edges_svg, nodes_svg)
+""", total_width, total_height, total_width, total_height, edges_svg, boxes_svg)
 end
 
 function html.relation_diagram_css()
     return """
         .fossci-diagram-hint { color: var(--fossci-muted, #64748b); font-size: 0.85rem; margin-bottom: 10px; }
         .fossci-diagram-scroll { overflow: auto; border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-md, 12px); background: var(--fossci-bg, #f8fafc); }
-        .fossci-diagram-edge { stroke: var(--fossci-border, #cbd5e1); stroke-width: 1.5; transition: stroke 0.15s ease, opacity 0.15s ease; }
-        .fossci-diagram-edge.fossci-diagram-edge-active { stroke: var(--fossci-accent, #4f46e5); stroke-width: 2.5; }
+        .fossci-diagram-edge line { stroke: var(--fossci-border, #cbd5e1); stroke-width: 1.5; transition: stroke 0.15s ease, opacity 0.15s ease; }
+        .fossci-diagram-edge.fossci-diagram-edge-active line { stroke: var(--fossci-accent, #4f46e5); stroke-width: 2.5; }
         .fossci-diagram-edge.fossci-diagram-edge-dim { opacity: 0.15; }
-        .fossci-diagram-arrow-fill { fill: var(--fossci-border, #cbd5e1); }
-        #fossci-diagram-arrow path { fill: var(--fossci-border, #cbd5e1); }
-        .fossci-diagram-node circle { fill: var(--fossci-bg, #ffffff); stroke: var(--fossci-accent, #4f46e5); stroke-width: 2; transition: var(--fossci-transition, all 0.2s cubic-bezier(0.4, 0, 0.2, 1)); }
-        .fossci-diagram-node text { font-size: 12px; font-weight: 600; text-anchor: middle; fill: var(--fossci-heading, #0f172a); text-transform: capitalize; }
+        .fossci-diagram-card { font-size: 11px; font-weight: 700; fill: var(--fossci-muted, #64748b); }
+        .fossci-diagram-edge.fossci-diagram-edge-active .fossci-diagram-card { fill: var(--fossci-accent, #4f46e5); }
+        .fossci-diagram-box { fill: var(--fossci-bg, #ffffff); stroke: var(--fossci-border, #cbd5e1); stroke-width: 1.5; transition: var(--fossci-transition, all 0.2s cubic-bezier(0.4, 0, 0.2, 1)); }
+        .fossci-diagram-box-header { fill: var(--fossci-accent, #4f46e5); }
+        .fossci-diagram-box-title { font-size: 12px; font-weight: 700; text-anchor: middle; fill: #ffffff; text-transform: capitalize; }
+        .fossci-diagram-row-name { font-size: 11px; fill: var(--fossci-text, #334155); }
+        .fossci-diagram-row-name.fossci-diagram-row-pk { font-weight: 700; text-decoration: underline; fill: var(--fossci-heading, #0f172a); }
+        .fossci-diagram-row-name.fossci-diagram-row-required { font-weight: 700; }
+        .fossci-diagram-row-type { font-size: 10px; fill: var(--fossci-muted, #94a3b8); text-anchor: end; }
         .fossci-diagram-node { cursor: pointer; }
-        .fossci-diagram-node:hover circle, .fossci-diagram-node:focus circle { fill: var(--fossci-accent, #4f46e5); }
+        .fossci-diagram-node:hover .fossci-diagram-box, .fossci-diagram-node:focus .fossci-diagram-box { stroke: var(--fossci-accent, #4f46e5); stroke-width: 2.5; }
         .fossci-diagram-node.fossci-diagram-node-dim { opacity: 0.25; }
 """
 end
@@ -2507,7 +2633,7 @@ function html.render_knowledge_pool(stats, recent_retrievals)
      stats.session_count, tier_tiles, retrieval_rows)
 end
 
-function html.render_index(entity_types, edges, nonce)
+function html.render_index(db_path, entity_types, edges, nonce)
     items = ""
     for _, row in ipairs(entity_types) do
         escaped_name = html.html_escape(row.name)
@@ -2537,7 +2663,7 @@ function html.render_index(entity_types, edges, nonce)
         list_or_empty = "<p class=\"fossci-empty\">No entity types registered yet.</p>"
     end
 
-    diagram_html = html.render_relation_diagram(entity_types, edges)
+    diagram_html = html.render_relation_diagram(db_path, entity_types, edges)
 
     return string.format("""
 <div class="fossil-doc" data-title="Overview">
