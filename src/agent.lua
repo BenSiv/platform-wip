@@ -16,6 +16,9 @@ document = require("document")
 entity = require("entity")
 schema = require("schema")
 knowledge = require("knowledge")
+auth = require("auth")
+template = require("template")
+config = require("config")
 
 agent = {}
 
@@ -403,6 +406,18 @@ AGENT_TOOLS = {
         get = {destructive = false},
         create = {destructive = true},
         update = {destructive = true},
+        archive = {destructive = true},
+        unarchive = {destructive = true},
+    },
+    -- Reusable Entry templates (src/template.lua) -- a separate,
+    -- filesystem-based system from `document`, invisible to every other
+    -- tool. Read-only, same no-capability-check precedent as
+    -- document.search: lets the model discover a template exists and
+    -- get its rendered content, then hand that straight to
+    -- document.create's own content arg.
+    template = {
+        list = {destructive = false},
+        get = {destructive = false},
     },
     -- Read-only introspection into the knowledge pool's own tiering/
     -- retrieval activity (see knowledge.lua), plus one destructive tool
@@ -487,6 +502,34 @@ function row_summary(row)
     return table.concat(parts, "; ")
 end
 
+-- Whether the agent itself is allowed to write to entity_type. The
+-- agent's own capability is independently configured, exactly like any
+-- other API key -- not derived from whichever human happens to be
+-- chatting (auth.lua's own principle for api_key rows: "a key's
+-- capabilities are its own, not derived from whoever created it").
+-- Without this, a plain baseline user's chat session could write to an
+-- admin_write_only type the same user's own /register form would
+-- refuse -- confirmed live as a real gap, not hypothetical.
+--
+-- Reuses the api_key table/admin UI wholesale via a well-known
+-- reserved label ("chat-agent") rather than inventing a new concept --
+-- an admin configures the agent's own capability the exact same way
+-- they'd configure any other integration's key, via
+-- /admin-api-keys or `platform api-key create/capabilities`. Fails
+-- closed: no such key yet means no admin-gated writes at all, not a
+-- silent default of full access.
+function agent.check_write_capability(db_path, entity_type)
+    if schema.admin_write_only(db_path, entity_type) == false then
+        return true
+    end
+    agent_key = auth.get_api_key(db_path, "chat-agent")
+    cap = ""
+    if agent_key != nil then
+        cap = agent_key.cap
+    end
+    return string.find(cap, "a", 1, true) != nil
+end
+
 -- Runs one already-approved (or non-destructive) tool call. `author`
 -- is the real, authenticated login the call runs as -- tool actions
 -- are attributed the same way any other write in this system is, never
@@ -513,6 +556,9 @@ function agent.execute_tool(db_path, author, session_id, tool_name, method_name,
     end
 
     if tool_name == "document" and method_name == "create" then
+        if agent.check_write_capability(db_path, "document") == false then
+            return nil, "Forbidden: this requires the chat agent's own Admin capability -- ask an admin to grant it via /admin-api-keys."
+        end
         parent_id = tonumber(args.parent_id)
         created_id, issues = document.create_page(db_path, author, args.title, parent_id, args.content, source)
         if created_id == nil then
@@ -522,6 +568,9 @@ function agent.execute_tool(db_path, author, session_id, tool_name, method_name,
     end
 
     if tool_name == "document" and method_name == "update" then
+        if agent.check_write_capability(db_path, "document") == false then
+            return nil, "Forbidden: this requires the chat agent's own Admin capability -- ask an admin to grant it via /admin-api-keys."
+        end
         target_id = tonumber(args.entity_id)
         if target_id == nil then
             return nil, "update requires entity_id"
@@ -573,7 +622,15 @@ function agent.execute_tool(db_path, author, session_id, tool_name, method_name,
         if limit == nil then
             limit = 20
         end
-        rows = entity.list(db_path, args.entity_type, limit, nil, false)
+        offset = tonumber(args.offset)
+        -- Same GET-list shape /api/v1 already offers (filter_field +
+        -- limit/offset) -- a plain entity.list otherwise, unchanged.
+        rows = nil
+        if args.filter_field != nil and args.filter_value != nil then
+            rows = entity.list_by_field(db_path, args.entity_type, args.filter_field, args.filter_value, limit, offset, false)
+        else
+            rows = entity.list(db_path, args.entity_type, limit, offset, false)
+        end
         if #rows == 0 then
             return "No " .. tostring(args.entity_type) .. " rows found."
         end
@@ -600,6 +657,9 @@ function agent.execute_tool(db_path, author, session_id, tool_name, method_name,
         if args.entity_type == nil then
             return nil, "create requires entity_type"
         end
+        if agent.check_write_capability(db_path, args.entity_type) == false then
+            return nil, "Forbidden: " .. tostring(args.entity_type) .. " requires the chat agent's own Admin capability -- ask an admin to grant it via /admin-api-keys."
+        end
         values = {}
         for k, v in pairs(args) do
             if k != "entity_type" then
@@ -618,6 +678,9 @@ function agent.execute_tool(db_path, author, session_id, tool_name, method_name,
         if args.entity_type == nil or target_id == nil then
             return nil, "update requires entity_type and entity_id"
         end
+        if agent.check_write_capability(db_path, args.entity_type) == false then
+            return nil, "Forbidden: " .. tostring(args.entity_type) .. " requires the chat agent's own Admin capability -- ask an admin to grant it via /admin-api-keys."
+        end
         -- reason (task #93) is metadata about the change, not a field
         -- being changed on the entity itself -- pulled out the same way
         -- entity_type/entity_id already are, so it never ends up as a
@@ -633,6 +696,72 @@ function agent.execute_tool(db_path, author, session_id, tool_name, method_name,
             return nil, issues_summary(issues)
         end
         return "Updated " .. tostring(args.entity_type) .. " #" .. tostring(updated_id)
+    end
+
+    if tool_name == "entity" and method_name == "archive" then
+        target_id = tonumber(args.entity_id)
+        if args.entity_type == nil or target_id == nil then
+            return nil, "archive requires entity_type and entity_id"
+        end
+        if agent.check_write_capability(db_path, args.entity_type) == false then
+            return nil, "Forbidden: " .. tostring(args.entity_type) .. " requires the chat agent's own Admin capability -- ask an admin to grant it via /admin-api-keys."
+        end
+        archived_id, issues = entity.archive(db_path, args.entity_type, target_id, author, source, args.reason)
+        if archived_id == nil then
+            return nil, issues_summary(issues)
+        end
+        return "Archived " .. tostring(args.entity_type) .. " #" .. tostring(archived_id)
+    end
+
+    if tool_name == "entity" and method_name == "unarchive" then
+        target_id = tonumber(args.entity_id)
+        if args.entity_type == nil or target_id == nil then
+            return nil, "unarchive requires entity_type and entity_id"
+        end
+        if agent.check_write_capability(db_path, args.entity_type) == false then
+            return nil, "Forbidden: " .. tostring(args.entity_type) .. " requires the chat agent's own Admin capability -- ask an admin to grant it via /admin-api-keys."
+        end
+        unarchived_id, issues = entity.unarchive(db_path, args.entity_type, target_id, author, source)
+        if unarchived_id == nil then
+            return nil, issues_summary(issues)
+        end
+        return "Unarchived " .. tostring(args.entity_type) .. " #" .. tostring(unarchived_id)
+    end
+
+    if tool_name == "template" and method_name == "list" then
+        templates_dir = config.templates_dir()
+        names = template.names(templates_dir)
+        if #names == 0 then
+            return "No templates available."
+        end
+        lines = {}
+        for _, name in ipairs(names) do
+            def, err = template.load(templates_dir, name)
+            if def != nil then
+                description = def.description
+                if description == nil then
+                    description = ""
+                end
+                table.insert(lines, name .. " (" .. tostring(def.label) .. "): " .. description)
+            end
+        end
+        return table.concat(lines, "\n")
+    end
+
+    if tool_name == "template" and method_name == "get" then
+        if args.name == nil then
+            return nil, "get requires name"
+        end
+        def, err = template.load(config.templates_dir(), args.name)
+        if def == nil then
+            return nil, "no such template: " .. tostring(args.name) .. " (" .. tostring(err) .. ")"
+        end
+        rendered = template.render(def)
+        default_path = def.default_path
+        if default_path == nil then
+            default_path = def.label
+        end
+        return "Suggested page name: " .. tostring(default_path) .. "\n\n" .. rendered
     end
 
     if tool_name == "knowledge" and method_name == "stats" then
@@ -822,10 +951,14 @@ Available tools:
 - document.update -- update an existing page. Args: entity_id=<page id>, title=<optional new title>, parent_id=<optional new parent id>, content=<optional new content>
 - entity.list_types -- list every registered entity type (samples, tasks, experiments, whatever this deployment has). No args.
 - entity.fields -- list an entity type's fields and their types, so you know what's valid before creating/updating one. Args: entity_type=<name>
-- entity.list -- list rows of an entity type. Args: entity_type=<name>, limit=<optional, default 20>
+- entity.list -- list rows of an entity type, optionally filtered to rows where one field equals a value. Args: entity_type=<name>, filter_field=<optional field name>, filter_value=<optional value, only used with filter_field>, limit=<optional, default 20>, offset=<optional, for paging past the first page>
 - entity.get -- fetch one entity row by id. Args: entity_type=<name>, entity_id=<id>
 - entity.create -- create a new entity row. Args: entity_type=<name>, plus one arg per field (e.g. status=open, due_date=2026-08-01)
 - entity.update -- update fields on an existing entity row. Args: entity_type=<name>, entity_id=<id>, reason=<optional: why this change is being made>, plus one arg per field to change. Some entity types require a reason -- if the tool result says one is required, ask the user why before retrying.
+- entity.archive -- archive (soft-remove) an entity row. Args: entity_type=<name>, entity_id=<id>, reason=<optional: why this change is being made>. Some entity types require a reason.
+- entity.unarchive -- restore a previously archived entity row. Args: entity_type=<name>, entity_id=<id>
+- template.list -- list reusable Entry templates (name, label, description) available to build a new page from. No args.
+- template.get -- get one template's rendered content, ready to pass straight to document.create's own content arg, plus its suggested default page name. Args: name=<template name>
 - knowledge.stats -- summarize the knowledge pool's tier distribution and retrieval activity. No args.
 - knowledge.list -- list knowledge pool documents with their id, tier, atomicity (ok/thin/needs-split), heat, and retrieval count. Args: tier=<optional, filter to one tier 0-3>
 - knowledge.distill -- write a new, concise, single-idea document distilled from a source you've actually read (e.g. via entity.get). Not a raw copy -- extract the one core idea in your own words. Only do this for a source that's genuinely not already atomic ("thin"/"ok" sources have nothing worth extracting). Args: title=<title>, content=<the distilled markdown text>, source_document_id=<optional: the existing document this was distilled from>. Requires human approval before anything is actually written.

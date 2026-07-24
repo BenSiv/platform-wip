@@ -436,3 +436,159 @@ EOF
     [[ "$output" =~ "ERR:	nil" ]]
     [[ ! "$output" =~ "RESULT:	nil" ]]
 }
+
+write_admin_schema() {
+    mkdir -p schemas
+    cat > schemas/secret_report.lua <<'EOF'
+return {
+  name = "secret_report",
+  admin_write_only = true,
+  fields = { {name = "title", type = "text", required = true} },
+}
+EOF
+    "$BIN" schema add schemas/secret_report.lua >/dev/null
+}
+
+write_experiment_template() {
+    mkdir -p templates
+    cat > templates/standard_experiment.lua <<'EOF'
+return {
+  name = "standard_experiment",
+  label = "Standard Experiment",
+  description = "Objective/hypothesis text plus an Experiment registration table.",
+  default_path = "Notebook/Standard Experiment",
+  sections = {
+    {type = "heading", text = "Objective"},
+    {type = "text", text = "Describe the goal..."},
+    {type = "registration_table", entity_type = "experiment", label = "Experiment"},
+  },
+}
+EOF
+}
+
+@test "template.list lists available templates by name/label/description" {
+    write_experiment_template
+    resp=$(start_chat "$COOKIE" "$CSRF" "Chat")
+    session_id=$(extract_query_param "$resp" "session_id")
+
+    scripted=$'<tool>template</tool>\n<method>list</method>\n<args>\n</args>\1<done>Listed.</done>'
+    raw_post "/chat-message" "csrf_token=${CSRF}&session_id=${session_id}&message=what+templates+exist" "$COOKIE" "$scripted" >/dev/null
+
+    run raw_get "/chat" "session_id=${session_id}" "$COOKIE"
+    [[ "$output" =~ "standard_experiment" ]]
+    [[ "$output" =~ "Standard Experiment" ]]
+}
+
+@test "template.get returns rendered content, chainable straight into document.create" {
+    write_experiment_template
+    resp=$(start_chat "$COOKIE" "$CSRF" "Chat")
+    session_id=$(extract_query_param "$resp" "session_id")
+
+    scripted=$'<tool>template</tool>\n<method>get</method>\n<args>\nname=standard_experiment\n</args>\1<done>Got it.</done>'
+    raw_post "/chat-message" "csrf_token=${CSRF}&session_id=${session_id}&message=get+the+standard+experiment+template" "$COOKIE" "$scripted" >/dev/null
+
+    run raw_get "/chat" "session_id=${session_id}" "$COOKIE"
+    [[ "$output" =~ "## Objective" ]]
+    [[ "$output" =~ "register?type=experiment" ]]
+    [[ "$output" =~ "Notebook/Standard Experiment" ]]
+}
+
+@test "template.get on an unknown name fails cleanly, not a crash" {
+    resp=$(start_chat "$COOKIE" "$CSRF" "Chat")
+    session_id=$(extract_query_param "$resp" "session_id")
+
+    scripted=$'<tool>template</tool>\n<method>get</method>\n<args>\nname=nonexistent\n</args>\1<done>No such template.</done>'
+    run raw_post "/chat-message" "csrf_token=${CSRF}&session_id=${session_id}&message=get+a+bogus+template" "$COOKIE" "$scripted"
+    [[ "$output" =~ "302 Found" ]]
+}
+
+@test "entity.archive and entity.unarchive are destructive: pause for approval, then really apply once approved" {
+    write_task_schema
+    "$BIN" entity create task title="Old task" status=open >/dev/null
+    resp=$(start_chat "$COOKIE" "$CSRF" "Chat")
+    session_id=$(extract_query_param "$resp" "session_id")
+
+    scripted=$'<tool>entity</tool>\n<method>archive</method>\n<args>\nentity_type=task\nentity_id=1\n</args>'
+    raw_post "/chat-message" "csrf_token=${CSRF}&session_id=${session_id}&message=archive+task+1" "$COOKIE" "$scripted" >/dev/null
+
+    run "$BIN" entity list task
+    [[ "$output" =~ "#1" ]]
+
+    page_html=$(raw_get "/chat" "session_id=${session_id}" "$COOKIE")
+    pending_id=$(printf '%s' "$page_html" | grep -o 'pending_id" value="[0-9]*"' | grep -o '[0-9]*' | head -1)
+    raw_post "/chat-approve" "csrf_token=${CSRF}&pending_id=${pending_id}&session_id=${session_id}" "$COOKIE" $'<done>Archived.</done>' >/dev/null
+
+    run "$BIN" entity list task
+    [[ ! "$output" =~ "#1" ]]
+
+    resp2=$(start_chat "$COOKIE" "$CSRF" "Chat2")
+    session_id2=$(extract_query_param "$resp2" "session_id")
+    scripted2=$'<tool>entity</tool>\n<method>unarchive</method>\n<args>\nentity_type=task\nentity_id=1\n</args>'
+    raw_post "/chat-message" "csrf_token=${CSRF}&session_id=${session_id2}&message=restore+task+1" "$COOKIE" "$scripted2" >/dev/null
+    page_html2=$(raw_get "/chat" "session_id=${session_id2}" "$COOKIE")
+    pending_id2=$(printf '%s' "$page_html2" | grep -o 'pending_id" value="[0-9]*"' | grep -o '[0-9]*' | head -1)
+    raw_post "/chat-approve" "csrf_token=${CSRF}&pending_id=${pending_id2}&session_id=${session_id2}" "$COOKIE" $'<done>Restored.</done>' >/dev/null
+
+    run "$BIN" entity list task
+    [[ "$output" =~ "#1" ]]
+}
+
+@test "entity.list supports filter_field/filter_value and limit, matching /api/v1's own GET-list shape" {
+    write_task_schema
+    "$BIN" entity create task title="First" status=open >/dev/null
+    "$BIN" entity create task title="Second" status=done >/dev/null
+    "$BIN" entity create task title="Third" status=open >/dev/null
+    resp=$(start_chat "$COOKIE" "$CSRF" "Chat")
+    session_id=$(extract_query_param "$resp" "session_id")
+
+    scripted=$'<tool>entity</tool>\n<method>list</method>\n<args>\nentity_type=task\nfilter_field=status\nfilter_value=open\n</args>\1<done>Listed.</done>'
+    raw_post "/chat-message" "csrf_token=${CSRF}&session_id=${session_id}&message=list+open+tasks" "$COOKIE" "$scripted" >/dev/null
+
+    run raw_get "/chat" "session_id=${session_id}" "$COOKIE"
+    [[ "$output" =~ "First" ]]
+    [[ "$output" =~ "Third" ]]
+    [[ ! "$output" =~ "Second" ]]
+}
+
+@test "the chat agent's own write capability is independent of the chatting user -- not configured means no admin-gated writes at all" {
+    write_admin_schema
+    resp=$(start_chat "$COOKIE" "$CSRF" "Chat")
+    session_id=$(extract_query_param "$resp" "session_id")
+
+    # No "chat-agent" api key exists yet -- alice is a plain "i" user
+    # either way, proving this is really the agent's own capability
+    # being checked, not hers. Still pauses for human approval first
+    # (destructive=true gates on that regardless), the capability
+    # check itself only fires once execute_tool actually runs, i.e.
+    # after approval.
+    scripted=$'<tool>entity</tool>\n<method>create</method>\n<args>\nentity_type=secret_report\ntitle=Leaked\n</args>'
+    raw_post "/chat-message" "csrf_token=${CSRF}&session_id=${session_id}&message=create+a+secret+report" "$COOKIE" "$scripted" >/dev/null
+
+    page_html=$(raw_get "/chat" "session_id=${session_id}" "$COOKIE")
+    [[ "$page_html" =~ "wants to run" ]]
+    pending_id=$(printf '%s' "$page_html" | grep -o 'pending_id" value="[0-9]*"' | grep -o '[0-9]*' | head -1)
+    raw_post "/chat-approve" "csrf_token=${CSRF}&pending_id=${pending_id}&session_id=${session_id}" "$COOKIE" $'<done>Done.</done>' >/dev/null
+
+    run "$BIN" entity list secret_report
+    [[ "$output" == "" ]]
+    run raw_get "/chat" "session_id=${session_id}" "$COOKIE"
+    [[ "$output" =~ "Forbidden" ]]
+}
+
+@test "once a chat-agent api key is granted Admin capability, the same write actually goes through the normal approval flow" {
+    write_admin_schema
+    "$BIN" api-key create chat-agent a >/dev/null
+    resp=$(start_chat "$COOKIE" "$CSRF" "Chat")
+    session_id=$(extract_query_param "$resp" "session_id")
+
+    scripted=$'<tool>entity</tool>\n<method>create</method>\n<args>\nentity_type=secret_report\ntitle=Approved report\n</args>'
+    raw_post "/chat-message" "csrf_token=${CSRF}&session_id=${session_id}&message=create+a+secret+report" "$COOKIE" "$scripted" >/dev/null
+
+    page_html=$(raw_get "/chat" "session_id=${session_id}" "$COOKIE")
+    [[ "$page_html" =~ "wants to run" ]]
+    pending_id=$(printf '%s' "$page_html" | grep -o 'pending_id" value="[0-9]*"' | grep -o '[0-9]*' | head -1)
+    raw_post "/chat-approve" "csrf_token=${CSRF}&pending_id=${pending_id}&session_id=${session_id}" "$COOKIE" $'<done>Created.</done>' >/dev/null
+
+    run "$BIN" entity list secret_report
+    [[ "$output" != "" ]]
+}
