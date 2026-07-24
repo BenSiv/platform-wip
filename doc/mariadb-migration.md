@@ -378,6 +378,18 @@ not skipped as an oversight.
   and `platform entity list sample` inside the running container returns
   exactly 77,230 rows -- the real migrated count, confirming the live
   app is actually serving from Cloud SQL, not silently still on SQLite.
+- Found post-cutover (2026-07-24), the same reserved-word class as
+  `rank`/`usage` above but missed at the time since it's not a schema
+  field, a fixed system column: `label_template`'s own `sql` column
+  (`src/label.lua`'s `find_template`) is a bare, unquoted `SELECT sql,
+  zpl FROM label_template ...`. `sql` is a MariaDB reserved word too --
+  and since `label.has_template` runs this same query on every
+  `/detail` page for every entity type (to decide whether to show the
+  Print Label button), this 500'd site-wide, not just on label
+  printing. Fixed with `db.quote_ident`, same as the other two.
+  Worth a proactive audit of every other hardcoded column name in the
+  codebase against MariaDB's reserved-word list rather than continuing
+  to find these one at a time in production.
 
 ## Feature-parity check: does anything here actually need Postgres?
 
