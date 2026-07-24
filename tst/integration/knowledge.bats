@@ -52,6 +52,28 @@ search_for_bioreactor() {
     raw_post "/chat-message" "csrf_token=${CSRF}&session_id=${session_id}&message=find+bioreactor+pages" "$COOKIE" "$scripted" >/dev/null
 }
 
+# Same as search_for_bioreactor, but with an optional extra scripted
+# response for task #109's own generate() call -- which only fires on
+# whichever retrieval first crosses CO_RETRIEVAL_LINK_THRESHOLD for a
+# given pair (not every retrieval), so most calls to this helper don't
+# need one at all. Slot order matters: knowledge.search_and_log (and so
+# review_retrieval/knowledge.maybe_link_co_retrieved) runs as part of
+# the search *tool's own execution*, in between the tool-call proposal
+# and the loop's next (final-reply) generate() call -- not after it --
+# so the extra response goes in the *middle* of the scripted list, not
+# appended at the end.
+search_for_bioreactor_extra() {
+    local extra_response="$1"
+    resp=$(start_chat)
+    session_id=$(extract_query_param "$resp" "session_id")
+    scripted=$'<tool>document</tool>\n<method>search</method>\n<args>\nquery=bioreactor\n</args>'
+    if [ -n "$extra_response" ]; then
+        scripted="${scripted}"$'\1'"${extra_response}"
+    fi
+    scripted="${scripted}"$'\1<done>Found it.</done>'
+    raw_post "/chat-message" "csrf_token=${CSRF}&session_id=${session_id}&message=find+bioreactor+pages" "$COOKIE" "$scripted" >/dev/null
+}
+
 @test "platform knowledge stats shows all zeros on a fresh store" {
     run "$BIN" knowledge stats
     [[ "$output" =~ "tier0=0 tier1=0 tier2=0 tier3=0" ]]
@@ -218,4 +240,64 @@ search_for_bioreactor() {
     run bash -c "GATEWAY_INTERFACE=CGI/1.1 REQUEST_METHOD=GET PATH_INFO=/system QUERY_STRING= HTTP_COOKIE='session=${carol_session}; csrf=${carol_csrf}' '$BIN'"
     [[ "$output" =~ 'href="knowledge"' ]]
     [[ "$output" =~ "Knowledge Pool" ]]
+}
+
+@test "two documents repeatedly co-retrieved get an agent-evaluated explicit link once the agent says YES (task #109)" {
+    "$BIN" entity create document title="Bioreactor Cleaning" content="cleaning steps for the bioreactor procedure"
+    "$BIN" entity create document title="Bioreactor Startup" content="startup steps for the bioreactor procedure"
+
+    # First 2 shared retrievals stay below CO_RETRIEVAL_LINK_THRESHOLD
+    # (3) -- no evaluation call needed, no extra scripted response.
+    search_for_bioreactor_extra ""
+    search_for_bioreactor_extra ""
+    # The 3rd shared retrieval crosses the threshold -- one extra
+    # generate() call fires for the evaluation itself.
+    search_for_bioreactor_extra "YES"
+
+    run sqlite3 .store/store.db "SELECT source FROM document_link WHERE from_document_id = 1 AND to_document_id = 2;"
+    [[ "$output" == "co-retrieval" ]]
+    run sqlite3 .store/store.db "SELECT decision, last_co_count FROM knowledge_link_review WHERE document_a_id = 1 AND document_b_id = 2;"
+    [[ "$output" == "linked|3" ]]
+}
+
+@test "a co-retrieved pair the agent declines is remembered, not re-asked on the very next shared retrieval (task #109)" {
+    "$BIN" entity create document title="Bioreactor Cleaning" content="cleaning steps for the bioreactor procedure"
+    "$BIN" entity create document title="Bioreactor Startup" content="startup steps for the bioreactor procedure"
+
+    search_for_bioreactor_extra ""
+    search_for_bioreactor_extra ""
+    search_for_bioreactor_extra "NO"
+
+    run sqlite3 .store/store.db "SELECT COUNT(*) FROM document_link WHERE from_document_id = 1 AND to_document_id = 2;"
+    [ "$output" -eq 0 ]
+    run sqlite3 .store/store.db "SELECT decision, last_co_count FROM knowledge_link_review WHERE document_a_id = 1 AND document_b_id = 2;"
+    [[ "$output" == "declined|3" ]]
+
+    # A 4th shared retrieval (co_count=4) hasn't grown past
+    # last_co_count(3) + CO_RETRIEVAL_REEVALUATION_STEP(3) = 6 yet, so
+    # this must NOT trigger a second evaluation call -- no extra
+    # scripted response provided; if the code wrongly re-evaluated here,
+    # generate() would fall back to repeating the last scripted
+    # response ("NO") anyway, but the real assertion is that
+    # last_co_count stays 3 (unchanged), proving no re-evaluation ran.
+    search_for_bioreactor_extra ""
+    run sqlite3 .store/store.db "SELECT last_co_count FROM knowledge_link_review WHERE document_a_id = 1 AND document_b_id = 2;"
+    [ "$output" -eq 3 ]
+}
+
+@test "an auto-created co-retrieval link survives re-saving either document's content (task #109)" {
+    "$BIN" entity create document title="Bioreactor Cleaning" content="cleaning steps for the bioreactor procedure"
+    "$BIN" entity create document title="Bioreactor Startup" content="startup steps for the bioreactor procedure"
+
+    search_for_bioreactor_extra ""
+    search_for_bioreactor_extra ""
+    search_for_bioreactor_extra "YES"
+
+    run sqlite3 .store/store.db "SELECT COUNT(*) FROM document_link WHERE from_document_id = 1 AND to_document_id = 2 AND source = 'co-retrieval';"
+    [ "$output" -eq 1 ]
+
+    "$BIN" entity update document 1 content="updated cleaning steps for the bioreactor procedure"
+
+    run sqlite3 .store/store.db "SELECT COUNT(*) FROM document_link WHERE from_document_id = 1 AND to_document_id = 2 AND source = 'co-retrieval';"
+    [ "$output" -eq 1 ]
 }

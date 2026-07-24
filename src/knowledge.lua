@@ -118,6 +118,25 @@ CREATE TABLE IF NOT EXISTS knowledge_chat_eval (
     created_at TEXT DEFAULT (%s)
 );
 
+-- task #109: one row per *pair* of documents whose co-retrieval has
+-- been evaluated (linked or declined) -- document_a_id is always the
+-- smaller id, so (a,b) and (b,a) are always the same row. What makes
+-- "don't re-ask on every shared retrieval" and "re-ask once
+-- co-occurrence has grown enough since a decline" both possible without
+-- re-running the same model call over and over.
+CREATE TABLE IF NOT EXISTS knowledge_link_review (
+    document_a_id INTEGER NOT NULL,
+    document_b_id INTEGER NOT NULL,
+    last_co_count INTEGER NOT NULL,
+    -- VARCHAR(32), not TEXT -- same MariaDB/InnoDB key-length reasoning
+    -- as every other short-code column in this codebase (ledger.lua's
+    -- own SCHEMA comment has the full story) -- not itself part of this
+    -- table's key, but kept consistent with that convention regardless.
+    decision VARCHAR(32) NOT NULL,
+    evaluated_at TEXT DEFAULT (%s),
+    PRIMARY KEY (document_a_id, document_b_id)
+);
+
 """
 
 function knowledge_schema_sql(db_path)
@@ -125,7 +144,8 @@ function knowledge_schema_sql(db_path)
         db.autoincrement_keyword(db_path), db.now_expr(db_path),
         db.autoincrement_keyword(db_path), db.now_expr(db_path),
         db.autoincrement_keyword(db_path), db.now_expr(db_path),
-        db.autoincrement_keyword(db_path), db.now_expr(db_path)
+        db.autoincrement_keyword(db_path), db.now_expr(db_path),
+        db.now_expr(db_path)
     )
 end
 
@@ -416,6 +436,15 @@ function knowledge.review_retrieval(db_path, retrieval_id, author)
             end
         end
     end
+
+    -- task #109: co-retrieval -> agent-evaluated explicit link. Needs
+    -- the *whole batch* (to form pairs), so this runs once here rather
+    -- than inside the per-document loop above like the other gates.
+    document_ids = {}
+    for _, row in ipairs(rows) do
+        table.insert(document_ids, row.document_id)
+    end
+    knowledge.maybe_link_co_retrieved(db_path, author, document_ids)
 end
 
 --------------------------------------------------------------------------
@@ -598,6 +627,199 @@ function knowledge.maybe_distill(db_path, author, doc, atomicity)
     title = document.guess_title_from_body(distilled)
     document_id, err = knowledge.distill_document(db_path, author, doc.id, title, distilled)
     return document_id
+end
+
+--------------------------------------------------------------------------
+-- task #109: co-retrieval -> agent-evaluated explicit link
+--------------------------------------------------------------------------
+--
+-- Retrieval already surfaces an *implicit* similarity signal: documents
+-- that keep showing up together in the same search. Once a pair
+-- crosses a real, repeated pattern (not a one-off coincidence), it's
+-- worth asking whether that's a genuinely meaningful connection --
+-- if so, make it an explicit document_link, which then feeds task
+-- #106's spreading activation for free (no separate change needed in
+-- document.search's own ranking).
+--
+-- Same shape as knowledge.maybe_distill just above: a deterministic
+-- rule (threshold + hub-ratio guard crossed) triggers one direct,
+-- scoped agent_provider.generate call -- not an open-ended tool-calling
+-- session -- and the resulting document_link write is additive-only
+-- (never edits/deletes anything existing), so it doesn't need its own
+-- human-approval gate, the same reasoning that already exempts
+-- maybe_distill's own write from one.
+
+-- Minimum distinct retrievals two documents must share before
+-- evaluation triggers at all.
+CO_RETRIEVAL_LINK_THRESHOLD = 3
+
+-- co_count must also be at least this fraction of the *less-retrieved*
+-- of the two documents' own retrieval_count -- guards against a hub
+-- document (one that matches many different broad queries) racking up
+-- links to everything it happens to share a handful of retrievals with:
+-- its own retrieval_count is high too, so the ratio stays low even
+-- when its absolute co_count with everything is high.
+CO_RETRIEVAL_HUB_RATIO = 0.25
+
+-- After a decline, co_count must grow by at least this much again past
+-- last_co_count before the same pair is re-evaluated -- otherwise a
+-- declined pair would get re-asked on every single subsequent shared
+-- retrieval forever.
+CO_RETRIEVAL_REEVALUATION_STEP = 3
+
+LINK_EVALUATION_MODEL = DISTILL_MODEL
+
+LINK_EVALUATION_SYSTEM_PROMPT = """
+Two documents from the same knowledge pool have repeatedly been retrieved together in the same searches. Judge whether they describe a genuinely meaningful connection (the same topic, a real dependency, one explains or extends the other) as opposed to just coincidental overlap in unrelated searches. Reply with exactly one word: YES if they are genuinely related enough to link explicitly, or NO if not.
+"""
+
+-- Whether `co_count`/`retrieval_count_a`/`retrieval_count_b` clear both
+-- the absolute threshold and the hub-ratio guard -- pure math, kept
+-- separate from the DB/model-calling function below so it's directly
+-- unit-testable.
+--
+-- Ratio is against the *larger* of the two retrieval_counts, not the
+-- smaller -- caught by this function's own unit test before shipping:
+-- a hub document (retrieval_count=50) that happens to share 3
+-- retrievals with a rarely-retrieved one (retrieval_count=4) must be
+-- rejected (3/50 = 0.06, well under the guard), but checking against
+-- the *smaller* count (3/4 = 0.75) would have let it straight through
+-- -- exactly backwards from what the guard is for.
+function knowledge.co_retrieval_eligible(co_count, retrieval_count_a, retrieval_count_b)
+    if co_count < CO_RETRIEVAL_LINK_THRESHOLD then
+        return false
+    end
+    larger_retrieval_count = retrieval_count_a
+    if retrieval_count_b > larger_retrieval_count then
+        larger_retrieval_count = retrieval_count_b
+    end
+    if larger_retrieval_count <= 0 then
+        return false
+    end
+    return (co_count / larger_retrieval_count) >= CO_RETRIEVAL_HUB_RATIO
+end
+
+-- Co-occurrence counts for every pair *within* `document_ids` (not a
+-- corpus-wide scan) -- one self-join, not one query per pair.
+function knowledge.co_retrieval_pairs(db_path, document_ids)
+    if document_ids == nil or #document_ids < 2 then
+        return {}
+    end
+    id_list = {}
+    for _, id in ipairs(document_ids) do
+        table.insert(id_list, tostring(tonumber(id)))
+    end
+    id_list_sql = table.concat(id_list, ", ")
+
+    rows = db.query(db_path, string.format("""
+        SELECT a.document_id AS doc_a, b.document_id AS doc_b, COUNT(DISTINCT a.retrieval_id) AS co_count
+        FROM knowledge_retrieval_document a
+        JOIN knowledge_retrieval_document b ON a.retrieval_id = b.retrieval_id AND a.document_id < b.document_id
+        WHERE a.document_id IN (%s) AND b.document_id IN (%s)
+        GROUP BY a.document_id, b.document_id;
+    """, id_list_sql, id_list_sql))
+    if rows == nil then
+        return {}
+    end
+    return rows
+end
+
+function knowledge.get_link_review(db_path, document_a_id, document_b_id)
+    rows = db.query(db_path, string.format(
+        "SELECT * FROM knowledge_link_review WHERE document_a_id = %d AND document_b_id = %d;",
+        tonumber(document_a_id), tonumber(document_b_id)
+    ))
+    if rows == nil or rows[1] == nil then
+        return nil
+    end
+    return rows[1]
+end
+
+function knowledge.record_link_review(db_path, document_a_id, document_b_id, co_count, decision)
+    db.exec(db_path, string.format(
+        "%s knowledge_link_review (document_a_id, document_b_id, last_co_count, decision, evaluated_at) VALUES (%d, %d, %d, %s, %s);",
+        db.replace_into(db_path), tonumber(document_a_id), tonumber(document_b_id),
+        tonumber(co_count), db.quote(decision), db.now_expr(db_path)
+    ))
+end
+
+function knowledge.document_link_exists(db_path, document_a_id, document_b_id)
+    rows = db.query(db_path, string.format("""
+        SELECT 1 FROM document_link
+        WHERE (from_document_id = %d AND to_document_id = %d) OR (from_document_id = %d AND to_document_id = %d)
+        LIMIT 1;
+    """, tonumber(document_a_id), tonumber(document_b_id), tonumber(document_b_id), tonumber(document_a_id)))
+    return rows != nil and rows[1] != nil
+end
+
+-- Whether a pair due a fresh look right now -- no prior review at all
+-- (first time crossing the threshold), or a prior decline whose
+-- co_count has since grown past CO_RETRIEVAL_REEVALUATION_STEP beyond
+-- what it was declined at.
+function knowledge.due_for_link_review(review, co_count)
+    if review == nil then
+        return true
+    end
+    if review.decision == "linked" then
+        return false
+    end
+    return co_count >= (tonumber(review.last_co_count) + CO_RETRIEVAL_REEVALUATION_STEP)
+end
+
+-- Called once per retrieval from review_retrieval, given every
+-- document_id in that retrieval's own batch -- not per-document like
+-- the other review gates, since forming pairs needs the whole batch.
+function knowledge.maybe_link_co_retrieved(db_path, author, document_ids)
+    pairs_found = knowledge.co_retrieval_pairs(db_path, document_ids)
+    for _, pair in ipairs(pairs_found) do
+        doc_a_id = tonumber(pair.doc_a)
+        doc_b_id = tonumber(pair.doc_b)
+        co_count = tonumber(pair.co_count)
+
+        if knowledge.document_link_exists(db_path, doc_a_id, doc_b_id) == false then
+            review = knowledge.get_link_review(db_path, doc_a_id, doc_b_id)
+            if knowledge.due_for_link_review(review, co_count) then
+                doc_a = knowledge.get_document(db_path, doc_a_id)
+                doc_b = knowledge.get_document(db_path, doc_b_id)
+                if doc_a != nil and doc_b != nil then
+                    if knowledge.co_retrieval_eligible(co_count, tonumber(doc_a.retrieval_count), tonumber(doc_b.retrieval_count)) then
+                        knowledge.evaluate_co_retrieval_pair(db_path, doc_a, doc_b, co_count)
+                    end
+                end
+            end
+        end
+    end
+end
+
+function knowledge.evaluate_co_retrieval_pair(db_path, doc_a, doc_b, co_count)
+    agent_provider = require("agent_provider")
+    body_a = doc_a.content
+    if body_a == nil then
+        body_a = ""
+    end
+    body_b = doc_b.content
+    if body_b == nil then
+        body_b = ""
+    end
+    prompt = string.format(
+        "Document A -- %s:\n%s\n\nDocument B -- %s:\n%s",
+        tostring(doc_a.title), body_a, tostring(doc_b.title), body_b
+    )
+    answer, err = agent_provider.generate(LINK_EVALUATION_MODEL, LINK_EVALUATION_SYSTEM_PROMPT, prompt)
+    if answer == nil then
+        return
+    end
+    answer = string.upper(string.gsub(answer, "^%s*(.-)%s*$", "%1"))
+
+    if answer == "YES" then
+        db.exec(db_path, string.format(
+            "%s document_link (from_document_id, to_document_id, link_text, source) VALUES (%d, %d, %s, 'co-retrieval');",
+            db.insert_ignore(db_path), doc_a.id, doc_b.id, db.quote(doc_b.title)
+        ))
+        knowledge.record_link_review(db_path, doc_a.id, doc_b.id, co_count, "linked")
+    else
+        knowledge.record_link_review(db_path, doc_a.id, doc_b.id, co_count, "declined")
+    end
 end
 
 --------------------------------------------------------------------------

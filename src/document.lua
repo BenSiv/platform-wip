@@ -61,6 +61,23 @@ CREATE TABLE IF NOT EXISTS document_link (
 );
 """
 
+-- task #109: distinguishes a real `[[title]]` link a user actually
+-- wrote from one this codebase created itself (co-retrieval ->
+-- explicit link) -- see ensure_document_link_source_column and
+-- document.sync_links' own DELETE below for why this matters: without
+-- it, re-saving either document's content would silently wipe an
+-- auto-created link the next time sync_links reruns.
+function ensure_document_link_source_column(db_path)
+    existing = db.get_columns(db_path, "document_link")
+    have = {}
+    for _, name in ipairs(existing) do
+        have[name] = true
+    end
+    if have["source"] == nil then
+        db.exec(db_path, "ALTER TABLE document_link ADD COLUMN source VARCHAR(32) NOT NULL DEFAULT 'authored';")
+    end
+end
+
 -- A document's cached semantic-search embedding. Recomputed on every
 -- create_page/update_page (task #105) -- one embedding API call per
 -- save, not a corpus reindex, cheap in both latency and cost (the same
@@ -156,6 +173,7 @@ function document.init_schema(db_path)
     db.exec(db_path, string.format(DOCUMENT_EMBEDDING_SCHEMA, db.now_expr(db_path)))
     ensure_document_knowledge_columns(db_path)
     ensure_document_knowledge_indexes(db_path)
+    ensure_document_link_source_column(db_path)
 end
 
 -- The single top-level Notebook folder every system/agent-derived
@@ -300,8 +318,15 @@ end
 -- Recomputes every outgoing link for `document_id` from `content`:
 -- delete the old set, re-parse, re-resolve, reinsert. Idempotent, safe
 -- to call on every save regardless of whether content actually changed.
+-- task #109: only wipes/resyncs *authored* links (parsed fresh from
+-- this save's own [[...]] markup below) -- an auto-created co-retrieval
+-- link (source='co-retrieval') isn't derived from this document's
+-- content at all, so it would otherwise get silently deleted the next
+-- time either document's content changes.
 function document.sync_links(db_path, document_id, content)
-    db.exec(db_path, string.format("DELETE FROM document_link WHERE from_document_id = %d;", tonumber(document_id)))
+    db.exec(db_path, string.format(
+        "DELETE FROM document_link WHERE from_document_id = %d AND source = 'authored';", tonumber(document_id)
+    ))
     if content == nil then
         return
     end
