@@ -22,6 +22,13 @@
 --           {type = "text", text = "..."},
 --           {type = "registration_table", entity_type = "experiment",
 --               label = "Experiment", columns = {"number", "title"}},
+--           {type = "lookup_view", view_name = "samples_by_experiment",
+--               label = "Samples for this experiment"},  -- an inert
+--               -- {{view:...:EXPERIMENT_ID}} marker (see html.lua's
+--               -- expand_inline_views) -- EXPERIMENT_ID is a literal
+--               -- placeholder the user replaces by hand once pasted
+--               -- into a real page, same as registration_table's own
+--               -- generic, un-filled-in link above.
 --       },
 --   }
 --
@@ -80,6 +87,10 @@ function template.validate(def)
             if type(section.entity_type) != "string" or section.entity_type == "" then
                 return string.format("template '%s' section #%d: missing 'entity_type'", def.name, i)
             end
+        elseif section.type == "lookup_view" then
+            if type(section.view_name) != "string" or section.view_name == "" then
+                return string.format("template '%s' section #%d: missing 'view_name'", def.name, i)
+            end
         else
             return string.format("template '%s' section #%d: invalid type '%s'", def.name, i, tostring(section.type))
         end
@@ -131,6 +142,22 @@ function render_registration_table(section)
     return "**" .. label .. "** -- [Open registration table ->](" .. href .. ")"
 end
 
+-- An inert `{{view:...}}` marker for a template snippet -- a template
+-- is reusable across many future pages, so it has no experiment id of
+-- its own to bind (unlike convert_entries_to_pages.py, which already
+-- knows the real experiment_id at content-generation time). The
+-- EXPERIMENT_ID placeholder is meant to be replaced by hand after
+-- pasting the snippet into a real page, same philosophy as
+-- render_registration_table's own generic, un-filled-in link.
+function render_lookup_view(section)
+    label = section.label
+    if label == nil then
+        label = section.view_name
+    end
+    return "**" .. label .. "** -- {{view:" .. section.view_name ..
+        ":EXPERIMENT_ID}} _(replace EXPERIMENT_ID with this page's real experiment id)_"
+end
+
 function template.render(def)
     parts = {}
     for _, section in ipairs(def.sections) do
@@ -140,6 +167,8 @@ function template.render(def)
             table.insert(parts, section.text)
         elseif section.type == "registration_table" then
             table.insert(parts, render_registration_table(section))
+        elseif section.type == "lookup_view" then
+            table.insert(parts, render_lookup_view(section))
         end
     end
     return table.concat(parts, "\n\n")

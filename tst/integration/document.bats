@@ -123,6 +123,78 @@ raw_document_preview() {
     [[ "$output" =~ 'href="document?entity_id=2">Guides' ]]
 }
 
+setup_lookup_view_fixture() {
+    mkdir -p schemas views
+    cat > schemas/reagent.lua <<'EOF'
+return {
+  name = "reagent",
+  fields = { {name = "lot_number", type = "text", required = true} },
+}
+EOF
+    "$BIN" schema add schemas/reagent.lua >/dev/null
+    "$BIN" entity create reagent lot_number=LOT-1 >/dev/null
+    "$BIN" entity create reagent lot_number=LOT-2 >/dev/null
+
+    cat > views/by_id.lua <<'EOF'
+return {
+    name = "by_id",
+    sql = "SELECT lot_number FROM reagent WHERE id = ?",
+    columns = {{name = "lot_number", label = "Lot"}},
+    param = {name = "entity_id", type = "integer"},
+}
+EOF
+}
+
+@test "a document embedding an approved view renders a real inline table (task: inline lookup tables)" {
+    setup_lookup_view_fixture
+    "$BIN" view approve by_id
+
+    save_document "csrf_token=${CSRF}&title=Home&parent_id=&content=Reagents%3A+%7B%7Bview%3Aby_id%3A1%7D%7D" >/dev/null
+
+    # entity_id is a single sequence shared across every entity type, not
+    # per-table -- the fixture's 2 reagents take ids 1/2, so this document
+    # (the 3rd entity created overall) lands at id 3, not 1.
+    run get_route "/document" "entity_id=3"
+    [[ "$output" =~ "LOT-1" ]]
+    [[ ! "$output" =~ "LOT-2" ]]
+    [[ "$output" =~ "fossci-view-table" ]]
+    [[ ! "$output" =~ "{{view:" ]]
+}
+
+@test "a document embedding an unapproved view renders nothing -- silent, not an error or a name-leaking message" {
+    setup_lookup_view_fixture
+    # Deliberately not approved.
+
+    save_document "csrf_token=${CSRF}&title=Home&parent_id=&content=Reagents%3A+%7B%7Bview%3Aby_id%3A1%7D%7D" >/dev/null
+
+    run get_route "/document" "entity_id=3"
+    [[ ! "$output" =~ "LOT-1" ]]
+    [[ ! "$output" =~ "by_id" ]]
+    [[ ! "$output" =~ "not approved" ]]
+    [[ ! "$output" =~ "Internal Server Error" ]]
+}
+
+@test "a malformed embed marker (non-numeric param) passes through completely literal, unexpanded" {
+    setup_lookup_view_fixture
+    "$BIN" view approve by_id
+
+    save_document "csrf_token=${CSRF}&title=Home&parent_id=&content=Reagents%3A+%7B%7Bview%3Aby_id%3Aabc%7D%7D" >/dev/null
+
+    run get_route "/document" "entity_id=3"
+    [[ "$output" =~ "{{view:by_id:abc}}" ]]
+    [[ ! "$output" =~ "LOT-1" ]]
+}
+
+@test "/api/document-preview also expands an embedded view (both of document.render_html's call sites are covered)" {
+    setup_lookup_view_fixture
+    "$BIN" view approve by_id
+
+    run raw_document_preview '{"content":"Reagents: {{view:by_id:1}}"}' "$CSRF"
+    [[ "$output" =~ "LOT-1" ]]
+    [[ ! "$output" =~ "LOT-2" ]]
+    [[ ! "$output" =~ "{{view:" ]]
+}
+
 @test "editing a document updates it in place instead of creating a duplicate" {
     save_document "csrf_token=${CSRF}&title=Home&parent_id=&content=Original." >/dev/null
 

@@ -1,5 +1,7 @@
 db = require("db")
 schema = require("schema")
+view = require("view")
+config = require("config")
 
 html = {}
 
@@ -1630,19 +1632,13 @@ end
 -- Unlike browse/detail, columns come from the view's own declared
 -- `columns` list (name/label), not a schema -- a view can join/select
 -- across entity types, so there's no single schema to draw from.
-function html.render_view(view_def, rows, param_value)
-    title = view_def.title
-    if title == nil then
-        title = view_def.name
-    end
-    escaped_title = html.html_escape(title)
-
-    subtitle = tostring(#rows) .. " rows"
-    if view_def.param != nil then
-        subtitle = subtitle .. " -- filtered by " .. html.html_escape(view_def.param.name) ..
-            " = " .. html.html_escape(tostring(param_value))
-    end
-
+-- Just the <table>/empty-state markup for a view's result rows -- no
+-- title/subtitle/page chrome. Shared by render_view (the standalone
+-- /view page) and html.expand_inline_views (a view embedded inline in
+-- document content) so cell-rendering logic (including display_value)
+-- lives in exactly one place. Uses a class, not an id, since a single
+-- document can embed more than one view -- an id would collide.
+function html.render_view_table(view_def, rows)
     header_cells = ""
     for _, col in ipairs(view_def.columns) do
         label = col.label
@@ -1661,11 +1657,27 @@ function html.render_view(view_def, rows, param_value)
         body_rows = body_rows .. "<tr>" .. cells .. "</tr>"
     end
 
-    table_or_empty = "<div class=\"fossci-table-wrapper\"><table id=\"view-table\"><thead><tr>" ..
-        header_cells .. "</tr></thead><tbody>" .. body_rows .. "</tbody></table></div>"
     if #rows == 0 then
-        table_or_empty = "<p class=\"fossci-empty\">No rows.</p>"
+        return "<p class=\"fossci-empty\">No rows.</p>"
     end
+    return "<div class=\"fossci-table-wrapper\"><table class=\"fossci-view-table\"><thead><tr>" ..
+        header_cells .. "</tr></thead><tbody>" .. body_rows .. "</tbody></table></div>"
+end
+
+function html.render_view(view_def, rows, param_value)
+    title = view_def.title
+    if title == nil then
+        title = view_def.name
+    end
+    escaped_title = html.html_escape(title)
+
+    subtitle = tostring(#rows) .. " rows"
+    if view_def.param != nil then
+        subtitle = subtitle .. " -- filtered by " .. html.html_escape(view_def.param.name) ..
+            " = " .. html.html_escape(tostring(param_value))
+    end
+
+    table_or_empty = html.render_view_table(view_def, rows)
 
     -- A view has no schema of its own to register against (it can join
     -- across entity types, see the function comment above) -- but a
@@ -1690,9 +1702,9 @@ function html.render_view(view_def, rows, param_value)
         .fossci-header h2 { margin: 0 0 6px 0; font-size: 1.6rem; font-weight: 700; color: var(--fossci-heading, #0f172a); letter-spacing: -0.02em; }
         .fossci-header p { color: var(--fossci-muted, #64748b); margin: 0; font-size: 0.95rem; }
         .fossci-table-wrapper { overflow-x: auto; border: 1px solid var(--fossci-border, #e2e8f0); border-radius: var(--fossci-radius-md, 12px); background: var(--fossci-bg, #f8fafc); }
-        #view-table { width: 100%%; border-collapse: separate; border-spacing: 0; min-width: 600px; }
-        #view-table th, #view-table td { padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--fossci-border, #e2e8f0); font-size: 0.9rem; }
-        #view-table th {
+        .fossci-view-table { width: 100%%; border-collapse: separate; border-spacing: 0; min-width: 600px; }
+        .fossci-view-table th, .fossci-view-table td { padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--fossci-border, #e2e8f0); font-size: 0.9rem; }
+        .fossci-view-table th {
             background: var(--fossci-bg-2, #f1f5f9);
             font-weight: 600;
             font-size: 0.78rem;
@@ -1700,7 +1712,7 @@ function html.render_view(view_def, rows, param_value)
             text-transform: uppercase;
             letter-spacing: 0.06em;
         }
-        #view-table td { background: #ffffff; }
+        .fossci-view-table td { background: #ffffff; }
         .fossci-empty {
             padding: 32px;
             text-align: center;
@@ -1722,6 +1734,49 @@ function html.render_view(view_def, rows, param_value)
     </div>
 </div>
 """, escaped_title, fossci_container_css(1200), escaped_title, subtitle, register_link, table_or_empty)
+end
+
+-- Expands `{{view:view_name:123}}` markers in already-rendered document
+-- HTML into a real, live inline table -- a document embeds an existing
+-- parameterized view (e.g. "samples for this experiment") instead of
+-- just linking out to /view. Deliberately a THIRD, unrelated `{{ }}`
+-- convention in this codebase (render.lua's `{{ expr }}` templating,
+-- label.lua's `{{column_name}}` ZPL substitution are the other two) --
+-- no collision risk, neither of those patterns has a colon in it and
+-- neither ever runs on document content.
+--
+-- Runs as a post-processing pass over document.render_html's *output*,
+-- not injected into the markdown pre-processing chain -- `{{view:...}}`
+-- has no CommonMark meaning, so cmark-gfm already passes it through as
+-- inert literal text, fully intact, by the time this runs.
+--
+-- Numeric-only param value (every real view.param.type in this
+-- codebase is "integer") -- a malformed marker (e.g. a non-numeric
+-- value) just fails to match and passes through unexpanded, rather
+-- than reaching view.run and depending on its own error path.
+--
+-- An unapproved view renders nothing at all, not a placeholder message
+-- -- a document may be read by more roles than whoever manages view
+-- approvals, and even naming the view in a "not approved" message
+-- would leak its existence/state, exactly what the approval gate
+-- exists to prevent. A genuine error (missing view file, query
+-- failure) gets the same terse empty-state markup render_view itself
+-- uses -- an authoring mistake worth surfacing, not a trust boundary.
+function html.expand_inline_views(db_path, content)
+    return (string.gsub(content, "{{view:([%w_]+):(%d+)}}", function(view_name, param_value)
+        view_def, err = view.load(config.views_dir(), view_name)
+        if view_def == nil then
+            return "{{view:" .. view_name .. ":" .. param_value .. "}}"
+        end
+        if view.is_approved(db_path, view_def) == false then
+            return ""
+        end
+        rows, run_err = view.run(db_path, view_def, tonumber(param_value))
+        if rows == nil then
+            return "<p class=\"fossci-empty\">Error running view '" .. html.html_escape(view_name) .. "'.</p>"
+        end
+        return html.render_view_table(view_def, rows)
+    end))
 end
 
 -- ERD box geometry (task #86) -- fixed width rather than measured text,

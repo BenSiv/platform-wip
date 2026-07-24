@@ -868,6 +868,7 @@ function cgi.handle_request()
             return print_response("404 Not Found", "text/html", "<h3>Error: no such page #" .. tostring(entity_id) .. "</h3>")
         end
         rendered_html = document.render_html(db_path, doc.content)
+        rendered_html = html.expand_inline_views(db_path, rendered_html)
         breadcrumbs = document.breadcrumbs(db_path, entity_id)
         children = document.children(db_path, entity_id)
         backlinks = document.backlinks(db_path, entity_id)
@@ -1437,6 +1438,7 @@ function cgi.handle_request()
             return print_response("400 Bad Request", "application/json", json.encode({error = "Invalid JSON: " .. tostring(err)}))
         end
         rendered = document.render_html(db_path, body_data.content)
+        rendered = html.expand_inline_views(db_path, rendered)
         return print_response("200 OK", "application/json", json.encode({html = rendered}))
     end
 
