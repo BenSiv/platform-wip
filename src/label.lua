@@ -37,9 +37,13 @@ function find_template(db_path, entity_type)
     if db.table_exists(db_path, "label_template") == false then
         return nil
     end
+    -- `sql` is a reserved word in MariaDB (fine on SQLite, which has no
+    -- such restriction) -- quoted as an identifier so this runs on both
+    -- backends. Confirmed live: this 500'd on first real use against
+    -- MariaDB-backed platform-prod.
     rows = db.query(db_path, string.format(
-        "SELECT sql, zpl FROM label_template WHERE for_entity_type = %s AND archived_at IS NULL LIMIT 1;",
-        db.quote(entity_type)
+        "SELECT %s, zpl FROM label_template WHERE for_entity_type = %s AND archived_at IS NULL LIMIT 1;",
+        db.quote_ident("sql"), db.quote(entity_type)
     ))
     if rows == nil or rows[1] == nil then
         return nil

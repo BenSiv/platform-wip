@@ -256,3 +256,47 @@ EOF
     [ "$total_creates" -eq 15 ]
     [ "$distinct_entity_ids" -eq 15 ]
 }
+
+@test "label printing works against MariaDB, not just SQLite ('sql' is a reserved word there) (task #73)" {
+    "$BIN" init
+    mkdir -p schemas
+    cat > schemas/sample.lua <<'EOF'
+return {
+  name = "sample",
+  fields = { {name = "lab_name", type = "text", required = false} },
+}
+EOF
+    cat > schemas/label_template.lua <<'EOF'
+return {
+  name = "label_template",
+  admin_write_only = true,
+  fields = {
+    {name = "for_entity_type", type = "text", required = true},
+    {name = "sql", type = "sql_select", required = true},
+    {name = "zpl", type = "text", required = true},
+  },
+}
+EOF
+    "$BIN" schema add schemas/sample.lua
+    "$BIN" schema add schemas/label_template.lua
+    "$BIN" entity create sample lab_name="Test Sample"
+    "$BIN" entity create-json label_template <<'JSON'
+[{"for_entity_type": "sample", "sql": "SELECT lab_name FROM sample WHERE id = ?", "zpl": "^XA^FD{{lab_name}}^FS^XZ"}]
+JSON
+
+    read TEST_SESSION_COOKIE TEST_CSRF_TOKEN < <(login_test_user "mdb_label_viewer" "i")
+    GATEWAY_INTERFACE="CGI/1.1" REQUEST_METHOD="GET" PATH_INFO="/label" QUERY_STRING="type=sample&entity_id=1" \
+        HTTP_COOKIE="session=${TEST_SESSION_COOKIE}; csrf=${TEST_CSRF_TOKEN}" run "$BIN"
+    [[ "$output" =~ "200 OK" ]]
+    [[ "$output" =~ "Test Sample" ]]
+    [[ ! "$output" =~ "Internal Server Error" ]]
+
+    # /detail's own has_template check (decides whether to show the
+    # Print Label button) runs this exact query for every entity type
+    # on every /detail view -- confirmed live: this 500'd site-wide
+    # before the fix, not just on the /label route itself.
+    GATEWAY_INTERFACE="CGI/1.1" REQUEST_METHOD="GET" PATH_INFO="/detail" QUERY_STRING="type=sample&entity_id=1" \
+        HTTP_COOKIE="session=${TEST_SESSION_COOKIE}; csrf=${TEST_CSRF_TOKEN}" run "$BIN"
+    [[ "$output" =~ "200 OK" ]]
+    [[ ! "$output" =~ "Internal Server Error" ]]
+}
