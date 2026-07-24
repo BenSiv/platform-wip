@@ -265,6 +265,50 @@ EOF
     [[ "$output" =~ 'href="register?type=sample"' ]]
 }
 
+@test "/view?view_name=prioritized_tasks highlights the Tasks rail icon, not Data (regression)" {
+    cat > views/prioritized_tasks.lua <<'EOF'
+return {
+  name = "prioritized_tasks",
+  title = "Tasks",
+  entity_type = "task",
+  sql = "SELECT id, lot_number FROM sample;",
+  columns = {
+    {name = "id", label = "ID"},
+    {name = "lot_number", label = "Lot"},
+  },
+}
+EOF
+    "$BIN" view approve prioritized_tasks
+
+    run_cgi "/view" "view_name=prioritized_tasks"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ 'title="Tasks"' ]]
+    # The Tasks link itself carries the active class...
+    [[ "$output" =~ 'class="fossci-nav-link fossci-nav-link-active" href="view?view_name=prioritized_tasks"' ]]
+    # ...and Data does not.
+    [[ ! "$output" =~ 'class="fossci-nav-link fossci-nav-link-active" href="data"' ]]
+}
+
+@test "/view?view_name=some_other_view still highlights Data (only prioritized_tasks maps to Tasks)" {
+    cat > views/samples_with_type.lua <<'EOF'
+return {
+  name = "samples_with_type",
+  title = "All samples",
+  entity_type = "sample",
+  sql = "SELECT id, lot_number FROM sample;",
+  columns = {
+    {name = "id", label = "ID"},
+    {name = "lot_number", label = "Lot"},
+  },
+}
+EOF
+    "$BIN" view approve samples_with_type
+
+    run_cgi "/view" "view_name=samples_with_type"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ 'class="fossci-nav-link fossci-nav-link-active" href="data"' ]]
+}
+
 @test "/view refuses to run an unapproved view" {
     cat > views/unapproved.lua <<'EOF'
 return {

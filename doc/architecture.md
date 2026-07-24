@@ -280,13 +280,23 @@ and a small, explicit tool registry the model can act through.
   human, not hidden.
 - **Tool use is a small, explicit registry, not an open plugin
   system** -- the model can only ever call exactly what's listed, with
-  no escape hatch to anything else. Today: `document.search/create/
-  update` (pages), `entity.list_types/fields/list/get/create/update`
-  (any registered record type -- `entity.list_types`/`fields` exist so
-  the model discovers real types and field names itself rather than
-  the system prompt hardcoding every schema that might ever exist),
-  and `knowledge.stats` (read-only summary of the knowledge pool, see
-  below).
+  no escape hatch to anything else (not even the app's own `/api/v1`
+  REST API: there's no HTTP server to call into from inside the same
+  CGI process already handling the current request, and the API is
+  itself just a thin wrapper over the same `entity.lua` functions the
+  registry already calls directly -- widening the registry, not adding
+  a transport hop, is the real lever). Today: `document.search/create/
+  update` (pages); `entity.list_types/fields/list/get/create/update/
+  archive/unarchive` (any registered record type, with `filter_field`/
+  `filter_value`/`limit`/`offset` on `list` -- `entity.list_types`/
+  `fields` exist so the model discovers real types and field names
+  itself rather than the system prompt hardcoding every schema that
+  might ever exist); `template.list/get` (the same reusable Entry
+  templates `/templates` exposes to a human -- a separate,
+  filesystem-based system from `document`, otherwise invisible to the
+  model; `template.get`'s rendered output is meant to be handed
+  straight to `document.create`'s own `content` argument); and
+  `knowledge.stats/list/distill` (the knowledge pool, see below).
 - **A deployment can append its own instructions to the system
   prompt** without editing platform-wip's own source --
   `theme.json`'s `system_prompt_extra` field (`agent.default_system_
@@ -323,6 +333,20 @@ and a small, explicit tool registry the model can act through.
   tagged with which chat session it came from, so the ledger can still
   answer "was this a direct edit or something the assistant did" without
   that ever affecting who it's attributed to.
+- **Attribution and authorization are two separate questions, and only
+  the first one is the chatting user's.** *Who gets credited* for a
+  write is always the real human (previous bullet) -- but *whether an
+  admin-gated write is allowed at all* is the agent's own, independently
+  configured capability, not derived from whoever happens to be
+  chatting. This reuses the `api_key` table/admin UI wholesale via a
+  reserved `"chat-agent"` label (`/admin-api-keys`, or `platform
+  api-key create/capabilities chat-agent <cap>`) -- the same principle
+  already applied to every other API key ("a key's capabilities are its
+  own, not derived from whoever created it"). No such key configured
+  means no `admin_write_only`-gated writes at all, not silent full
+  access -- a baseline user's chat session can't reach further than an
+  admin's simply because nobody's set this up yet, and an admin's own
+  session isn't artificially capped by it either.
 - **Semantic search** blends keyword matching with embedding
   cosine-similarity when a page has been explicitly indexed -- indexing
   a page is a deliberate, separate action, never an automatic side

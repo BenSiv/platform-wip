@@ -838,8 +838,18 @@ function cgi.handle_request()
         end
         body = html.render_view(view_def, rows, param_value)
         page_context = {page_type = "view", view_name = view_name, title = view_name}
+        -- The Tasks nav-rail icon links here with view_name=
+        -- prioritized_tasks specifically (html.lua's own nav_items) --
+        -- found live: every /view page, including this one, always
+        -- highlighted "Data" as the active rail icon instead, since
+        -- this literally hardcoded "data" regardless of which view was
+        -- being shown.
+        active_section = "data"
+        if view_name == "prioritized_tasks" then
+            active_section = "tasks"
+        end
         return print_response("200 OK", "text/html",
-            html.page_shell(view_name, "data", body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author, page_context))
+            html.page_shell(view_name, active_section, body, nonce, show_sql_nav, show_admin_nav, has_tasks_view, theme, author, page_context))
     end
 
     -- Documents (src/document.lua): a real parent_id tree, not a
