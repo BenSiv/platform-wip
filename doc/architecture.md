@@ -108,17 +108,21 @@ state. Accounts follow the same convention.
 
 ### Storage
 
-Runs on SQLite today -- available, reliable, and enough to prove the
-history/projection design end to end. The storage layer (`src/db.lua`)
-is written as a small, deliberately thin adapter so that moving to a
-different backend later, if concurrency or scale ever demands it,
-doesn't require touching the history or record logic above it.
+Runs on SQLite by default (a from-source/dev install with zero setup),
+and on MariaDB-compatible MySQL in production (Cloud SQL, since the
+migration documented in `doc/mariadb-migration.md`) when real
+concurrency/scale demands it. The storage layer (`src/db.lua`) is a
+small, deliberately thin adapter (`config.db_backend()` picks the
+backend; `is_mariadb()` gates the handful of call sites where the two
+engines' dialects genuinely differ) so the history/record logic above
+it never needs to know which backend is live.
 
 Multiple independent installations (each with its own users and data)
-are one database file per installation, not one shared database
-filtered by an installation id -- clean isolation by construction, and
-enough concurrency headroom for many people using one installation's
-data at once.
+are isolated by construction, not by an installation id filtering a
+shared table: one SQLite file per installation for the dev/default
+path, or one database per installation on a shared MariaDB server in
+the managed-backend case -- either way, enough concurrency headroom for
+many people using one installation's data at once.
 
 ## Sandboxed extensibility
 

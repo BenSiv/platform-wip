@@ -16,9 +16,17 @@ Phases 1-3 of the durability plan.
 three real phases, and it surfaces one genuine, already-live bug along
 the way (see "Bug found during this investigation" below).
 
-## Current state (verified against both repos, not assumed)
+## Current state as of the start of this investigation (historical -- see Phase 0-4 below for what changed)
 
-### Luam has zero client-server DB bindings today
+**This section describes the state before any of the phases below
+landed.** As of Phase 4 (DONE), Luam has a real MariaDB binding
+(`lib/mariadb/lmariadb.c`, `lib/mariadb/mariadb.so`) and `lib/database.lua`
+has `mariadb_query`/`mariadb_update`/`get_mariadb_connection` with a
+persistent per-process connection cache -- the gap described just below
+no longer exists. Kept as-written for the historical record of what
+justified building it.
+
+### Luam had zero client-server DB bindings at the time this was written
 
 `src/db.lua`'s own header says "v0 runs on SQLite ... doc/architecture.md,
 'SQLite now, **Postgres** later'" -- not MariaDB. Checked
@@ -103,14 +111,18 @@ engine-abstracted through `db.lua` -- should port with no logic
 changes, just the DDL string generation.
 
 **FTS5 is a non-issue, corrected from an earlier assumption:** searched
-for it -- `document.lua:335-337`'s own comment says FTS5 *was*
+for it -- `document.lua:702-704`'s own comment says FTS5 *was*
 evaluated but this luam sqlite build doesn't have it compiled in, so
 `document.search` already does its lexical+embedding scoring in plain
-Lua over rows, not via a SQLite virtual table. Nothing to replace here.
+Lua over rows (`cosine_similarity`, document.lua:782, called at line
+843), not via a SQLite virtual table. Nothing to replace here.
 
-### Bug found during this investigation (real, live, independent of this migration)
+### Bug found during this investigation (FIXED 2026-07-20, task #77 -- kept here as the original write-up)
 
-`ledger.lua:71-79`, the entity-creation path:
+`ledger.lua:71-79`, the entity-creation path (this was the state at the
+time this bug was found; `src/ledger.lua:90-113` now reads the
+connection-scoped insert id directly instead, per the fix described
+below):
 
 ```lua
 -- database.lua opens a fresh connection per call (see db.lua), so
@@ -299,11 +311,13 @@ not skipped as an oversight.
   which uses static linking + `package.preload` injection instead of
   runtime `.so` loading. Done conditionally (only if `libmariadb-dev`'s
   header is present at build time) so a build without it still
-  succeeds SQLite-only rather than hard-failing -- `libmariadb-dev`
-  isn't yet installed in the production Docker builder image
-  (`elab/schema/platform/Dockerfile`), so today's production binary is
-  SQLite-only, unaffected by any of this until Phase 4 adds it there
-  deliberately.
+  succeeds SQLite-only rather than hard-failing -- at the time this was
+  written, `libmariadb-dev` wasn't yet installed in the production
+  Docker builder image (then `elab/schema/platform/Dockerfile`, now
+  `/root/lims/Dockerfile` after the elab/ repo split -- it has
+  `libmariadb-dev`/`libmariadb3` installed today), so production's
+  binary was SQLite-only at that point, unaffected by any of this until
+  Phase 4 added MariaDB support there deliberately.
 - **Verified end-to-end against a real live MariaDB server**: `platform
   init` (fresh and idempotent), `schema add`, `entity create/list/
   update/archive/unarchive`, `ledger history`, and the concurrent-create
