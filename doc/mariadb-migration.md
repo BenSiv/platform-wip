@@ -132,8 +132,8 @@ chat sessions/CSRF/capability checks). Two simultaneous entity-creation
 requests can both read the same `MAX(event_id)`, then both assign the
 same `entity_id` to two different rows -- silent data corruption, not a
 crash, so it may not have been noticed yet. **This should be fixed
-independent of any MariaDB work** (raised as its own task, #77, in
-`doc/tasks.md`), most simply by wrapping the insert+update in a
+independent of any MariaDB work** (raised as its own task, #77), most
+simply by wrapping the insert+update in a
 transaction with `BEGIN IMMEDIATE` (SQLite) to serialize writers, or by
 switching to a real per-request persistent connection and
 `last_insert_rowid()` (SQLite) / `LAST_INSERT_ID()` (MariaDB), which
