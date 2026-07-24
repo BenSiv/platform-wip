@@ -152,3 +152,20 @@ teardown() {
     # object from empty array) -- still a valid, empty JSON result either way.
     [ "$output" = "{}" ] || [ "$output" = "[]" ]
 }
+
+@test "entity field-map returns a real {field_value: id} map keyed on an arbitrary column, not just external_id" {
+    "$BIN" entity create reagent lot_number=LOT-1 concentration=5
+    "$BIN" entity create reagent lot_number=LOT-2 concentration=10
+    "$BIN" entity create reagent lot_number=LOT-3 concentration=5
+
+    run "$BIN" entity field-map reagent lot_number
+    [[ "$output" =~ '"LOT-1":1' ]]
+    [[ "$output" =~ '"LOT-2":2' ]]
+    [[ "$output" =~ '"LOT-3":3' ]]
+}
+
+@test "entity field-map returns an empty result for an unregistered entity type, not an error" {
+    run "$BIN" entity field-map nonexistent_type lot_number
+    [ "$status" -eq 0 ]
+    [ "$output" = "{}" ] || [ "$output" = "[]" ]
+}

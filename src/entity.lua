@@ -879,6 +879,37 @@ function entity.do_entity(cmd_args, db_path)
         return
     end
 
+    -- {field_value: id} for every row of `entity_type` with a non-null,
+    -- non-empty value for `field_name` -- same backend-agnostic lookup
+    -- as external-ids, for an importer keying off some other natural
+    -- column instead of (or in addition to) external_id -- e.g.
+    -- convert_entries_to_pages.py's own experiment.number -> id lookup,
+    -- which had the exact same hardcoded-SQLite-file bug external-ids
+    -- was added to fix, just never updated to use it.
+    if action == "field-map" then
+        entity_type = cmd_args[2]
+        field_name = cmd_args[3]
+        if entity_type == nil or field_name == nil then
+            print("Usage: fossci entity field-map <type> <field>")
+            return
+        end
+        result = {}
+        if db.table_exists(db_path, entity_type) then
+            quoted_field = db.quote_ident(field_name)
+            rows = db.query(db_path, string.format(
+                "SELECT %s AS field_value, id FROM %s WHERE %s IS NOT NULL AND %s != '';",
+                quoted_field, entity_type, quoted_field, quoted_field
+            ))
+            if rows != nil then
+                for _, row in ipairs(rows) do
+                    result[tostring(row.field_value)] = tonumber(row.id)
+                end
+            end
+        end
+        print(json.encode(result))
+        return
+    end
+
     -- task #113: lets an external importer find every existing row
     -- referencing a given parent (e.g. an entity_type with no stable
     -- per-row external_id of its own, like a Mixture ingredient line
@@ -958,7 +989,7 @@ function entity.do_entity(cmd_args, db_path)
         return
     end
 
-    print("Usage: fossci entity <create|list|show|update|validate-json|create-json|update-json|external-ids|list-by-field> [args]")
+    print("Usage: fossci entity <create|list|show|update|validate-json|create-json|update-json|external-ids|field-map|list-by-field> [args]")
 end
 
 -- CLI entry point: `fossci extension <list|show|approve|revoke|run-pending> [args]`
